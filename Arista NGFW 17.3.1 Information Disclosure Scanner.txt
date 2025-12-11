@@ -1,0 +1,87 @@
+=============================================================================================================================================
+| # Title     : Arista NGFW 17.3.1 Information Disclosure Scanner                                                                           |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://edge.arista.com/ng-firewall/                                                                                        |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212504/ 
+
+[+] Summary :  The vulnerability allows remote unauthenticated connections to access the internal RPC handler component via:
+              /capture/handler.py/load_rpc_manager
+               This script PASSIVELY tests Arista NGFW systems for vulnerability. 
+
+[+]  Usage :   * : Save as: poc.php
+                   Run    : php scan.php http[s]://TARGET
+
+Detection Logic:
+----------------
+500 + “Mod_python error”  → Vulnerable
+404 + <body class="loginPage"> → Not Vulnerable
+Other → Not Arista NGFW
+
+Output:
+-------
+[!] Target appears VULNERABLE
+[+] Target is not affected
+[?] Not Arista NGFW (or protected)
+[+]  POC :	
+
+<?php
+
+
+if ($argc < 2) {
+    echo "Usage: php scan.php http[s]://TARGET\n";
+    exit;
+}
+
+$target = trim($argv[1]);
+
+// Validate URL format
+if (!preg_match("#^https?://#i", $target)) {
+    echo "[-] Invalid URL. Must start with http:// or https://\n";
+    exit;
+}
+
+$url = rtrim($target, "/") . "/capture/handler.py/load_rpc_manager";
+
+echo "[*] Testing $target\n";
+
+// HTTP Request Options
+$options = [
+    "http" => [
+        "method"  => "GET",
+        "header"  => "User-Agent: Mozilla/5.0\r\n",
+        "timeout" => 15
+    ],
+    "ssl" => [
+        "verify_peer"      => false,
+        "verify_peer_name" => false
+    ]
+];
+
+$context = stream_context_create($options);
+
+$result = @file_get_contents($url, false, $context);
+
+if ($result === false) {
+    echo "[-] Request failed or target unreachable\n";
+    exit;
+}
+
+// Extract response headers
+$headers = isset($http_response_header) ? implode("\n", $http_response_header) : "";
+
+// Detection Logic
+if (strpos($result, "Mod_python error") !== false && strpos($headers, "500") !== false) {
+    echo "[!] Target appears VULNERABLE to CVE-2025-6980 - Patch immediately!\n";
+} elseif (strpos($headers, "404") !== false && strpos($result, '<body class="loginPage">') !== false) {
+    echo "[+] Target does NOT appear affected.\n";
+} else {
+    echo "[?] Target does not behave like Arista NGFW or is protected.\n";
+}
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

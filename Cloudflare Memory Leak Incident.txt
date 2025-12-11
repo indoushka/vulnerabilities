@@ -1,0 +1,97 @@
+=============================================================================================================================================
+| # Title     : Cloudflare Memory Leak Incident                                                                                             |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://www.cloudflare.com/                                                                                                 |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212490/ &
+
+[+] Summary : A Python-based scanner imitates CloudBleed-style leakage detection by fetching raw HTTP response data from a target website, converting it to hexadecimal, 
+             and searching for sensitive memory patterns such as sessions, passwords, tokens, cookies, AWS keys, and stack traces. 
+			 It does not exploit the server, but identifies potential leaks revealed in the response body.
+
+
+[+]  POC :	python poc.py
+
+#!/usr/bin/env python3
+import re
+import requests
+import binascii
+
+# ================================
+#  CONFIG
+# ================================
+TARGET_URL = "https://127.0.0.1/"
+TIMEOUT = 10
+MAX_HEX_DUMP = None  # None = unlimited
+
+# ================================
+#  SIGNATURES (Memory-leak patterns)
+# ================================
+PATTERNS = [
+    (b"session", "POTENTIAL_SESSION_LEAK"),
+    (b"cookie", "POTENTIAL_COOKIE_LEAK"),
+    (b"password", "POTENTIAL_PASSWORD_LEAK"),
+    (b"token", "POTENTIAL_TOKEN_LEAK"),
+    (b"bearer", "POTENTIAL_OAUTH_LEAK"),
+    (b"key=", "POTENTIAL_KEY_LEAK"),
+    (b"aws", "POTENTIAL_AWS_LEAK"),
+    (b"stacktrace", "POTENTIAL_STACKTRACE_LEAK"),
+    (b"malloc", "POTENTIAL_ALLOCATOR_LEAK"),
+    (b"free(", "POTENTIAL_FREE_MEMORY_REFERENCE"),
+]
+
+# ================================
+#  HTTP Fetch
+# ================================
+def fetch():
+    try:
+        r = requests.get(TARGET_URL, timeout=TIMEOUT)
+        return r.content
+    except:
+        return b""
+
+# ================================
+#  Hex Dump Generator (CloudBleed Style)
+# ================================
+def hex_dump(data):
+    hexd = binascii.hexlify(data).decode()
+    return hexd if MAX_HEX_DUMP is None else hexd[:MAX_HEX_DUMP]
+
+# ================================
+#  Scanner Core
+# ================================
+def scan_memory():
+    raw = fetch()
+    if not raw:
+        print("[!] Failed to fetch target")
+        return
+
+    print(f"[+] Memory Size Captured: {len(raw)} bytes")
+    print("=" * 80)
+
+    HEX = hex_dump(raw)
+    print("[*] Full HEX DUMP (No Truncation):\n")
+    print(HEX)
+    print("\n" + "=" * 80)
+
+    for signature, label in PATTERNS:
+        if signature.lower() in raw.lower():
+            print(f"[!] MATCH: {label}")
+            print(f"    Pattern: {signature}")
+            print("    Extract:")
+            idx = raw.lower().find(signature.lower())
+            start = max(0, idx - 64)
+            end = min(len(raw), idx + 512)
+            leak_block = raw[start:end]
+            print(hex_dump(leak_block))
+            print("-" * 60)
+
+if __name__ == "__main__":
+    scan_memory()
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

