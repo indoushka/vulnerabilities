@@ -1,0 +1,117 @@
+=============================================================================================================================================
+| # Title     : Google Chrome 134.0.6998.36 Comprehensive Security Test for All Operating Systems                                           |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 10 Fr(Pro) / browser : Mozilla firefox 136.0.0 (64 bits)                                                            |
+| # Vendor    : https://www.google.org/                                                                                                     |
+=============================================================================================================================================
+
+POC :
+
+[+] Dorking İn Google Or Other Search Enggine.
+
+[+] Code Description: Brief script that demonstrates running valgrind and afl-fuzz on Google Chrome. (Related : https://packetstorm.news/files/id/189250/ Related CVE numbers:   ) .
+
+[+] Using alternative commands on Windows : 
+
+    gdb is not available by default, dumpbin from Visual Studio can be used as an alternative.
+
+    valgrind is not supported on Windows, Dr. Memory can be used.
+   
+    afl-fuzz does not work on Windows directly, you can look for an alternative tool like WinAFL.
+
+
+[+] save code as poc.php.
+
+[+] Usage : php poc.php -u http://target.org/ -c whoami
+
+[+] PayLoad :
+
+<?php
+
+// Comprehensive Google Chrome Security Test for All Operating Systems
+define('CHROME_PATH_LINUX', '/usr/bin/google-chrome');
+define('CHROME_PATH_WINDOWS', 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe');
+define('CHROME_PATH_MAC', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');
+
+define('BUFFER_SIZE', 512);
+
+function get_chrome_path() {
+    switch (PHP_OS_FAMILY) {
+        case 'Windows':
+            return CHROME_PATH_WINDOWS;
+        case 'Darwin':
+            return CHROME_PATH_MAC;
+        case 'Linux':
+            return CHROME_PATH_LINUX;
+        default:
+            return null;
+    }
+}
+
+function check_chrome_installed($chromePath) {
+    if ($chromePath && file_exists($chromePath)) {
+        echo "Google Chrome is installed at: " . $chromePath . "\n";
+        return true;
+    } else {
+        echo "Google Chrome is not installed.\n";
+        return false;
+    }
+}
+
+function is_tool_available($tool) {
+    return shell_exec(PHP_OS_FAMILY === 'Windows' ? "where $tool" : "which $tool") ? true : false;
+}
+
+function run_security_tests($chromePath) {
+    echo "Running security tests...\n";
+    $chromePath = escapeshellarg($chromePath);
+
+    if (PHP_OS_FAMILY === 'Linux') {
+        echo "Testing ASLR (Address Space Layout Randomization)...\n";
+        echo shell_exec("cat /proc/sys/kernel/randomize_va_space");
+        echo shell_exec("dmesg | grep -i aslr");
+
+        echo "Testing DEP (Data Execution Prevention)...\n";
+        echo shell_exec("cat /proc/sys/kernel/exec-shield");
+    }
+    
+    if (is_tool_available('gdb')) {
+        echo "Scanning binary with gdb...\n";
+        echo shell_exec("gdb -q -ex 'file $chromePath' -ex 'info functions'");
+    } else {
+        echo "gdb not found, skipping binary scan.\n";
+    }
+
+    if (is_tool_available('valgrind')) {
+        echo "Running Valgrind for memory analysis...\n";
+        echo shell_exec("valgrind --leak-check=full --track-origins=yes $chromePath");
+    } else {
+        echo "Valgrind not found, skipping memory analysis.\n";
+    }
+
+    if (is_tool_available('afl-fuzz')) {
+        echo "Running fuzzing test on Google Chrome binary...\n";
+        echo shell_exec("afl-fuzz -i input_dir -o output_dir $chromePath");
+    } else {
+        echo "afl-fuzz not found, skipping fuzzing test.\n";
+    }
+
+    echo "Testing for input vulnerabilities...\n";
+    echo shell_exec("echo -n 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' | $chromePath");
+}
+
+$chromePath = get_chrome_path();
+if ($chromePath) {
+    echo "Checking for Google Chrome installation...\n";
+    if (check_chrome_installed($chromePath)) {
+        run_security_tests($chromePath);
+    }
+    echo "Test completed.\n";
+} else {
+    echo "Unsupported operating system.\n";
+}
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

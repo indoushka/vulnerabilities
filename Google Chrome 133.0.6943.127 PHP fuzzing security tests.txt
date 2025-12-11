@@ -1,0 +1,104 @@
+=============================================================================================================================================
+| # Title     : Google Chrome 133.0.6943.127 PHP fuzzing security tests                                                                     |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 10 Fr(Pro) / browser : Mozilla firefox 135.0.1 (64 bits)                                                            |
+| # Vendor    : https://google.com                                                                                                          |
+=============================================================================================================================================
+
+POC :
+
+[+] Dorking İn Google Or Other Search Enggine.
+
+[+] Code Description: This code is written in PHP and is intended to perform security testing on Google Chrome browser through several tools such as GDB, Valgrind, AFL Fuzzer and others.
+    
+	Run security tests on Google Chrome on Linux and Windows.
+	
+    Note: Some commands (gdb, valgrind, afl-fuzz) may not work on Windows, and you will need a Linux or WSL environment to run them.
+	
+[+] save code as poc.php .
+
+[+] USage : php poc.php 
+
+[+] PayLoad :
+
+<?php
+
+// تحديد المسار الافتراضي لمتصفح Google Chrome حسب نظام التشغيل
+if (PHP_OS_FAMILY === 'Windows') {
+    define("CHROME_PATH", "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe");
+} else {
+    $chromePath = trim(shell_exec("which google-chrome"));
+    define("CHROME_PATH", $chromePath ?: "/usr/bin/google-chrome");
+}
+
+// التحقق مما إذا كان Google Chrome مثبتًا
+function checkChromeInstalled() {
+    if (file_exists(CHROME_PATH)) {
+        echo "Google Chrome مثبت في: " . CHROME_PATH . "\n";
+        return true;
+    } else {
+        echo "Google Chrome غير مثبت.\n";
+        return false;
+    }
+}
+
+// اختبار ASLR (Address Space Layout Randomization)
+function testASLR() {
+    echo "اختبار ASLR...\n";
+    echo shell_exec("cat /proc/sys/kernel/randomize_va_space");
+    echo shell_exec("dmesg | grep -i aslr");
+}
+
+// اختبار DEP (Data Execution Prevention)
+function testDEP() {
+    echo "اختبار DEP...\n";
+    echo shell_exec("cat /proc/sys/kernel/exec-shield");
+}
+
+// فحص Google Chrome باستخدام GDB
+function scanBinaryWithGDB() {
+    echo "فحص Google Chrome باستخدام GDB...\n";
+    echo shell_exec("gdb -q -ex 'file " . CHROME_PATH . "' -ex 'info functions'");
+}
+
+// تشغيل Valgrind لتحليل الذاكرة
+function runValgrind() {
+    echo "تشغيل Valgrind لتحليل الذاكرة...\n";
+    echo shell_exec("valgrind --leak-check=full --track-origins=yes " . CHROME_PATH);
+}
+
+// تشغيل AFL Fuzzer لاختبار Google Chrome
+function runFuzzing() {
+    echo "تشغيل AFL Fuzzer لاختبار Google Chrome...\n";
+    echo shell_exec("afl-fuzz -i input_dir -o output_dir " . CHROME_PATH);
+}
+
+// اختبار ثغرات الإدخال
+function testInputVulnerabilities() {
+    echo "اختبار ثغرات الإدخال في Google Chrome...\n";
+    echo shell_exec("echo -n 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' | " . CHROME_PATH);
+}
+
+// تشغيل جميع الاختبارات الأمنية
+function runSecurityTests() {
+    echo "تشغيل الاختبارات الأمنية الشاملة...\n";
+    testASLR();
+    testDEP();
+    scanBinaryWithGDB();
+    runValgrind();
+    runFuzzing();
+    testInputVulnerabilities();
+}
+
+// تنفيذ البرنامج
+if (checkChromeInstalled()) {
+    runSecurityTests();
+}
+
+echo "تم الانتهاء من الاختبار.\n";
+
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

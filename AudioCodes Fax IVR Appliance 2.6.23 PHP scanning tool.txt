@@ -1,0 +1,77 @@
+=============================================================================================================================================
+| # Title     : AudioCodes Fax/IVR Appliance 2.6.23 PHP scanning tool                                                                       |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.audiocodes.com/                                                                                                 |
+=============================================================================================================================================
+
+POC :
+
+[+] A non-destructive PHP scanning tool for audio codes (named: AudioCodes Scanner - PHP).
+
+[+] What the tool includes:
+
+    An HTML + AJAX interface with RTL font.
+
+[+] Safe scanning only:
+
+    GET/HEAD requests for common paths (including those in https://packetstorm.news/files/id/211819/) without sending any exploit payloads.
+
+    Reveals the phpinfo page if it exists, and extracts the server headers and a short text snippet.
+
+    Exports results to CSV and TXT formats ready for use.
+
+    Central PHP code that makes the requests using cURL (or fallback to file_get_contents if unavailable).
+
+[+] Usage instructions:
+
+    Run the web interface and enter the address in the format host:port or http://host:port.
+
+    Review the results, and download the CSV file for documentation or to send to your system administrator.
+
+[+] Security and Responsibility Notes:
+
+    This tool does not exploit vulnerabilities—its purpose is solely to scan for and document exposures.
+
+    For any actual exploit or penetration testing, you must have explicit permission from the system owner.
+	
+[+] How to use
+
+[+] Step 1 — Create the project folder
+
+[+] Go to: C:\xampp\htdocs\ and create a new folder like: audiocodes_scan
+
+[+] Step 2 — Place the four files as follows:
+
+    Inside the audiocodes_scan folder, place:
+
+    backend.php
+    frontend.html
+    script.js
+    style.css
+	
+[+] Run XAMPP
+
+  ✔ Apache
+  ✔ MySQL (not required, unless you are using a database in other projects).
+  
+[+] Open the tool in your browser
+
+[+] Open your browser and then:
+
+    http://localhost/audiocodes_scan/frontend.html
+
+    Enter IP or domain
+
+    Scan button
+
+[+] Results table
+
+   Option to export CSV
+
+   Option to export TXT
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

