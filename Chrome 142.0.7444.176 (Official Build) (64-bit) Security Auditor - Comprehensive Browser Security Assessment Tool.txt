@@ -1,0 +1,418 @@
+=============================================================================================================================================
+| # Title     : Chrome 142.0.7444.176 (Official Build) (64-bit) Security Auditor - Comprehensive Browser Security Assessment Tool           |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.google.com/chrome/                                                                                              |
+=============================================================================================================================================
+
+POC : 
+
+[+] References : https://packetstorm.news/files/id/189250/  
+
+
+[+] Summary : 
+              Chrome Security Auditor is a comprehensive PHP-based security assessment tool designed to perform in-depth security analysis of Google Chrome browser installations on Linux systems. 
+              The tool conducts multiple security tests including memory analysis, binary examination, system security settings verification, and vulnerability assessment.
+
+      
+
+[+] POC :  php poc.php
+
+<?php
+/**
+ * Chrome Security Auditor - PHP Version
+ * أداة فحص أمان متصفح Chrome بإصدار PHP
+ * 
+ * @author indoushka
+ * @version 1.0
+ */
+
+class ChromeSecurityAuditor {
+    private $chromePaths = [
+        '/usr/bin/google-chrome',
+        '/usr/bin/chromium',
+        '/usr/bin/chromium-browser',
+        '/snap/bin/chromium',
+        '/opt/google/chrome/chrome'
+    ];
+    
+    private $testResults = [];
+    private $debugMode = false;
+
+    public function __construct($debug = false) {
+        $this->debugMode = $debug;
+        $this->log("بدء أداة فحص أمان Chrome");
+    }
+
+    /**
+     * تسجيل الرسائل مع الطابع الزمني
+     */
+    private function log($message, $type = "INFO") {
+        $timestamp = date('Y-m-d H:i:s');
+        $formattedMessage = "[$timestamp] [$type] $message\n";
+        
+        if ($type === 'ERROR') {
+            file_put_contents('php://stderr', $formattedMessage);
+        } else {
+            echo $formattedMessage;
+        }
+    }
+
+    /**
+     * تنفيذ أوامر النظام بأمان
+     */
+    private function executeCommand($command, $timeout = 30) {
+        $this->log("تنفيذ الأمر: $command", "DEBUG");
+        
+        $output = [];
+        $returnCode = 0;
+        
+        $descriptors = [
+            0 => ['pipe', 'r'], // stdin
+            1 => ['pipe', 'w'], // stdout
+            2 => ['pipe', 'w']  // stderr
+        ];
+        
+        $process = proc_open($command . ' 2>&1', $descriptors, $pipes);
+        
+        if (is_resource($process)) {
+            // إغلاق stdin
+            fclose($pipes[0]);
+            
+            // قراءة stdout
+            $stdout = stream_get_contents($pipes[1]);
+            fclose($pipes[1]);
+            
+            // قراءة stderr
+            $stderr = stream_get_contents($pipes[2]);
+            fclose($pipes[2]);
+            
+            $returnCode = proc_close($process);
+            
+            $result = [
+                'stdout' => trim($stdout),
+                'stderr' => trim($stderr),
+                'return_code' => $returnCode
+            ];
+            
+            $this->testResults[] = [
+                'command' => $command,
+                'result' => $result
+            ];
+            
+            return $result;
+        }
+        
+        return ['stdout' => '', 'stderr' => 'Failed to execute command', 'return_code' => -1];
+    }
+
+    /**
+     * التحقق من تثبيت Chrome
+     */
+    public function checkChromeInstalled() {
+        $this->log("التحقق من تثبيت Google Chrome...");
+        
+        foreach ($this->chromePaths as $path) {
+            if (file_exists($path) && is_executable($path)) {
+                $this->log("تم العثور على Chrome في: $path", "SUCCESS");
+                return $path;
+            }
+        }
+        
+        $this->log("لم يتم العثور على Chrome في المسارات المعروفة", "ERROR");
+        return false;
+    }
+
+    /**
+     * اختبار إعدادات ASLR
+     */
+    public function testASLR() {
+        $this->log("اختبار إعدادات ASLR...");
+        
+        $result = $this->executeCommand('cat /proc/sys/kernel/randomize_va_space');
+        
+        if ($result['return_code'] === 0) {
+            $aslrValue = trim($result['stdout']);
+            $this->log("إعداد ASLR الحالي: $aslrValue");
+            
+            switch ($aslrValue) {
+                case '0':
+                    $this->log("ASLR معطل - خطر أمني!", "ERROR");
+                    break;
+                case '1':
+                    $this->log("ASLR مفعل جزئياً", "WARNING");
+                    break;
+                case '2':
+                    $this->log("ASLR مفعل بالكامل", "SUCCESS");
+                    break;
+                default:
+                    $this->log("قيمة ASLR غير معروفة: $aslrValue", "WARNING");
+            }
+            
+            return $aslrValue;
+        }
+        
+        $this->log("فشل في قراءة إعدادات ASLR", "ERROR");
+        return false;
+    }
+
+    /**
+     * اختبار إعدادات DEP/NX
+     */
+    public function testDEP() {
+        $this->log("اختبار إعدادات DEP/NX...");
+        
+        $result = $this->executeCommand('grep -i nx /proc/cpuinfo | head -5');
+        
+        if ($result['return_code'] === 0 && !empty($result['stdout'])) {
+            $this->log("المعالج يدعم تقنية NX", "SUCCESS");
+            $this->log("تفاصيل NX: " . $result['stdout']);
+            return true;
+        }
+        
+        $this->log("المعالج لا يدعم NX أو لا يمكن التحقق", "WARNING");
+        return false;
+    }
+
+    /**
+     * فحص الذاكرة باستخدام Valgrind
+     */
+    public function runValgrindCheck($chromePath) {
+        $this->log("بدء فحص الذاكرة باستخدام Valgrind...");
+        
+        // التحقق من تثبيت Valgrind
+        $valgrindCheck = $this->executeCommand('which valgrind');
+        if ($valgrindCheck['return_code'] !== 0) {
+            $this->log("Valgrind غير مثبت", "ERROR");
+            return false;
+        }
+        
+        $command = "timeout 30 valgrind --leak-check=summary " . 
+                  escapeshellarg($chromePath) . 
+                  " --headless --disable-gpu --no-sandbox --disable-extensions --no-first-run --disable-features=VizDisplayCompositor";
+        
+        $result = $this->executeCommand($command);
+        
+        if (strpos($result['stdout'], 'ERROR SUMMARY') !== false) {
+            preg_match('/ERROR SUMMARY:\s*(\d+)/', $result['stdout'], $matches);
+            $errors = $matches[1] ?? 'unknown';
+            $this->log("عدد الأخطاء في الذاكرة: $errors", $errors > 0 ? "WARNING" : "SUCCESS");
+        }
+        
+        return $result;
+    }
+
+    /**
+     * تحليل الملف الثنائي
+     */
+    public function analyzeBinary($chromePath) {
+        $this->log("تحليل الملف الثنائي لـ Chrome...");
+        
+        $checks = [
+            'file_type' => 'file ' . escapeshellarg($chromePath),
+            'security_checks' => 'checksec --file=' . escapeshellarg($chromePath) . ' 2>/dev/null || echo "checksec not available"',
+            'symbols' => 'nm ' . escapeshellarg($chromePath) . ' | head -20',
+            'strings_analysis' => 'strings ' . escapeshellarg($chromePath) . ' | head -30'
+        ];
+        
+        foreach ($checks as $checkName => $command) {
+            $this->log("إجراء فحص: $checkName");
+            $result = $this->executeCommand($command);
+            
+            if ($result['return_code'] === 0) {
+                $this->log("نتيجة $checkName: " . substr($result['stdout'], 0, 200) . "...");
+            }
+        }
+    }
+
+    /**
+     * اختبار مدخلات الخطرة
+     */
+    public function testDangerousInputs($chromePath) {
+        $this->log("اختبار المدخلات الخطرة...");
+        
+        $testCases = [
+            'buffer_overflow' => str_repeat('A', 10000),
+            'format_string' => '%s%s%s%s%s%s%s%s',
+            'special_chars' => '../../../../etc/passwd',
+            'long_path' => str_repeat('/a', 500)
+        ];
+        
+        foreach ($testCases as $testName => $testInput) {
+            $this->log("اختبار: $testName");
+            
+            $tempFile = tempnam(sys_get_temp_dir(), 'chrome_test_');
+            file_put_contents($tempFile, $testInput);
+            
+            $command = 'timeout 5 ' . escapeshellarg($chromePath) . 
+                      ' --headless --disable-gpu --no-sandbox ' .
+                      escapeshellarg($tempFile);
+            
+            $result = $this->executeCommand($command);
+            
+            if ($result['return_code'] !== 0 && $result['return_code'] !== 124) {
+                $this->log("اختبار $testName تسبب في سلوك غير طبيعي", "WARNING");
+            }
+            
+            unlink($tempFile);
+        }
+    }
+
+    /**
+     * فحص أذونات الملفات
+     */
+    public function checkFilePermissions($chromePath) {
+        $this->log("فحص أذونات ملف Chrome...");
+        
+        $permissions = fileperms($chromePath);
+        $owner = fileowner($chromePath);
+        $group = filegroup($chromePath);
+        
+        $this->log("أذونات الملف: " . substr(sprintf('%o', $permissions), -4));
+        $this->log("مالك الملف: " . posix_getpwuid($owner)['name']);
+        $this->log("مجموعة الملف: " . posix_getgrpid($group)['name']);
+        
+        // التحقق من أن الملف لا يمكن كتابته من قبل الآخرين
+        if ($permissions & 0x0002) {
+            $this->log("تحذير: الملف قابل للكتابة من قبل الآخرين!", "ERROR");
+            return false;
+        }
+        
+        $this->log("أذونات الملف آمنة", "SUCCESS");
+        return true;
+    }
+
+    /**
+     * فحص شامل للأمان
+     */
+    public function runComprehensiveSecurityScan() {
+        $this->log("بدء الفحص الشامل للأمان...");
+        
+        $chromePath = $this->checkChromeInstalled();
+        if (!$chromePath) {
+            $this->log("لا يمكن المتابعة بدون تثبيت Chrome", "ERROR");
+            return false;
+        }
+        
+        $tests = [
+            'ASLR Test' => fn() => $this->testASLR(),
+            'DEP Test' => fn() => $this->testDEP(),
+            'File Permissions' => fn() => $this->checkFilePermissions($chromePath),
+            'Binary Analysis' => fn() => $this->analyzeBinary($chromePath),
+            'Memory Check' => fn() => $this->runValgrindCheck($chromePath),
+            'Input Testing' => fn() => $this->testDangerousInputs($chromePath)
+        ];
+        
+        $results = [];
+        foreach ($tests as $testName => $testFunction) {
+            $this->log("جاري: $testName");
+            try {
+                $results[$testName] = $testFunction();
+            } catch (Exception $e) {
+                $this->log("فشل الاختبار: $testName - " . $e->getMessage(), "ERROR");
+                $results[$testName] = false;
+            }
+        }
+        
+        return $results;
+    }
+
+    /**
+     * إنشاء تقرير مفصل
+     */
+    public function generateReport() {
+        $this->log("إنشاء التقرير النهائي...");
+        
+        $report = [
+            'timestamp' => date('Y-m-d H:i:s'),
+            'system_info' => [
+                'php_version' => PHP_VERSION,
+                'os' => php_uname('s'),
+                'hostname' => php_uname('n')
+            ],
+            'test_results' => $this->testResults
+        ];
+        
+        $reportFile = 'chrome_security_audit_' . date('Ymd_His') . '.json';
+        file_put_contents($reportFile, json_encode($report, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+        
+        $this->log("تم حفظ التقرير في: $reportFile", "SUCCESS");
+        return $reportFile;
+    }
+
+    /**
+     * عرض النتائج
+     */
+    public function displayResults() {
+        $this->log("عرض النتائج النهائية...");
+        
+        $successCount = 0;
+        $warningCount = 0;
+        $errorCount = 0;
+        
+        foreach ($this->testResults as $result) {
+            if ($result['result']['return_code'] === 0) {
+                $successCount++;
+            } elseif (!empty($result['result']['stderr'])) {
+                $errorCount++;
+            } else {
+                $warningCount++;
+            }
+        }
+        
+        $this->log("النتائج النهائية:");
+        $this->log("الاختبارات الناجحة: $successCount", "SUCCESS");
+        $this->log("التحذيرات: $warningCount", "WARNING");
+        $this->log("الأخطاء: $errorCount", "ERROR");
+    }
+}
+
+// التنفيذ الرئيسي
+if (php_sapi_name() === 'cli') {
+    echo "========================================\n";
+    echo "    Chrome Security Auditor - PHP\n";
+    echo "    أداة فحص أمان متصفح Chrome\n";
+    echo "========================================\n\n";
+    
+    $debug = in_array('--debug', $argv) || in_array('-d', $argv);
+    $help = in_array('--help', $argv) || in_array('-h', $argv);
+    
+    if ($help) {
+        echo "الاستخدام:\n";
+        echo "  php chrome_auditor.php [OPTIONS]\n\n";
+        echo "الخيارات:\n";
+        echo "  --debug, -d     تفعيل وضع التصحيح\n";
+        echo "  --help, -h      عرض هذه المساعدة\n";
+        echo "  --report, -r    إنشاء تقرير مفصل\n";
+        exit(0);
+    }
+    
+    try {
+        $auditor = new ChromeSecurityAuditor($debug);
+        $results = $auditor->runComprehensiveSecurityScan();
+        
+        if ($results) {
+            $auditor->displayResults();
+            
+            if (in_array('--report', $argv) || in_array('-r', $argv)) {
+                $reportFile = $auditor->generateReport();
+                echo "تم إنشاء التقرير: $reportFile\n";
+            }
+        } else {
+            echo "فشل الفحص الأمني\n";
+            exit(1);
+        }
+        
+    } catch (Exception $e) {
+        echo "خطأ: " . $e->getMessage() . "\n";
+        exit(1);
+    }
+} else {
+    echo "هذا السكريبت مصمم للتشغيل من سطر الأوامر فقط\n";
+    exit(1);
+}
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

