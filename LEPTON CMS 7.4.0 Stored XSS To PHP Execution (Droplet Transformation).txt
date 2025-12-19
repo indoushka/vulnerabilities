@@ -1,0 +1,63 @@
+=============================================================================================================================================
+| # Title     : LEPTON CMS 7.4.0 Stored XSS To PHP Execution (Droplet Transformation)                                                       |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://www.opensourcecms.com/lepton/                                                                                       |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/211037/ 
+
+[+] Summary    : A vulnerability exists in LEPTON CMS which allows a stored XSS payload to escalate into PHP execution through the Droplet Engine.
+
+[+] Droplet content is evaluated using:
+
+    evalDroplets($templateOutput);
+
+The vulnerable design enables content injection to lead directly to execution 
+of arbitrary PHP code. Successful exploitation does not require authenticated 
+access if an attacker can influence page content.
+
+This transformation represents a critical architectural flaw enabling privilege 
+escalation from web-injected JavaScript to backend PHP execution.
+
+-------------------------------------------------------------------------------
+Vulnerable Code:
+-------------------------------------------------------------------------------
+    evalDroplets($templateOutput);
+
+Droplet contents are processed and executed as PHP without proper filtering.
+
+-------------------------------------------------------------------------------
+Proof Of Concept (PoC):
+-------------------------------------------------------------------------------
+Place the following payload in any editable content area (e.g., via CMS editor):
+
+    <script>console.log('LEPTON-XSS-STORED');</script>
+    [[ droplet: <?php echo "LEPTON-DROPLET-PHP-EXEC"; ?> ]]
+
+Displayed results:
+- Browser logs: "LEPTON-XSS-STORED"
+- Page renders: "LEPTON-DROPLET-PHP-EXEC"
+
+This confirms stored XSS → PHP execution transformation.
+
+-------------------------------------------------------------------------------
+Instructions To Save And Run PoC:
+-------------------------------------------------------------------------------
+1) Insert the payload into any page content via the LEPTON editor.
+2) Save the page.
+3) Visit the page in a browser.
+4) Observe:
+   - Console output showing stored XSS
+   - Page output showing PHP execution
+
+-------------------------------------------------------------------------------
+Impact:
+-------------------------------------------------------------------------------
+- Full backend compromise once PHP execution is abused
+- Server disclosure and potential RCE escalation
+- Malicious persistence possible via page content injection
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

