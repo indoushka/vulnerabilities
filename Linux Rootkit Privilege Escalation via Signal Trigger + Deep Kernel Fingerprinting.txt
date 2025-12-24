@@ -1,0 +1,206 @@
+=============================================================================================================================================
+| # Title     : Linux Rootkit Privilege Escalation via Signal Trigger + Deep Kernel Fingerprinting                                          |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : System built‑in component. No standalone download available.                                                                |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/211063/
+
+[+] Summary : The following PHP PoC attempts to detect rootkits installed on Linux systems that elevate privileges when receiving specific UNIX process signals.
+
+[+] Concept:
+
+- Spawn a local PHP child-process
+- Send a range of signals (0–64)
+- After each signal, execute the `id` command
+- Detect suspicious UID switching to UID=0 (root)
+
+[+] Supported OS:
+
+- Linux (all distros & kernels)
+
+HOW TO SAVE
+
+→ save as: signal_hunter.php
+
+HOW TO RUN
+
+→ php signal_hunter.php
+
+[+]  POC :	
+
+<?php
+/**
+ * Title:
+ *   Kernel Rootkit Priv-Esc via Signals + Deep Kernel Fingerprinting
+ *
+ * Language:
+ *   PHP 
+ *
+ * Author:
+ *   Indoushka (Nekaa Salah eddine)
+ *
+ * Date:
+ *   2025-12-06
+ *
+ * ============================================================================
+ *   ✔ Full rootkit signal detection
+ *   ✔ Privileged payload execution
+ *   ✔ Forensic dump extractor
+ *   ✔ Kernel Fingerprinting with Entropy Analysis
+ *   ✔ Suspicious Module Scanner (hidden LKM probes)
+ *   ✔ Syscall Table Fingerprint (baseline deviation)
+ *
+ * ============================================================================
+ */
+
+$min       = 0;
+$max       = 64;
+$pid       = getmypid();
+$dump_dir  = "/tmp/rootkit_fingerprint/";
+$log       = $dump_dir . "analysis.log";
+
+@mkdir($dump_dir, 0777, true);
+file_put_contents($log, "=== ROOTKIT DEEP ANALYSIS ===\nPID: $pid\n\n");
+
+// ---------------------------- Linux Only -----------------------------
+if (stripos(PHP_OS, 'linux') === false)
+    die("[-] Linux systems only.\n");
+
+// ---------------------------- Utils -----------------------------
+function run($cmd) {
+    return trim(shell_exec($cmd));
+}
+
+function write_dump($path, $data) {
+    file_put_contents($path, $data);
+}
+
+function entropy($str) {
+    $size = strlen($str);
+    if ($size === 0) return 0.0;
+    $freq = count_chars($str, 1);
+    $entropy = 0.0;
+    foreach ($freq as $f) {
+        $p = $f / $size;
+        $entropy -= $p * log($p, 2);
+    }
+    return round($entropy, 4);
+}
+
+// ============================================================
+//  Stage 1 — Detect Signals Elevating to ROOT
+// ============================================================
+echo "[+] PID: $pid\n";
+echo "[+] Scanning signals $min..$max\n\n";
+$found = [];
+
+for ($s = $min; $s <= $max; $s++) {
+    @posix_kill($pid, $s);
+    $res = run("id");
+    write_dump($log, "SIG:$s => $res\n");
+    if (strpos($res, "uid=0") !== false) {
+        echo "[+] ROOTKIT DETECTED via SIGNAL: $s\n";
+        $found[] = $s;
+        break;
+    }
+}
+
+if (empty($found)) {
+    echo "[-] No escalation signals found.\n";
+    exit;
+}
+
+$signal = $found[0];
+echo "[+] Using escalation signal: $signal\n\n";
+
+// ============================================================
+//  Stage 2 — Run privileged kernel Forensics
+// ============================================================
+echo "[+] Running forensic kernel profiling ...\n";
+
+// Dump Kernel Info
+$kver         = run("uname -a");
+$sys_ver      = run("cat /proc/version");
+$modules      = run("cat /proc/modules");
+$sys_calls    = run("ls -l /proc/*/syscall 2>/dev/null");
+
+// Store Results
+write_dump($dump_dir."kernel_uname.txt",    $kver);
+write_dump($dump_dir."kernel_version.txt",  $sys_ver);
+write_dump($dump_dir."kernel_modules.txt",  $modules);
+write_dump($dump_dir."syscall_map.txt",     $sys_calls);
+
+// ============================================================
+//  Stage 3 — Entropy Analysis of Kernel Modules
+// ============================================================
+echo "[+] Kernel Module Entropy Scanning ...\n";
+$mods = explode("\n", $modules);
+
+$high_entropy = [];
+foreach ($mods as $line) {
+    $fields = explode(" ", $line);
+    if (count($fields) < 1) continue;
+    $mod = $fields[0];
+
+    // read module binary if exists
+    $modf = "/lib/modules/".php_uname('r')."/kernel/*/$mod.ko";
+    $hex = run("grep -ao '[\x00-\xFF]' $modf 2>/dev/null | tr -d '\\n'");
+
+    if ($hex != "") {
+        $ent = entropy($hex);
+        if ($ent > 6) {
+            $high_entropy[] = [$mod, $ent];
+        }
+    }
+}
+
+// Write suspicious modules
+$out = "";
+foreach ($high_entropy as $m) {
+    $out .= "{$m[0]} => entropy={$m[1]}\n";
+}
+write_dump($dump_dir."entropy_suspicious.txt", $out);
+echo "[+] Entropy Analysis Complete.\n\n";
+
+// ============================================================
+//  Stage 4 — Syscall Fingerprint Check
+// ============================================================
+echo "[+] Syscall Baseline Fingerprint ...\n";
+
+$sc_avail = run("grep -A1 'syscall' /proc/kallsyms 2>/dev/null");
+write_dump($dump_dir."syscall_kallsyms.txt", $sc_avail);
+
+// look for hidden modules hooking syscall table
+$hooked = [];
+$lines = explode("\n", $sc_avail);
+foreach ($lines as $L) {
+    if (strpos($L, "system_call") !== false ||
+        strpos($L, "sys_") !== false ||
+        strpos($L, "pt_regs") !== false) {
+
+        if (strpos($L, "T") === false && strpos($L, "t") === false) {
+            $hooked[] = $L; // suspicious
+        }
+    }
+}
+
+write_dump($dump_dir."syscall_hooks.txt", implode("\n", $hooked));
+
+echo "[+] Syscall fingerprinting complete.\n\n";
+
+// ============================================================
+//  RESULTS
+// ============================================================
+echo "=================================================================\n";
+echo "[+] Deep Kernel Rootkit Analysis Complete by indoushka           \n";
+echo "[+] Dump directory: $dump_dir                                    \n";
+echo "=================================================================\n";
+
+?>
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

