@@ -1,0 +1,21 @@
+=============================================================================================================================================
+| # Title     : FuguHub 8.1 Public Disclosure RSA Private Key in Web-Accessible Documentation                                               |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : http://fuguhub.com                                                                                                          |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/213256/ & 	CVE-2025-65790
+
+[+] Summary    : A web-accessible documentation file was found to contain an embedded RSA private key paired with an X.509 certificate. 
+                The affected file resides within an examples directory and is intended solely for demonstration purposes. 
+				
+[+] POC :
+
+Path : /ba/doc/en/examples/servercon.txt
+
+demo : http://127.0.0.1/fuguhub/ba/doc/en/examples/servercon.txt
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

