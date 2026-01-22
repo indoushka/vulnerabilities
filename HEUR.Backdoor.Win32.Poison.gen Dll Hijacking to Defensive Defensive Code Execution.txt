@@ -1,0 +1,567 @@
+=============================================================================================================================================
+| # Title     : HEUR.Backdoor.Win32.Poison.gen Dll Hijacking to Defensive Defensive Code Execution                                          |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : System built‑in component. No standalone download available                                                                 |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/213212/ & MVID-2025-0701
+
+[+] Summary    : This code implements an advanced WININET.dll proxy (DLL hijacking) designed as a defensive countermeasure against malware such as HEUR.Backdoor.Win32.Poison.gen.
+                 The malware family Poison loads a 32‑bit WININET.dll from its current directory, which enables execution flow hijacking (MITRE T1574). 
+				 This DLL exploits that behavior by masquerading as WININET.dll, forwarding all legitimate WinINet API calls to the real system DLL while executing its own code inside the malware’s process.
+
+Once loaded, the DLL launches a background defense engine that:
+
+Monitors running processes
+
+Performs behavioral analysis
+
+Verifies digital signatures
+
+Detects suspicious modules and patterns
+
+Calculates file hashes
+
+Logs activity (file + ETW)
+
+Isolates and terminates detected malware
+
+In essence, the malware is forced to load a defensive DLL, which then analyzes, neutralizes, and kills the malware from inside its own execution context. 
+This technique aligns directly with the Malvuln advisory and extends tools like RansomLordNG with more advanced EDR‑style capabilities.
+
+[+] POC :
+
+// ModernDLLHijack.cpp - Advanced Defense Tool with Modern Techniques by indoushka
+
+#define _CRT_SECURE_NO_WARNINGS
+#include <windows.h>
+#include <tlhelp32.h>
+#include <psapi.h>
+#include <wincrypt.h>
+#include <winternl.h>
+#include <detours.h>
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <string>
+#include <algorithm>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <atomic>
+#include <chrono>
+
+#pragma comment(lib, "crypt32.lib")
+#pragma comment(lib, "detours.lib")
+
+
+typedef NTSTATUS(NTAPI* pNtQueryInformationProcess)(
+    HANDLE ProcessHandle,
+    PROCESSINFOCLASS ProcessInformationClass,
+    PVOID ProcessInformation,
+    ULONG ProcessInformationLength,
+    PULONG ReturnLength
+);
+
+
+namespace Config {
+    constexpr const wchar_t* MALWARE_SIGNATURES[] = {
+        L"malware.exe",
+        L"ransomware.exe",
+        L"trojan.exe",
+        L"backdoor.exe",
+        L"poison.exe",
+        L"worm.exe"
+    };
+
+    constexpr size_t MAX_SUSPICIOUS_MODULES = 20;
+    constexpr DWORD SCAN_INTERVAL_MS = 1000;
+    constexpr bool ENABLE_ETW_LOGGING = true;
+    constexpr bool USE_AI_DETECTION = false; // Simulate ML detection
+}
+
+
+class AdvancedLogger {
+private:
+    std::wstring logFile;
+    std::mutex logMutex;
+    
+public:
+    AdvancedLogger() : logFile(L"C:\\Windows\\Temp\\DefenseLog_" + 
+        std::to_wstring(GetCurrentProcessId()) + L".txt") {
+        LogEvent(L"Logger initialized");
+    }
+    
+    void LogEvent(const std::wstring& message) {
+        std::lock_guard<std::mutex> lock(logMutex);
+        
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        
+        std::wofstream file(logFile, std::ios::app);
+        if (file.is_open()) {
+            file << L"[" << st.wYear << L"-" << st.wMonth << L"-" << st.wDay << L" ";
+            file << st.wHour << L":" << st.wMinute << L":" << st.wSecond << L"." << st.wMilliseconds << L"] ";
+            file << message << L"\n";
+            file.close();
+        }
+        
+
+        if (Config::ENABLE_ETW_LOGGING) {
+            EventWriteLog(message.c_str());
+        }
+    }
+    
+    static void EventWriteLog(const wchar_t* message) {
+        // Simulate ETW logging
+        EVENT_DESCRIPTOR descriptor = { 0 };
+        EventWrite(NULL, &descriptor, 0, nullptr);
+    }
+};
+
+
+class AIDetector {
+public:
+    bool AnalyzeProcess(DWORD pid) {
+        // Simulate ML analysis
+        std::vector<float> features = ExtractFeatures(pid);
+        return PredictMalicious(features);
+    }
+    
+private:
+    std::vector<float> ExtractFeatures(DWORD pid) {
+        std::vector<float> features;
+        
+        // Extract process features
+        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+        if (hProcess) {
+            // 1. Number of modules
+            HMODULE hModules[Config::MAX_SUSPICIOUS_MODULES];
+            DWORD cbNeeded;
+            if (EnumProcessModules(hProcess, hModules, sizeof(hModules), &cbNeeded)) {
+                features.push_back(static_cast<float>(cbNeeded / sizeof(HMODULE)));
+            }
+            
+            // 2. Memory consumption
+            PROCESS_MEMORY_COUNTERS pmc;
+            if (GetProcessMemoryInfo(hProcess, &pmc, sizeof(pmc))) {
+                features.push_back(static_cast<float>(pmc.WorkingSetSize));
+            }
+            
+            CloseHandle(hProcess);
+        }
+        
+        return features;
+    }
+    
+    bool PredictMalicious(const std::vector<float>& features) {
+        // Simulate ML model
+        if (features.empty()) return false;
+        
+        // Simple simulation logic
+        float score = 0.0f;
+        for (float f : features) {
+            score += f;
+        }
+        
+        return score > 1000.0f; // Arbitrary threshold
+    }
+};
+
+// Advanced Behavior Analyzer
+class BehaviorAnalyzer {
+private:
+    AdvancedLogger& logger;
+    AIDetector aiDetector;
+    
+public:
+    BehaviorAnalyzer(AdvancedLogger& log) : logger(log) {}
+    
+    bool IsMaliciousProcess(DWORD pid) {
+        // 1. Analyze executable file
+        if (!CheckFileSignature(pid)) {
+            logger.LogEvent(L"Process " + std::to_wstring(pid) + L": Invalid signature");
+            return true;
+        }
+        
+        // 2. Analyze modules
+        if (HasSuspiciousModules(pid)) {
+            logger.LogEvent(L"Process " + std::to_wstring(pid) + L": Suspicious modules");
+            return true;
+        }
+        
+        // 3. Analyze API calls (simulation)
+        if (HasMaliciousAPICalls(pid)) {
+            logger.LogEvent(L"Process " + std::to_wstring(pid) + L": Malicious API pattern");
+            return true;
+        }
+        
+        // 4. AI analysis (optional)
+        if (Config::USE_AI_DETECTION && aiDetector.AnalyzeProcess(pid)) {
+            logger.LogEvent(L"Process " + std::to_wstring(pid) + L": AI detection positive");
+            return true;
+        }
+        
+        return false;
+    }
+    
+private:
+    bool CheckFileSignature(DWORD pid) {
+        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+        if (!hProcess) return false;
+        
+        wchar_t exePath[MAX_PATH];
+        if (GetModuleFileNameExW(hProcess, NULL, exePath, MAX_PATH)) {
+            // Verify digital signature
+            bool valid = VerifyDigitalSignature(exePath);
+            if (!valid) {
+                logger.LogEvent(L"Invalid signature: " + std::wstring(exePath));
+            }
+            
+            CloseHandle(hProcess);
+            return valid;
+        }
+        
+        CloseHandle(hProcess);
+        return false;
+    }
+    
+    bool VerifyDigitalSignature(const wchar_t* filePath) {
+        WINTRUST_FILE_INFO fileInfo = { 0 };
+        fileInfo.cbStruct = sizeof(WINTRUST_FILE_INFO);
+        fileInfo.pcwszFilePath = filePath;
+        fileInfo.hFile = NULL;
+        fileInfo.pgKnownSubject = NULL;
+        
+        WINTRUST_DATA trustData = { 0 };
+        trustData.cbStruct = sizeof(WINTRUST_DATA);
+        trustData.pPolicyCallbackData = NULL;
+        trustData.pSIPClientData = NULL;
+        trustData.dwUIChoice = WTD_UI_NONE;
+        trustData.fdwRevocationChecks = WTD_REVOKE_NONE;
+        trustData.dwUnionChoice = WTD_CHOICE_FILE;
+        trustData.pFile = &fileInfo;
+        trustData.dwStateAction = WTD_STATEACTION_VERIFY;
+        trustData.hWVTStateData = NULL;
+        trustData.pwszURLReference = NULL;
+        trustData.dwProvFlags = WTD_SAFER_FLAG;
+        
+        GUID policyGuid = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+        
+        LONG result = WinVerifyTrust(NULL, &policyGuid, &trustData);
+        
+        trustData.dwStateAction = WTD_STATEACTION_CLOSE;
+        WinVerifyTrust(NULL, &policyGuid, &trustData);
+        
+        return result == ERROR_SUCCESS;
+    }
+    
+    bool HasSuspiciousModules(DWORD pid) {
+        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+        if (!hProcess) return false;
+        
+        HMODULE hModules[Config::MAX_SUSPICIOUS_MODULES];
+        DWORD cbNeeded;
+        
+        if (EnumProcessModules(hProcess, hModules, sizeof(hModules), &cbNeeded)) {
+            DWORD moduleCount = cbNeeded / sizeof(HMODULE);
+            
+            for (DWORD i = 0; i < moduleCount && i < Config::MAX_SUSPICIOUS_MODULES; i++) {
+                wchar_t moduleName[MAX_PATH];
+                if (GetModuleBaseNameW(hProcess, hModules[i], moduleName, MAX_PATH)) {
+                    std::wstring name(moduleName);
+                    std::transform(name.begin(), name.end(), name.begin(), ::towlower);
+                    
+                    // List of suspicious modules
+                    if (name.find(L"inject") != std::wstring::npos ||
+                        name.find(L"hook") != std::wstring::npos ||
+                        name.find(L"keylog") != std::wstring::npos) {
+                        CloseHandle(hProcess);
+                        return true;
+                    }
+                }
+            }
+        }
+        
+        CloseHandle(hProcess);
+        return false;
+    }
+    
+    bool HasMaliciousAPICalls(DWORD pid) {
+        // Simulate API call analysis using ETW or Detours
+        // In real implementation, might use Microsoft Detours or Frida
+        return false;
+    }
+};
+
+// Main Defense Manager
+class DefenseManager {
+private:
+    AdvancedLogger logger;
+    BehaviorAnalyzer analyzer;
+    std::atomic<bool> running{true};
+    std::thread scannerThread;
+    
+public:
+    DefenseManager() : analyzer(logger) {
+        logger.LogEvent(L"Defense Manager initialized");
+        StartMonitoring();
+    }
+    
+    ~DefenseManager() {
+        StopMonitoring();
+    }
+    
+    void StartMonitoring() {
+        scannerThread = std::thread([this]() {
+            while (running) {
+                ScanRunningProcesses();
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(Config::SCAN_INTERVAL_MS));
+            }
+        });
+    }
+    
+    void StopMonitoring() {
+        running = false;
+        if (scannerThread.joinable()) {
+            scannerThread.join();
+        }
+        logger.LogEvent(L"Defense Manager stopped");
+    }
+    
+private:
+    void ScanRunningProcesses() {
+        HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (hSnapshot == INVALID_HANDLE_VALUE) return;
+        
+        PROCESSENTRY32W pe32;
+        pe32.dwSize = sizeof(PROCESSENTRY32W);
+        
+        if (Process32FirstW(hSnapshot, &pe32)) {
+            do {
+                // Check process name
+                std::wstring processName(pe32.szExeFile);
+                std::transform(processName.begin(), processName.end(), 
+                              processName.begin(), ::towlower);
+                
+                bool isKnownMalware = false;
+                for (const wchar_t* sig : Config::MALWARE_SIGNATURES) {
+                    if (processName.find(sig) != std::wstring::npos) {
+                        isKnownMalware = true;
+                        break;
+                    }
+                }
+                
+                // Behavioral analysis if not known
+                if (!isKnownMalware && analyzer.IsMaliciousProcess(pe32.th32ProcessID)) {
+                    isKnownMalware = true;
+                }
+                
+                if (isKnownMalware) {
+                    HandleMaliciousProcess(pe32.th32ProcessID, processName);
+                }
+                
+            } while (Process32NextW(hSnapshot, &pe32));
+        }
+        
+        CloseHandle(hSnapshot);
+    }
+    
+    void HandleMaliciousProcess(DWORD pid, const std::wstring& name) {
+        logger.LogEvent(L"Handling malicious process: " + name + 
+                       L" (PID: " + std::to_wstring(pid) + L")");
+        
+        // 1. Log information
+        DumpProcessInfo(pid);
+        
+        // 2. Isolate process (simulation)
+        IsolateProcess(pid);
+        
+        // 3. Terminate process (optional)
+        TerminateMaliciousProcess(pid);
+        
+        // 4. Report to system
+        ReportToSecurityCenter(pid, name);
+    }
+    
+    void DumpProcessInfo(DWORD pid) {
+        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+        if (!hProcess) return;
+        
+        wchar_t exePath[MAX_PATH];
+        if (GetModuleFileNameExW(hProcess, NULL, exePath, MAX_PATH)) {
+            logger.LogEvent(L"Malware path: " + std::wstring(exePath));
+            
+            // Calculate file hash
+            std::wstring fileHash = CalculateFileHash(exePath);
+            logger.LogEvent(L"File hash: " + fileHash);
+        }
+        
+        CloseHandle(hProcess);
+    }
+    
+    std::wstring CalculateFileHash(const wchar_t* filePath) {
+        std::wstring hash;
+        
+        HANDLE hFile = CreateFileW(filePath, GENERIC_READ, FILE_SHARE_READ, 
+                                   NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) return hash;
+        
+        HCRYPTPROV hProv = 0;
+        HCRYPTHASH hHash = 0;
+        
+        if (CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT) &&
+            CryptCreateHash(hProv, CALG_SHA256, 0, 0, &hHash)) {
+            
+            BYTE buffer[4096];
+            DWORD bytesRead;
+            
+            while (ReadFile(hFile, buffer, sizeof(buffer), &bytesRead, NULL) && bytesRead > 0) {
+                CryptHashData(hHash, buffer, bytesRead, 0);
+            }
+            
+            DWORD hashSize = 0;
+            DWORD hashSizeLen = sizeof(hashSize);
+            if (CryptGetHashParam(hHash, HP_HASHSIZE, (BYTE*)&hashSize, &hashSizeLen, 0)) {
+                std::vector<BYTE> hashBytes(hashSize);
+                if (CryptGetHashParam(hHash, HP_HASHVAL, hashBytes.data(), &hashSize, 0)) {
+                    // Convert to hex string
+                    wchar_t hex[65];
+                    for (DWORD i = 0; i < hashSize; i++) {
+                        swprintf_s(&hex[i * 2], 3, L"%02x", hashBytes[i]);
+                    }
+                    hash = hex;
+                }
+            }
+            
+            if (hHash) CryptDestroyHash(hHash);
+            if (hProv) CryptReleaseContext(hProv, 0);
+        }
+        
+        CloseHandle(hFile);
+        return hash;
+    }
+    
+    void IsolateProcess(DWORD pid) {
+        // Simulate process isolation using Job Objects
+        HANDLE hJob = CreateJobObject(NULL, NULL);
+        if (hJob) {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli = { 0 };
+            jeli.BasicLimitInformation.LimitFlags = 
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | 
+                JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+            
+            SetInformationJobObject(hJob, 
+                JobObjectExtendedLimitInformation, &jeli, sizeof(jeli));
+            
+            HANDLE hProcess = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 
+                                         FALSE, pid);
+            if (hProcess) {
+                AssignProcessToJobObject(hJob, hProcess);
+                CloseHandle(hProcess);
+            }
+            
+            CloseHandle(hJob);
+        }
+    }
+    
+    void TerminateMaliciousProcess(DWORD pid) {
+        HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+        if (hProcess) {
+            TerminateProcess(hProcess, 0);
+            logger.LogEvent(L"Terminated process: " + std::to_wstring(pid));
+            CloseHandle(hProcess);
+        }
+    }
+    
+    void ReportToSecurityCenter(DWORD pid, const std::wstring& name) {
+        // Simulate reporting to Windows Security Center
+        // In real implementation: Use WSC*
+        
+        logger.LogEvent(L"Reported to security center: " + name);
+    }
+};
+
+// Original WININET functions - Forwarding to System32 DLL
+#pragma region WININET_FORWARDING
+
+// Function to load original DLL
+HMODULE LoadOriginalWininet() {
+    static HMODULE hOriginalWininet = nullptr;
+    if (!hOriginalWininet) {
+        wchar_t systemPath[MAX_PATH];
+        GetSystemDirectoryW(systemPath, MAX_PATH);
+        wcscat_s(systemPath, L"\\wininet.dll");
+        
+        hOriginalWininet = LoadLibraryW(systemPath);
+    }
+    return hOriginalWininet;
+}
+
+// Forwarding for common functions
+#define FORWARD_FUNCTION(funcName, ...) \
+extern "C" __declspec(dllexport) \
+decltype(funcName)* funcName = nullptr; \
+\
+extern "C" __declspec(naked) void _##funcName() { \
+    __asm { jmp [funcName] } \
+} \
+\
+void Init##funcName() { \
+    if (!funcName) { \
+        HMODULE hWininet = LoadOriginalWininet(); \
+        if (hWininet) { \
+            funcName = (decltype(funcName)*)GetProcAddress(hWininet, #funcName); \
+        } \
+    } \
+}
+
+// Define functions to forward
+FORWARD_FUNCTION(InternetOpenA)
+FORWARD_FUNCTION(InternetOpenW)
+FORWARD_FUNCTION(InternetCloseHandle)
+FORWARD_FUNCTION(InternetConnectA)
+FORWARD_FUNCTION(InternetConnectW)
+FORWARD_FUNCTION(HttpOpenRequestA)
+FORWARD_FUNCTION(HttpOpenRequestW)
+FORWARD_FUNCTION(HttpSendRequestA)
+FORWARD_FUNCTION(HttpSendRequestW)
+
+#pragma endregion
+
+// Main DLL entry point
+std::unique_ptr<DefenseManager> g_defenseManager;
+
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
+    switch (ul_reason_for_call) {
+        case DLL_PROCESS_ATTACH: {
+            // Disable DLL_THREAD_ATTACH/DETACH for performance
+            DisableThreadLibraryCalls(hModule);
+            
+            // Initialize function forwarding
+            InitInternetOpenA();
+            InitInternetOpenW();
+            InitInternetCloseHandle();
+            // ... initialize remaining functions
+            
+            // Start defense manager (in separate thread)
+            std::thread([]() {
+                g_defenseManager = std::make_unique<DefenseManager>();
+            }).detach();
+            
+            break;
+        }
+        case DLL_PROCESS_DETACH:
+            if (g_defenseManager) {
+                g_defenseManager.reset();
+            }
+            break;
+    }
+    return TRUE;
+}
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================
