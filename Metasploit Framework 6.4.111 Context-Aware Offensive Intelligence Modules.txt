@@ -1,0 +1,139 @@
+=============================================================================================================================================
+| # Title     : Metasploit Framework 6.4.111 Context-Aware Offensive Intelligence Modules                                                   |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.rapid7.com/                                                                                                     |
+=============================================================================================================================================
+
+[+] References: https://github.com/indoushka/context-aware-offensive-intelligence/
+
+[+] Summary: This research introduces a new class of post-exploitation intelligence modules for the Metasploit Framework. Unlike traditional modules, these components do
+             not exploit vulnerabilities, escalate privileges, or modify target systems.
+             The modules operate as a contextual intelligence layer that analyzes environment sensitivity, misconfiguration meaning, privilege escalation feasibility
+             (prediction only), and detection risk before any intrusive action is taken.
+           
+[+] This work defines a previously non-existent category in offensive security:
+
+Context-Aware Post-Exploitation Intelligence.
+
+[+] Vendor: Rapid7 – Metasploit Framework (Extension Layer)
+
+[+] Product: Metasploit Framework – Post-Exploitation Intelligence Modules
+
+[+] Severity: Informational / Research
+
+[+] Risk Level: None (Non-Intrusive Analysis Only)
+
+[+] Modules:
+
+- Environment Intelligence
+- Misconfiguration Context Scanner
+- Privilege Escalation Predictor
+- Scoring & Confidence Engine
+- Decision Intelligence Reporter
+
+[+] Impact:
+
+- No exploitation performed
+- No privilege modification
+- No persistence
+- No filesystem changes
+- No interaction with Metasploit core components
+
+These modules cannot damage Metasploit or target systems.
+
+[+] Module Path: modules/post/intelligence/
+
+[+] Usage: cp -r post/intelligence/ $MSF_PATH/modules/post/
+
+msfconsole
+use post/intelligence/environment_context
+set SESSION <id>
+run
+
+[+] Disclosure Timeline: 2026-01-23 - Public Release
+
+[+] Notes:
+
+This project is intended for research, training, and decision-support purposes.
+It is safer than traditional post-exploitation techniques and encourages
+operational abstinence when risk outweighs benefit.
+
+[+] Credit:
+Indoushka (Nekaa Salah Eddine)
+
+[+] Affected Systems:
+
+- Any system supported by Metasploit sessions
+- No OS-specific dependency
+- Read-only interaction
+
+[+] Module Descriptions:
+
+1. Environment Intelligence
+
+[+] Purpose: Identifies the operational role of the compromised system (workstation, server,production, testing).
+
+[+] Benefit: Prevents high-risk actions on sensitive or regulated environments.
+
+[+] Path: post/intelligence/environment_context.rb
+
+2. Misconfiguration Context Scanner
+
+[+] Purpose: Analyzes weak configurations and interprets their real impact, not just their presence.
+
+[+] Benefit: Eliminates false positives and meaningless findings.
+
+[+] Path: post/intelligence/misconfiguration_context.rb
+
+3. Privilege Escalation Predictor
+
+[+] Purpose: Estimates the probabi : lity of successful privilege escalation without exploiting anything.
+
+[+] Benefit: Reduces failed attempts and detection risk.
+
+[+] Path:post/intelligence/privesc_predictor.rb
+
+4. Scoring & Confidence Engine
+
+[+] Purpose: Converts raw indicators into measurable risk and confidence scores.
+
+[+] Benefit: Transforms technical data into executive-level insight.
+
+[+] Path: post/intelligence/scoring_engine.rb
+
+5. Decision Intelligence Reporter
+
+[+] Purpose: Produces a final human-readable intelligence report.
+
+[+] Benefit: Supports go / no-go decisions.
+
+[+] Path: post/intelligence/intelligence_reporter.rb
+
+[+] Security Impact:
+
+- No exploitation
+- No persistence
+- No privilege modification
+- No file system changes
+- No Metasploit core interaction
+
+[+] Ethical & Legal Considerations:
+
+Designed for research and decision support.
+Suitable for red, blue, and purple teams.
+Safer than traditional post-exploitation modules.
+Encourages action abstinence when risk outweighs benefit.
+
+[+] Classification:
+
+- Research Tool
+- Decision Support System
+- Offensive Intelligence Layer
+
+This work is not classified as an exploit or vulnerability disclosure.
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

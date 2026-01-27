@@ -1,0 +1,218 @@
+=============================================================================================================================================
+| # Title     : Burp Suite 2025.12.4 Extension Advanced ReDoS Detector                                                                      |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://portswigger.net                                                                                                     |
+=============================================================================================================================================
+
+[+] References :  
+
+[+] Summary    : This Burp Suite Java extension integrates an advanced timing-based ReDoS detection engine into Burp’s Active Scanner. 
+                 It automatically tests HTTP parameters using crafted payloads to identify exponential regex backtracking vulnerabilities. 
+				 The extension performs warm-up requests, collects baseline, small, and large payload timing samples, and applies robust statistical 
+				 analysis (P95, growth rate, MAD ratio) to confirm ReDoS issues with high confidence. It includes SSRF and network safety checks, 
+                 smart parameter type detection (email, search, generic), and reports confirmed vulnerabilities directly in Burp Scanner with detailed technical evidence and remediation guidance.
+
+[+] Assembly and operation : javac -cp burp.jar;. BurpReDoSExtension.java AdvancedReDoSExploiter.java
+
+[+] POC :
+
+package burp;
+
+import burp.*;
+import java.net.URL;
+import java.util.*;
+import com.portswigger.burp.exploit.advanced.AdvancedReDoSExploiter;
+
+public class BurpReDoSExtension implements IBurpExtender, IScannerCheck {
+
+    private IBurpExtenderCallbacks callbacks;
+    private IExtensionHelpers helpers;
+
+    @Override
+    public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
+        this.callbacks = callbacks;
+        this.helpers = callbacks.getHelpers();
+
+        callbacks.setExtensionName("Advanced ReDoS Detector By indoushka");
+        callbacks.registerScannerCheck(this);
+        callbacks.printOutput("[+] Advanced ReDoS Detector Loaded");
+    }
+
+    @Override
+    public List<IScanIssue> doActiveScan(
+            IHttpRequestResponse baseRequestResponse,
+            IScannerInsertionPoint insertionPoint) {
+
+        String paramName = insertionPoint.getInsertionPointName();
+        if (paramName == null || paramName.isEmpty())
+            return null;
+
+        try {
+            URL targetUrl = helpers.analyzeRequest(baseRequestResponse).getUrl();
+
+            AdvancedReDoSExploiter.TargetType type = detectType(paramName);
+
+            AdvancedReDoSExploiter.AnalysisReport report =
+                    runReDoSTest(
+                            targetUrl.toString(),
+                            paramName,
+                            type,
+                            helpers.analyzeRequest(baseRequestResponse).getMethod()
+                    );
+
+            if (report.isVulnerable) {
+                return Collections.singletonList(
+                        new ReDoSIssue(
+                                baseRequestResponse,
+                                targetUrl,
+                                paramName,
+                                report
+                        )
+                );
+            }
+
+        } catch (Exception e) {
+            callbacks.printError("[ReDoS] Error: " + e.getMessage());
+        }
+
+        return null;
+    }
+
+    @Override
+    public List<IScanIssue> doPassiveScan(IHttpRequestResponse baseRequestResponse) {
+        return null;
+    }
+
+    @Override
+    public int consolidateDuplicateIssues(IScanIssue existingIssue, IScanIssue newIssue) {
+        return -1;
+    }
+
+    private AdvancedReDoSExploiter.AnalysisReport runReDoSTest(
+            String url,
+            String param,
+            AdvancedReDoSExploiter.TargetType type,
+            String method) throws Exception {
+
+        // Warm-up
+        for (int i = 0; i < 2; i++) {
+            AdvancedReDoSExploiter.RemoteEngine.measure(
+                    url, param, "warmup", method
+            );
+        }
+
+        List<Long> baseline = new ArrayList<>();
+        List<Long> small = new ArrayList<>();
+        List<Long> large = new ArrayList<>();
+
+        for (int i = 0; i < 3; i++)
+            baseline.add(
+                    AdvancedReDoSExploiter.RemoteEngine.measure(
+                            url, param, "safe", method
+                    )
+            );
+
+        String sp = type.synthesizePayload(500);
+        String lp = type.synthesizePayload(2000);
+
+        for (int i = 0; i < 3; i++)
+            small.add(
+                    AdvancedReDoSExploiter.RemoteEngine.measure(
+                            url, param, sp, method
+                    )
+            );
+
+        for (int i = 0; i < 8; i++)
+            large.add(
+                    AdvancedReDoSExploiter.RemoteEngine.measure(
+                            url, param, lp, method
+                    )
+            );
+
+        return new AdvancedReDoSExploiter.AnalysisReport(large, small, baseline);
+    }
+
+    private AdvancedReDoSExploiter.TargetType detectType(String param) {
+        param = param.toLowerCase();
+        if (param.contains("mail"))
+            return AdvancedReDoSExploiter.TargetType.EMAIL;
+        if (param.contains("search") || param.contains("query"))
+            return AdvancedReDoSExploiter.TargetType.SEARCH;
+        return AdvancedReDoSExploiter.TargetType.GENERIC;
+    }
+
+    class ReDoSIssue implements IScanIssue {
+
+        private IHttpRequestResponse req;
+        private URL url;
+        private String param;
+        private AdvancedReDoSExploiter.AnalysisReport report;
+
+        ReDoSIssue(IHttpRequestResponse req, URL url,
+                   String param,
+                   AdvancedReDoSExploiter.AnalysisReport report) {
+            this.req = req;
+            this.url = url;
+            this.param = param;
+            this.report = report;
+        }
+
+        @Override
+        public URL getUrl() {
+            return url;
+        }
+
+        @Override
+        public String getIssueName() {
+            return "Regular Expression Denial of Service (ReDoS)";
+        }
+
+        @Override
+        public int getSeverity() {
+            return SEVERITY_HIGH;
+        }
+
+        @Override
+        public int getConfidence() {
+            return CONFIDENCE_FIRM;
+        }
+
+        @Override
+        public String getIssueBackground() {
+            return "ReDoS occurs when poorly designed regular expressions "
+                 + "lead to exponential backtracking and CPU exhaustion.";
+        }
+
+        @Override
+        public String getIssueDetail() {
+            return "<b>Parameter:</b> " + param + "<br><br>"
+                 + "<b>P95 Growth Rate:</b> " + String.format("%.2f", report.growthRate) + "x<br>"
+                 + "<b>MAD Ratio:</b> " + String.format("%.2f", report.madRatio) + "<br><br>"
+                 + "The response time increased exponentially when processing crafted input, "
+                 + "confirming a ReDoS vulnerability.";
+        }
+
+        @Override
+        public String getRemediationDetail() {
+            return "Refactor the vulnerable regular expression to avoid nested "
+                 + "quantifiers, use atomic groups or possessive quantifiers, "
+                 + "or enforce input length limits.";
+        }
+
+        @Override
+        public IHttpRequestResponse[] getHttpMessages() {
+            return new IHttpRequestResponse[]{req};
+        }
+
+        @Override
+        public String getIssueType() {
+            return "ReDoS";
+        }
+    }
+}
+
+	
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

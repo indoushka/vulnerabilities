@@ -1,0 +1,162 @@
+=============================================================================================================================================
+| # Title     : JavaScript Sensitive Information Disclosure Scanner                                                                         |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : System built‑in component. No standalone download available.                                                                |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/214210/ 
+
+[+] Summary    :  This tool performs automated crawling and heuristic scanning of JavaScript files linked within a target website. It identifies exposed secrets such as
+                  API keys, access tokens, cloud credentials, private keys, and database passwords that may be unintentionally published within frontend resources.
+				  A security issue was identified where sensitive information is exposed within publicly accessible JavaScript files. 
+				  The affected files may contain hardcoded secrets such as API keys, access tokens, cloud credentials, private keys, or database passwords. 
+				  Since JavaScript files are delivered to the client side, any embedded sensitive data can be easily retrieved by unauthenticated attackers.
+                  This issue is not related to a specific software version or framework, but rather to insecure development and deployment practices. 
+                  Exploitation requires no authentication and can be performed remotely by simply accessing the exposed JavaScript resources.
+                  If exploited, this vulnerability may lead to unauthorized access to third-party services, data leakage, infrastructure compromise, financial loss, and further lateral attacks. 
+				  Immediate remediation is required, including the removal of secrets from client-side code, credential rotation, and proper use of server-side environment variables.
+
+[+] Impact:
+
+Exposure of sensitive credentials may lead to unauthorized access,
+data breaches, financial loss, and infrastructure compromise.
+
+[+] Attack Vector :Remote – unauthenticated attacker accessing publicly available JS files.
+
+[+] Remediation:
+
+- Never store secrets in frontend JavaScript
+- Use environment variables server-side
+- Rotate exposed credentials immediately
+- Apply Content Security Policy (CSP)
+
+[+] Tested Environment: PHP 7.x / 8.x – Cross-platform
+
+[+] Disclaimer: This proof of concept is intended for educational and authorized security testing purposes only.
+
+[+] Usage : php POC.php https://example.com
+
+[+] POC :
+
+<?php
+
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+
+$BANNER = "
+#######################################################
+#        JS SECRET HUNTER V2 - by indoushka           #
+#   Automated Crawler & Sensitive Data Scanner        #
+#######################################################
+\n";
+
+echo $BANNER;
+
+$COMMON_FILES = [
+    "config.js", "env.js", "secrets.js", "wallet.js",
+    "constants.js", "app-config.js", "api.js"
+];
+
+$PATTERNS = [
+    "ETH_PRIVATE_KEY" => "/0x[a-fA-F0-9]{64}/",
+    "GENERIC_API_KEY" => "/(?i)(api_key|apikey|secret|token)\s*[:=]\s*['\"]([a-zA-Z0-9_\-]{10,})['\"]/",
+    "AWS_ACCESS_KEY"  => "/AKIA[0-9A-Z]{16}/",
+    "GOOGLE_API_KEY"  => "/AIza[0-9A-Za-z\-_]{35}/",
+    "FIREBASE_CONFIG" => "/firebaseConfig/",
+    "DB_PASSWORD"     => "/(?i)(password|passwd|pwd)\s*[:=]\s*['\"]([^'\"]+)['\"]/"
+];
+
+function http_get($url) {
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_TIMEOUT => 10,
+        CURLOPT_USERAGENT => "Mozilla/5.0"
+    ]);
+    $data = curl_exec($ch);
+    $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    return [$status, $data];
+}
+
+function get_js_links($base_url) {
+    echo "[*] Crawling $base_url for JavaScript files...\n";
+    $links = [];
+
+    list($status, $html) = http_get($base_url);
+    if ($status !== 200) {
+        echo "[!] Failed to crawl page. Status: $status\n";
+        return [];
+    }
+
+    libxml_use_internal_errors(true);
+    $dom = new DOMDocument();
+    $dom->loadHTML($html);
+    $xpath = new DOMXPath($dom);
+
+    $scripts = $xpath->query("//script[@src]");
+    foreach ($scripts as $script) {
+        $src = $script->getAttribute("src");
+        if (strpos($src, "http") !== 0) {
+            $src = rtrim($base_url, "/") . "/" . ltrim($src, "/");
+        }
+        $links[$src] = true;
+    }
+
+    echo "[+] Found " . count($links) . " unique JS files via crawling.\n";
+    return array_keys($links);
+}
+
+function scan_file($url, $PATTERNS) {
+    echo "[*] Scanning: $url\n";
+    list($status, $content) = http_get($url);
+
+    if ($status !== 200 || empty($content)) {
+        echo "    [x] Skipped (Status: $status)\n";
+        return;
+    }
+
+    foreach ($PATTERNS as $name => $pattern) {
+        if (preg_match_all($pattern, $content, $matches)) {
+            foreach ($matches[0] as $match) {
+                $masked = (strlen($match) > 10)
+                    ? substr($match, 0, 5) . "..." . substr($match, -5)
+                    : "***";
+                echo "    [!] CRITICAL: Found $name\n";
+                echo "    [>] Value: $masked\n";
+            }
+        }
+    }
+}
+
+if ($argc < 2) {
+    echo "Usage: php js_secret_hunter.php https://target.com\n";
+    exit;
+}
+
+$target_url = rtrim($argv[1], "/");
+
+$js_links = get_js_links($target_url);
+
+foreach ($COMMON_FILES as $file) {
+    $js_links[] = $target_url . "/" . $file;
+}
+
+$js_links = array_unique($js_links);
+
+echo "\n[*] Total files to scan: " . count($js_links) . "\n";
+echo "[*] Starting Heuristic Scan...\n\n";
+
+foreach ($js_links as $link) {
+    scan_file($link, $PATTERNS);
+}
+
+echo "\n[*] Scan Completed.\n";
+
+
+	
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

