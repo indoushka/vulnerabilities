@@ -1,0 +1,204 @@
+=============================================================================================================================================
+| # Title     : Zabbix Agent Binaries 7.4 for Hardcoded OpenSSL Paths and Potential Provider Abuse                                          |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.zabbix.com/download_agents                                                                                      |
+=============================================================================================================================================
+
+[+] References : 
+
+[+] Summary    :  This tool performs static analysis on Zabbix Agent binaries to identify hardcoded OpenSSL paths such as OPENSSLDIR, ENGINESDIR, and MODULESDIR.
+                  It leverages strings and radare2 to extract embedded configuration paths, OpenSSL version information, 
+				  and indicators of dynamic engine or module loading (e.g., CONF_modules_load, ENGINE_by_id, dynamic_path).
+                  Based on the extracted data, the script evaluates the potential exploitability of the binary by determining whether 
+				  the OpenSSL configuration directory may be user-writable, which could allow malicious provider or engine injection via a crafted openssl.cnf.
+                  The output includes both human-readable analysis and structured JSON results, making the tool suitable for vulnerability research, C
+				  VE validation, and large-scale binary auditing.
+
+[+] POC :
+
+#!/usr/bin/env python3
+
+import subprocess
+import sys
+import re
+import json
+from pathlib import Path
+
+
+def safe_run(cmd, timeout):
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+        if proc.returncode != 0:
+            return ""
+        return proc.stdout
+    except Exception:
+        return ""
+
+
+def extract_with_strings(binary_path: str) -> dict:
+    result = {
+        "binary": binary_path,
+        "openssl_version": None,
+        "openssldir": None,
+        "enginesdir": None,
+        "modulesdir": None,
+        "has_conf_modules_load": False,
+        "has_engine_by_id": False,
+        "has_dynamic_path": False,
+    }
+
+    output = safe_run(["strings", binary_path], 60)
+
+    if not output:
+        return result
+
+    version_match = re.search(r'OpenSSL\s+(\d+\.\d+\.\d+[^\s]*)', output)
+    if version_match:
+        result["openssl_version"] = version_match.group(1)
+
+    for key in ("OPENSSLDIR", "ENGINESDIR", "MODULESDIR"):
+        m = re.search(rf'{key}:\s*"([^"]+)"', output)
+        if m:
+            result[key.lower()] = m.group(1)
+
+    result["has_conf_modules_load"] = "CONF_modules_load" in output
+    result["has_engine_by_id"] = "ENGINE_by_id" in output
+    result["has_dynamic_path"] = "dynamic_path" in output
+
+    return result
+
+
+def extract_with_r2(binary_path: str) -> dict:
+    result = {
+        "binary": binary_path,
+        "openssl_version": None,
+        "openssldir": None,
+        "openssldir_offset": None,
+        "enginesdir": None,
+        "enginesdir_offset": None,
+        "modulesdir": None,
+        "modulesdir_offset": None,
+    }
+
+    def parse_izz(keyword):
+        out = safe_run(["r2", "-q", "-c", f"izz~{keyword}", binary_path], 120)
+        for line in out.splitlines():
+            if keyword in line:
+                m = re.search(r'0x([0-9a-fA-F]+)\s+0x([0-9a-fA-F]+).*?(".*")', line)
+                if m:
+                    return m.group(2), m.group(3)
+        return None, None
+
+    off, val = parse_izz("OPENSSLDIR")
+    if val:
+        result["openssldir_offset"] = f"0x{off}"
+        d = re.search(r'"([^"]+)"', val)
+        if d:
+            result["openssldir"] = d.group(1)
+
+    off, val = parse_izz("ENGINESDIR")
+    if val:
+        result["enginesdir_offset"] = f"0x{off}"
+        d = re.search(r'"([^"]+)"', val)
+        if d:
+            result["enginesdir"] = d.group(1)
+
+    off, val = parse_izz("MODULESDIR")
+    if val:
+        result["modulesdir_offset"] = f"0x{off}"
+        d = re.search(r'"([^"]+)"', val)
+        if d:
+            result["modulesdir"] = d.group(1)
+
+    ver = safe_run(["r2", "-q", "-c", "izz~OpenSSL", binary_path], 120)
+    m = re.search(r'OpenSSL\s+(\d+\.\d+\.\d+[^\s"]*)', ver)
+    if m:
+        result["openssl_version"] = m.group(1)
+
+    return result
+
+def analyze_vulnerability(result: dict) -> dict:
+    vuln = {
+        "vulnerable": False,
+        "exploitability": "unknown",
+        "openssl_cnf_path": None,
+        "engine_dll_path": None,
+        "notes": []
+    }
+    openssldir = result.get("openssldir")
+    enginesdir = result.get("enginesdir")
+
+    if not openssldir:
+        vuln["notes"].append("OPENSSLDIR not found")
+        return vuln
+
+    vuln["openssl_cnf_path"] = openssldir.rstrip("/\\") + "/openssl.cnf"
+    vuln["engine_dll_path"] = enginesdir
+
+    path = openssldir.lower()
+
+    user_writable_hint = any(x in path for x in ("vcpkg", "users", "home", "usr\\local", "usr/local"))
+
+    if user_writable_hint and result.get("has_conf_modules_load"):
+        vuln["vulnerable"] = True
+        vuln["exploitability"] = "potentially_user_writable"
+        vuln["notes"].append("Writable-looking OPENSSLDIR with module loading enabled")
+
+    if result.get("has_engine_by_id"):
+        vuln["notes"].append("ENGINE_by_id present (engine loading supported)")
+
+    if "program files" in path:
+        vuln["exploitability"] = "requires_admin"
+        vuln["notes"].append("Protected directory (Program Files)")
+
+    return vuln
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} <binary> [...]")
+        sys.exit(1)
+
+    results = []
+
+    for binary in sys.argv[1:]:
+        if not Path(binary).exists():
+            print(f"File not found: {binary}", file=sys.stderr)
+            continue
+
+        r2 = extract_with_r2(binary)
+        s = extract_with_strings(binary)
+
+        for k in ("openssl_version", "openssldir", "enginesdir", "modulesdir"):
+            if not r2.get(k):
+                r2[k] = s.get(k)
+
+        r2.update({
+            "has_conf_modules_load": s["has_conf_modules_load"],
+            "has_engine_by_id": s["has_engine_by_id"],
+            "has_dynamic_path": s["has_dynamic_path"],
+        })
+
+        r2["vulnerability"] = analyze_vulnerability(r2)
+        results.append(r2)
+
+        print(json.dumps(r2, indent=2))
+
+    print("\n--- JSON Output ---")
+    print(json.dumps(results, indent=2))
+
+
+if __name__ == "__main__":
+    main()
+
+
+	
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

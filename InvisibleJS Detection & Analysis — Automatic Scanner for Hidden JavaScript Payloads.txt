@@ -1,0 +1,92 @@
+=============================================================================================================================================
+| # Title     : InvisibleJS Detection & Analysis — Automatic Scanner for Hidden JavaScript Payloads                                         |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://github.com/oscarmine/InvisibleJS                                                                                    |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/213708/
+
+[+] Summary    :  InvisibleJS is an obfuscation technique that hides JavaScript source code using zero‑width Unicode characters (\u200b, \u200c), 
+                  making files appear empty while still executing at runtime via eval() or dynamic import() with data: URIs. 
+				  Although visually deceptive, this method provides no real cryptographic protection and is primarily used for obfuscation, 
+				  evasion of casual review, or experimental steganography.
+                  To counter this, an automatic static scanner was developed to safely detect and analyze InvisibleJS‑style payloads without executing them. 
+				  The scanner recursively inspects .js and .mjs files, identifies zero‑width character abuse, calculates concealment ratios, 
+				  reconstructs the original binary stream, and decodes the hidden JavaScript for inspection. 
+				  Files are classified by risk level based on the density of hidden characters, enabling rapid triage in malware analysis, threat hunting, incident response, and CTF contexts.
+                  This approach is defensive and analysis‑focused, exposing hidden backdoors, droppers, or loaders embedded via Unicode steganography, 
+				  and providing actionable indicators of compromise (IOCs) for blue teams and SOC workflows.
+
+[+] POC :
+
+import fs from 'fs';
+import path from 'path';
+
+const Z = '\u200b'; // 0
+const O = '\u200c'; // 1
+
+const targetDir = process.argv[2];
+if (!targetDir) {
+    console.log('Usage: node scanner.mjs <directory>');
+    process.exit(1);
+}
+
+function scanFile(filePath) {
+    const data = fs.readFileSync(filePath, 'utf8');
+
+    const totalChars = data.length;
+    const hiddenChars = [...data].filter(c => c === Z || c === O).length;
+
+    if (hiddenChars === 0) return null;
+
+    const ratio = (hiddenChars / totalChars * 100).toFixed(2);
+
+    const binary = [...data]
+        .filter(c => c === Z || c === O)
+        .map(c => c === Z ? '0' : '1')
+        .join('');
+
+    let decoded = '';
+    for (let i = 0; i < binary.length; i += 8) {
+        const byte = binary.slice(i, i + 8);
+        if (byte.length === 8)
+            decoded += String.fromCharCode(parseInt(byte, 2));
+    }
+
+    return {
+        file: filePath,
+        hiddenChars,
+        ratio,
+        decoded
+    };
+}
+
+function walk(dir) {
+    for (const file of fs.readdirSync(dir)) {
+        const full = path.join(dir, file);
+        if (fs.statSync(full).isDirectory()) {
+            walk(full);
+        } else if (file.endsWith('.js') || file.endsWith('.mjs')) {
+            const result = scanFile(full);
+            if (result) {
+                console.log('\n SUSPICIOUS FILE DETECTED');
+                console.log(' File:', result.file);
+                console.log(' Hidden chars:', result.hiddenChars);
+                console.log(' Hidden ratio:', result.ratio + '%');
+                console.log('----- DECODED CONTENT -----');
+                console.log(result.decoded.slice(0, 500));
+                console.log('---------------------------');
+            }
+        }
+    }
+}
+
+console.log('[*] Scanning:', targetDir);
+walk(targetDir);
+console.log('[✓] Scan finished');
+
+	
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

