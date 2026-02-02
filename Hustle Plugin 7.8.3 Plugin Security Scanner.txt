@@ -1,0 +1,156 @@
+=============================================================================================================================================
+| # Title     : Hustle Plugin 7.8.3 Plugin Security Scanner                                                                                 |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://wordpress.org/plugins/wordpress-popup/                                                                              |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/213677/ & CVE-2024-0368
+
+[+] Summary    : This Python-based security scanner checks WordPress sites for vulnerable versions of the Hustle (wordpress-popup) plugin affected by CVE‑2024‑0368. 
+                 It detects the installed plugin version, verifies whether it falls within known vulnerable releases (7.8.0–7.8.3), and scans for sensitive files containing hardcoded HubSpot credentials. 
+				 The tool also fetches the latest official plugin version from the WordPress API and provides clear remediation recommendations, including updating the plugin and rotating API keys. 
+                 Designed for defensive use, it helps site owners quickly assess risk and confirm patch status on their own systems
+
+[+] POC : php poc.php https://target.com subscriber_user password
+
+#!/usr/bin/env python3
+
+import os
+import re
+import requests
+
+def check_hustle_version(plugin_path):
+    """Checks the installed version of the Hustle plugin."""
+    version_file = os.path.join(plugin_path, 'hustle.php')
+    
+    if not os.path.exists(version_file):
+        return None
+    
+    with open(version_file, 'r') as f:
+        content = f.read()
+
+    version_match = re.search(r"Version:\s*([\d\.]+)", content)
+    if version_match:
+        return version_match.group(1)
+    return None
+
+def check_vulnerable_file(plugin_path):
+    """Checks for the presence of the vulnerable file and hardcoded credentials."""
+    vulnerable_file = os.path.join(plugin_path, 'inc/providers/hubspot/hustle-hubspot-api.php')
+    
+    if not os.path.exists(vulnerable_file):
+        return False, "Vulnerable file not found"
+    
+    with open(vulnerable_file, 'r') as f:
+        content = f.read()
+
+    patterns = [
+        r"CLIENT_ID\s*=\s*'[^']+'",
+        r"CLIENT_SECRET\s*=\s*'[^']+'",
+        r"HAPIKEY\s*=\s*'[^']+'"
+    ]
+    
+    found_creds = []
+    for pattern in patterns:
+        if re.search(pattern, content):
+            found_creds.append(pattern.split()[0])
+    
+    if found_creds:
+        return True, f"Hardcoded credentials found: {', '.join(found_creds)}"
+    
+    return False, "File exists but hardcoded data may have been removed"
+
+def compare_versions(current_version):
+    """Compares current version against known vulnerable versions."""
+    vulnerable_versions = ['7.8.0', '7.8.1', '7.8.2', '7.8.3']
+    
+    def version_tuple(v):
+        return tuple(map(int, v.split('.')))
+    
+    current = version_tuple(current_version)
+    vulnerable = [version_tuple(v) for v in vulnerable_versions]
+    
+    for v in vulnerable:
+        if current <= v:
+            return True
+    return False
+
+def generate_security_report(plugin_path):
+    """Generates a security report for the Hustle plugin."""
+    print("=" * 60)
+    print("Hustle Plugin Security Scanner")
+    print("=" * 60)
+
+    version = check_hustle_version(plugin_path)
+    if not version:
+        print("[-] Hustle plugin is not installed.")
+        return
+    
+    print(f"[*] Installed Version: {version}")
+
+    is_vulnerable_version = compare_versions(version)
+    
+    if is_vulnerable_version:
+        print("[!]  Warning: Vulnerable version detected!")
+        print(f"[!] Version {version} is affected by CVE-2024-0368")
+
+        has_vuln_file, message = check_vulnerable_file(plugin_path)
+        print(f"[*] File Analysis: {message}")
+        
+        if has_vuln_file:
+            print("[!]  Risk: System is vulnerable!")
+            print("\nImmediate Recommendations:")
+            print("1. Update the plugin to version 7.8.4 or newer.")
+            print("2. Change your HubSpot API keys immediately.")
+            print("3. Review HubSpot logs for unauthorized access.")
+        else:
+            print("[*] The vulnerable file has been patched locally.")
+    
+    else:
+        print("[+] ok Version is secure.")
+
+    print("\n" + "=" * 60)
+    print("General Security Recommendations:")
+    print("1. Update all plugins regularly.")
+    print("2. Use strong passwords.")
+    print("3. Implement a Web Application Firewall (WAF).")
+    print("4. Perform regular backups.")
+    print("=" * 60)
+
+def verify_patch():
+    """Verifies the latest available official patch."""
+    print("\n[*] Checking for official updates...")
+    
+    try:
+
+        url = "https://api.wordpress.org/plugins/info/1.0/wordpress-popup.json"
+        response = requests.get(url, timeout=10)
+        
+        if response.status_code == 200:
+            plugin_info = response.json()
+            latest_version = plugin_info.get('version', '')
+            
+            print(f"[*] Latest available version: {latest_version}")
+            print(f"[+] ok Update to {latest_version} for a full fix.")
+        else:
+            print("[-] Could not verify updates online.")
+    except Exception as e:
+        print(f"[-] Connection error: {e}")
+
+if __name__ == "__main__":
+
+    WORDPRESS_PATH = "/var/www/html"  # Change this path to your site root
+    
+    plugin_path = os.path.join(WORDPRESS_PATH, "wp-content/plugins/wordpress-popup")
+    
+    if not os.path.exists(plugin_path):
+        print("[-] Plugin path not found.")
+        print("[*] Please ensure WORDPRESS_PATH is correctly set in the script.")
+    else:
+        generate_security_report(plugin_path)
+        verify_patch()
+	
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

