@@ -1,0 +1,129 @@
+=============================================================================================================================================
+| # Title     : Cockpit CMS 0.13.0 Multi-Endpoint Injection Scanner                                                                         |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://getcockpit.com/                                                                                                     |
+=============================================================================================================================================
+
+[+] References : 
+
+[+] Summary    : This tool is a defensive security scanner designed to safely assess web application endpoints for potential input-validation and injection weaknesses without executing any commands. 
+                 It sends non-executable canary payloads through different request formats (form-encoded and JSON), 
+                 analyzes HTTP responses for error indicators and abnormal behavior, and reports potential issues. 
+				 The scanner is intended for authorized security testing, code review, and educational purposes, providing risk signals rather than exploitation.
+
+[+] PoC :  python3 poc.py 
+
+#!/usr/bin/env python3
+import requests
+import sys
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+def scan(target_url):
+    endpoints = [
+        ("/auth/check", "form"),
+        ("/accounts/save", "json_account"),
+        ("/api/collections/findOne", "json_filter")
+    ]
+
+    payloads = [
+        "'",
+        "\"",
+        "' OR '1'='1",
+        "${TEST}",
+        "{{7*7}}",
+        "INVALID_INPUT_TEST"
+    ]
+
+    findings = []
+
+    for endpoint, mode in endpoints:
+        for payload in payloads:
+            try:
+                url = target_url.rstrip("/") + endpoint
+
+                if mode == "form":
+                    response = requests.post(
+                        url,
+                        data={"auth[user]": payload},
+                        timeout=10,
+                        verify=False
+                    )
+                elif mode == "json_account":
+                    response = requests.post(
+                        url,
+                        json={"account": {"_id": payload}},
+                        timeout=10,
+                        verify=False
+                    )
+                else:
+                    response = requests.post(
+                        url,
+                        json={"filter": {"_id": payload}},
+                        timeout=10,
+                        verify=False
+                    )
+
+                indicator = analyze_response(response)
+
+                if indicator:
+                    findings.append({
+                        "endpoint": endpoint,
+                        "payload": payload,
+                        "status": response.status_code,
+                        "indicator": indicator
+                    })
+                    print(f"[!] Potential issue at {endpoint} with payload: {payload}")
+
+            except Exception as e:
+                print(f"[-] Error scanning {endpoint}: {e}")
+
+    return findings
+
+def analyze_response(response):
+    indicators = [
+        "exception",
+        "error",
+        "syntax",
+        "unexpected",
+        "undefined",
+        "stack",
+        "trace"
+    ]
+
+    body = response.text.lower()
+
+    for i in indicators:
+        if i in body:
+            return f"Response contains indicator: {i}"
+
+    if response.status_code >= 500:
+        return "Server error (5xx)"
+
+    return None
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print(f"Usage: {sys.argv[0]} <TARGET_URL>")
+        print(f"Example: {sys.argv[0]} https://example.com")
+        sys.exit(1)
+
+    results = scan(sys.argv[1])
+
+    print("\n=== Scan Summary ===")
+    if not results:
+        print("No obvious injection indicators detected.")
+    else:
+        for r in results:
+            print(f"- Endpoint: {r['endpoint']}")
+            print(f"  Payload: {r['payload']}")
+            print(f"  Status: {r['status']}")
+            print(f"  Indicator: {r['indicator']}\n")
+
+
+
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

