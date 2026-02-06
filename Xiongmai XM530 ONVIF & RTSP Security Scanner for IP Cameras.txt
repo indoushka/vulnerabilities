@@ -1,0 +1,223 @@
+=============================================================================================================================================
+| # Title     : Xiongmai XM530 ONVIF & RTSP Security Scanner for IP Cameras                                                                 |
+| # Author    : indoushka4ever@gmail.com                                                                                                    |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://www.xiongmaitech.com/                                                                                               |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/213044/ & CVE-2025-65856
+
+[+] Summary    :  This project is a unified PHP-based security scanner designed to identify critical vulnerabilities in IP cameras, 
+                  with a primary focus on ONVIF authentication bypass (CVE-2025-65856) and unauthenticated RTSP stream exposure.
+                  The tool provides a single-file web interface that allows scanning a single IP address or an entire network range (CIDR), detecting exposed services, 
+				  fingerprinting device information (manufacturer and model), and assessing risk severity (LOW, MEDIUM, HIGH, CRITICAL).
+                  The scanner is optimized for defensive security assessments and SOC use cases, generating structured JSON-compatible results suitable for SIEM ingestion. 
+				  It operates without external libraries, supports AJAX-based scanning without page reloads, and is fully compatible with standard PHP environments such as XAMPP.
+
+[+] Key capabilities include:
+
+Detection of ONVIF authentication bypass vulnerabilities
+
+Identification of exposed RTSP streams without credentials
+
+Automatic severity classification based on exposure level
+
+Device fingerprinting (manufacturer / model when available)
+
+Network-wide scanning via CIDR notation
+
+Lightweight, single-file PHP web interface
+
+Read-only, non-destructive Proof-of-Concept suitable for lawful security testing
+
+[+] POC : How to Use It
+
+Place the file inside: htdocs/camera_scanner.php
+
+Open your browser:http://localhost/camera_scanner.php
+
+Example Input :192.168.1.10 or 192.168.1.0/24
+
+<?php
+
+set_time_limit(0);
+error_reporting(E_ALL & ~E_WARNING);
+
+function port_open($ip, $port, $timeout = 2) {
+    $fp = @fsockopen($ip, $port, $errno, $errstr, $timeout);
+    if ($fp) {
+        fclose($fp);
+        return true;
+    }
+    return false;
+}
+
+function severity($onvif, $rtsp) {
+    if ($onvif && $rtsp) return "CRITICAL";
+    if ($onvif) return "HIGH";
+    if ($rtsp) return "MEDIUM";
+    return "LOW";
+}
+
+function check_onvif($ip, $port) {
+    $soap = <<<XML
+<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope">
+<s:Body>
+<GetDeviceInformation xmlns="http://www.onvif.org/ver10/device/wsdl"/>
+</s:Body>
+</s:Envelope>
+XML;
+
+    $opts = [
+        'http' => [
+            'method' => "POST",
+            'header' => "Content-Type: application/soap+xml\r\n",
+            'content' => $soap,
+            'timeout' => 3
+        ]
+    ];
+
+    $ctx = stream_context_create($opts);
+    $url = "http://$ip:$port/onvif/device_service";
+    $res = @file_get_contents($url, false, $ctx);
+
+    if ($res && strpos($res, "Manufacturer") !== false) {
+        preg_match('/<Manufacturer>(.*?)<\/Manufacturer>/', $res, $m);
+        preg_match('/<Model>(.*?)<\/Model>/', $res, $mo);
+        return [
+            "onvif" => true,
+            "manufacturer" => $m[1] ?? "Unknown",
+            "model" => $mo[1] ?? "Unknown",
+            "port" => $port
+        ];
+    }
+    return ["onvif" => false];
+}
+
+function check_rtsp($ip, $port) {
+    $fp = @fsockopen($ip, $port, $e, $s, 2);
+    if ($fp) {
+        fwrite($fp, "OPTIONS rtsp://$ip RTSP/1.0\r\nCSeq: 1\r\n\r\n");
+        $r = fread($fp, 256);
+        fclose($fp);
+        if (strpos($r, "RTSP") !== false) return true;
+    }
+    return false;
+}
+
+function scan_ip($ip) {
+    $onvif = false;
+    $rtsp  = false;
+    $info  = [];
+
+    foreach ([80,8899,8080] as $p) {
+        if (port_open($ip, $p)) {
+            $r = check_onvif($ip, $p);
+            if ($r['onvif']) {
+                $onvif = true;
+                $info = $r;
+                break;
+            }
+        }
+    }
+
+    foreach ([554,8554] as $p) {
+        if (port_open($ip, $p) && check_rtsp($ip, $p)) {
+            $rtsp = true;
+            $info['rtsp_port'] = $p;
+            break;
+        }
+    }
+
+    return [
+        "ip" => $ip,
+        "onvif" => $onvif,
+        "rtsp" => $rtsp,
+        "manufacturer" => $info['manufacturer'] ?? "-",
+        "model" => $info['model'] ?? "-",
+        "severity" => severity($onvif, $rtsp),
+        "time" => date("Y-m-d H:i:s")
+    ];
+}
+
+/* ================= AJAX ================= */
+
+if (isset($_POST['target'])) {
+    $target = trim($_POST['target']);
+    $results = [];
+
+    if (strpos($target, "/") !== false) {
+        [$net, $cidr] = explode("/", $target);
+        $mask = ~((1 << (32 - $cidr)) - 1);
+        $start = ip2long($net) & $mask;
+        $end   = $start | ~$mask;
+
+        for ($i = $start + 1; $i < $end; $i++) {
+            $ip = long2ip($i);
+            $r = scan_ip($ip);
+            if ($r['onvif'] || $r['rtsp']) {
+                $results[] = $r;
+            }
+        }
+    } else {
+        $results[] = scan_ip($target);
+    }
+
+    header("Content-Type: application/json");
+    echo json_encode($results, JSON_PRETTY_PRINT);
+    exit;
+}
+?>
+
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<title>Camera Security Scanner</title>
+<style>
+body{font-family:tahoma;background:#0f172a;color:#e5e7eb}
+.box{width:900px;margin:30px auto;background:#020617;padding:20px;border-radius:10px}
+input,button{padding:10px;width:100%;margin:5px 0}
+button{background:#2563eb;color:#fff;border:0;cursor:pointer}
+pre{background:#020617;padding:10px;max-height:400px;overflow:auto}
+.CRITICAL{color:#dc2626}
+.HIGH{color:#f97316}
+.MEDIUM{color:#eab308}
+</style>
+</head>
+
+<body>
+<div class="box">
+<h2>🔍 فحص كاميرات ONVIF / RTSP</h2>
+
+<input id="target" placeholder="192.168.1.10 أو 192.168.1.0/24">
+<button onclick="scan()">ابدأ الفحص</button>
+
+<pre id="out"></pre>
+</div>
+
+<script>
+function scan(){
+  document.getElementById("out").textContent="جاري الفحص...";
+  fetch("",{
+    method:"POST",
+    headers:{"Content-Type":"application/x-www-form-urlencoded"},
+    body:"target="+encodeURIComponent(document.getElementById("target").value)
+  })
+  .then(r=>r.json())
+  .then(d=>{
+    let o="";
+    d.forEach(x=>{
+      o+=`[${x.severity}] ${x.ip} | ONVIF:${x.onvif} RTSP:${x.rtsp}\n`;
+    });
+    document.getElementById("out").textContent=o;
+  });
+}
+</script>
+</body>
+</html>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

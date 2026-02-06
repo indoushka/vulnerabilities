@@ -1,0 +1,132 @@
+=============================================================================================================================================
+| # Title     : Zabbix Agent Binaries 7.4 OpenSSL Provider Agent Binaries Path Abuse Scanner                                                |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.zabbix.com/download_agents                                                                                      |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/214429/ & CVE-2025-27237
+
+[+] Summary    :  This scanner performs automated static analysis of Zabbix Agent binaries to detect hardcoded OpenSSL configuration paths that may enable provider or engine abuse. 
+                  It identifies embedded OPENSSLDIR, ENGINESDIR, and MODULESDIR values, extracts OpenSSL version information, and checks for dynamic loading capabilities 
+				  such as CONF_modules_load, ENGINE_by_id, and dynamic_path.
+                  Based on these indicators, the scanner evaluates whether the OpenSSL configuration directory may be user-writable, which could allow malicious 
+				  manipulation of openssl.cnf and result in arbitrary code execution through unauthorized provider or engine loading. 
+				  The tool produces a clear vulnerability verdict along with structured JSON output, making it suitable for CVE validation, large-scale binary auditing, and security research.
+
+[+] Usage :
+
+python3 poc.py zabbix_agent.exe
+
+python3 poc.py C:\Zabbix\
+
+
+[+] POC :
+
+#!/usr/bin/env python3
+import subprocess
+import sys
+import re
+import json
+from pathlib import Path
+
+TARGET_EXT = (".exe", ".dll")
+
+def safe_run(cmd, timeout=60):
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return p.stdout if p.returncode == 0 else ""
+    except Exception:
+        return ""
+
+def extract_strings(binary):
+    data = safe_run(["strings", binary])
+    res = {
+        "openssl_version": None,
+        "openssldir": None,
+        "enginesdir": None,
+        "modulesdir": None,
+        "conf_modules": "CONF_modules_load" in data,
+        "engine_by_id": "ENGINE_by_id" in data,
+        "dynamic_path": "dynamic_path" in data,
+    }
+
+    for key in ("OPENSSLDIR", "ENGINESDIR", "MODULESDIR"):
+        m = re.search(rf'{key}:\s*"([^"]+)"', data)
+        if m:
+            res[key.lower()] = m.group(1)
+
+    v = re.search(r'OpenSSL\s+(\d+\.\d+\.\d+[^\s]*)', data)
+    if v:
+        res["openssl_version"] = v.group(1)
+
+    return res
+
+def assess(binary, info):
+    verdict = {
+        "binary": binary,
+        "status": "SAFE",
+        "severity": "none",
+        "openssl_cnf": None,
+        "notes": []
+    }
+
+    d = info.get("openssldir")
+    if not d:
+        verdict["notes"].append("OPENSSLDIR not found")
+        return verdict
+
+    verdict["openssl_cnf"] = d.rstrip("/\\") + "/openssl.cnf"
+    path = d.lower()
+
+    writable_hint = any(x in path for x in ("vcpkg", "users", "home", "usr/local", "usr\\local"))
+
+    if writable_hint and info["conf_modules"]:
+        verdict["status"] = "POTENTIALLY_VULNERABLE"
+        verdict["severity"] = "high"
+        verdict["notes"].append("User-writable OpenSSL directory with module loading")
+
+    if info["engine_by_id"]:
+        verdict["notes"].append("ENGINE_by_id present")
+
+    if "program files" in path:
+        verdict["severity"] = "low"
+        verdict["notes"].append("Protected directory (Program Files)")
+
+    return verdict
+
+def collect_targets(path):
+    p = Path(path)
+    if p.is_file():
+        return [p]
+    return [f for f in p.rglob("*") if f.suffix.lower() in TARGET_EXT]
+
+def main():
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} <file | directory>")
+        sys.exit(1)
+
+    targets = collect_targets(sys.argv[1])
+    report = []
+
+    for t in targets:
+        info = extract_strings(str(t))
+        verdict = assess(str(t), info)
+        verdict.update(info)
+        report.append(verdict)
+
+        print(f"[{verdict['status']}] {t}")
+        if verdict["notes"]:
+            for n in verdict["notes"]:
+                print(f"  - {n}")
+
+    print("\n--- JSON REPORT ---")
+    print(json.dumps(report, indent=2))
+
+if __name__ == "__main__":
+    main()
+
+	
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================
