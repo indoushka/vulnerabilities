@@ -1,0 +1,59 @@
+=============================================================================================================================================
+| # Title     : Kernel Sentinel – Smart Kernel Security Update Monitor                                                                      |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://github.com/indoushka/kernel-sentinel/                                                                               |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/215173/  & 	CVE-2025-38561
+
+[+] Summary    : Kernel Sentinel is a professional, intelligent, and multilingual tool designed to monitor, report, and optionally update Linux kernel security patches. It supports:
+
+Automatic kernel version detection
+
+Policy-driven auto-update (for allowed kernel flavors only)
+
+Multilingual support: Arabic and English with auto-detection of system language
+
+Notifications: Email and Telegram for detected updates
+
+JSON reporting: Detailed reports stored securely with retention policy
+
+Enterprise-ready: Configurable via config.json, compatible with systemd, safe root-required operations
+
+[+] Supported Systems:
+
+Debian 11 (Bullseye), Debian 12 (Bookworm)
+
+Ubuntu 20.04 LTS, 22.04 LTS, 24.04 LTS
+
+Kernels: generic, fips (cloud kernels: AWS/GCP partially supported)
+
+Requires Python 3 ≥ 3.8, systemd, APT package management
+
+[+] Use Cases:
+
+Enterprise Linux servers
+
+Cloud VMs (AWS, GCP) with kernel FIPS
+
+Security-conscious systems requiring automated kernel patch monitoring
+
+[+] Key Features:
+
+Monitor-only or Auto-update Modes – Choose to simply monitor or apply updates automatically for authorized kernel flavors.
+
+Policy Enforcement – Block custom or unauthorized kernels, only allow approved flavors (generic, fips).
+
+Smart Reporting – Generates timestamped JSON reports with detailed kernel update information.
+
+Notifications – Sends alerts to admins via Email and/or Telegram when kernel updates are detected.
+
+Multilingual & User-Friendly – Detects system language and interacts with the user in Arabic or English.
+
+Secure & Reliable – Requires root for critical operations, handles errors gracefully, fully configurable.
+  
+	
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================

