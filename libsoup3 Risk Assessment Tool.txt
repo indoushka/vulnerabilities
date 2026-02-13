@@ -1,0 +1,156 @@
+=============================================================================================================================================
+| # Title     : libsoup3 Risk Assessment Tool                                                                                               |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://www.redhat.com/                                                                                                     |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/215072/  & CVE-2026-0719
+
+[+] Summary    : tool performs a defensive risk assessment for two security vulnerabilities affecting libsoup3: CVE-2026-0719 and CVE-2026-1761. 
+                 It identifies the installed libsoup3 version on Linux systems, detects running services that may depend on the library, and evaluates the potential impact based on predefined risk levels. 
+				 The tool then generates a structured JSON security report containing system information, affected components, active services, and practical mitigation recommendations. 
+                 It is designed strictly for security monitoring, auditing, and incident response, not for exploitation.
+  
+[+] POC :   
+
+#!/usr/bin/env python3
+
+import json
+import subprocess
+import platform
+import os
+
+class VulnerabilityRiskAssessor:
+    def __init__(self):
+        self.results = {
+            "cve-2026-0719": {
+                "risk_level": "HIGH",
+                "description": "Signed to Unsigned Conversion Error in NTLM Auth",
+                "affected_components": ["libsoup3", "gnome-applications", "webkit"],
+                "mitigation": "Update to patched version, disable NTLM if not needed"
+            },
+            "cve-2026-1761": {
+                "risk_level": "CRITICAL",
+                "description": "Stack-Based Buffer Overflow in Multipart Parsing",
+                "affected_components": ["libsoup3", "http-clients", "media-players"],
+                "mitigation": "Apply security patch, use input validation"
+            }
+        }
+    
+    def detect_libsoup_version(self) -> str:
+        """Detect the installed version of libsoup3"""
+        try:
+            if platform.system() == "Linux":
+
+                result = subprocess.run(
+                    ["rpm", "-q", "libsoup3"],
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode == 0:
+                    return result.stdout.strip()
+
+                result = subprocess.run(
+                    ["dpkg", "-l"],
+                    capture_output=True,
+                    text=True
+                )
+                for line in result.stdout.splitlines():
+                    if line.startswith("ii") and "libsoup3" in line:
+                        return " ".join(line.split()[:3])
+            return "Not installed or unknown"
+        except Exception:
+            return "Detection error"
+    
+    def check_services(self) -> list:
+        """Scan for services utilizing libsoup"""
+        services = set()
+
+        common_processes = [
+            "gnome-shell", "evolution", "epiphany", "webkit",
+            "gvfsd", "tracker", "nautilus"
+        ]
+        
+        try:
+            result = subprocess.run(
+                ["ps", "aux"],
+                capture_output=True,
+                text=True
+            )
+            for line in result.stdout.splitlines():
+                for proc in common_processes:
+                    if proc in line:
+                        services.add(line.strip())
+        except Exception:
+            pass
+        
+        return list(services)  
+    def generate_report(self):
+        """Generate the Risk Assessment Report"""
+        report = {
+            "system_info": {
+                "os": platform.system(),
+                "version": platform.version(),
+                "libsoup_version": self.detect_libsoup_version()
+            },
+            "vulnerabilities": self.results,
+            "affected_services": self.check_services(),
+            "recommendations": [
+                "1. Update libsoup3 immediately from official repositories",
+                "2. Monitor logs for potential exploitation attempts",
+                "3. Apply firewall rules to restrict access",
+                "4. Utilize tools like SELinux or AppArmor",
+                "5. Review installed GNOME applications"
+            ]
+        }
+        
+        return json.dumps(report, indent=2, ensure_ascii=False)
+
+def main():
+    print("""
+    ╔════════════════════════════════════════════╗
+    ║      libsoup3 Vulnerability Risk Tool      ║
+    ║              by indoushka                  ║
+    ╚════════════════════════════════════════════╝
+    """)
+    
+    assessor = VulnerabilityRiskAssessor()
+    
+    print("[*] Gathering system information...")
+    print(f"[*] OS: {platform.system()} {platform.version()}")
+    
+    print("\n[*] Checking libsoup3 version...")
+    libsoup_version = assessor.detect_libsoup_version()
+    print(f"    → Version: {libsoup_version}")
+    
+    print("\n[*] Checking active services...")
+    services = assessor.check_services()
+    if services:
+        print(f"    → Found {len(services)} potentially affected service(s)")
+    else:
+        print("    → No obvious services found")
+    
+    print("\n[*] Assessing risks...")
+    report = assessor.generate_report()
+    
+    print("\n" + "=" * 60)
+    print("Risk Assessment Report:")
+    print("=" * 60)
+    print(report)
+    
+    print("\n" + "=" * 60)
+    print("Immediate Recommended Actions:")
+    print("=" * 60)
+    print("1. sudo dnf update libsoup3  (or apt/yum depending on system)")
+    print("2. journalctl -f | grep -i libsoup")
+    print("3. Update all related GNOME packages")
+    print("=" * 60)
+
+if __name__ == "__main__":
+    main()
+	
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

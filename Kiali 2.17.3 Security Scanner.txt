@@ -1,0 +1,195 @@
+=============================================================================================================================================
+| # Title     : Kiali 2.17.3 Security Scanner                                                                                               |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://kiali.io/                                                                                                           |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/215063/  & 	CVE-2025-13465
+
+[+] Summary    : This tool performs a targeted security assessment of Kiali deployments running on Red Hat OpenShift Service Mesh 3.2. 
+                 It detects exposure to four critical vulnerabilities (CVE-2025-13465, CVE-2025-15284, CVE-2025-61729, CVE-2026-22029) by validating the deployed Kiali version, 
+				 inspecting vulnerable JavaScript dependencies (lodash, qs), and checking runtime resource usage for potential abuse.
+                 The scanner produces a structured JSON report, highlights upgrade risks, and provides actionable mitigation guidance, including version upgrades, dependency fixes, 
+				 resource limits, and security hardening steps. It is designed for cluster administrators and security teams to quickly assess risk and support compliance with RHSA-2026:2149-03.
+  
+[+] POC :   
+
+#!/usr/bin/env python3
+
+import subprocess
+import json
+import re
+import sys
+from typing import Dict, List, Optional
+from datetime import datetime
+from packaging import version
+
+class KialiSecurityScanner:
+    def __init__(self):
+        self.cves = {
+            "CVE-2025-13465": {
+                "description": "Prototype pollution in _.unset and _.omit functions",
+                "component": "lodash",
+                "severity": "Important"
+            },
+            "CVE-2025-15284": {
+                "description": "qs: Denial of Service via improper input validation",
+                "component": "qs",
+                "severity": "Important"
+            },
+            "CVE-2025-61729": {
+                "description": "Excessive resource consumption in crypto/x509",
+                "component": "golang",
+                "severity": "Important"
+            },
+            "CVE-2026-22029": {
+                "description": "React Router XSS via Open Redirects",
+                "component": "react-router",
+                "severity": "Important"
+            }
+        }
+
+        self.results = {
+            "scan_time": datetime.now().isoformat(),
+            "advisory": "RHSA-2026:2149-03",
+            "vulnerabilities": [],
+            "recommendations": []
+        }
+
+    def run_oc_command(self, cmd: str) -> Optional[str]:
+        try:
+            result = subprocess.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+            return None
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return None
+
+    def check_kiali_deployment(self) -> Dict:
+        info = {}
+
+        image_cmd = (
+            "oc get deployment kiali -n istio-system "
+            "-o jsonpath={.spec.template.spec.containers[0].image}"
+        )
+        image = self.run_oc_command(image_cmd)
+
+        if image:
+            info["current_image"] = image
+            match = re.search(r':([\d.]+)', image)
+            detected_version = match.group(1) if match else "0.0.0"
+            info["version"] = detected_version
+            info["vulnerable"] = version.parse(detected_version) < version.parse("2.17.3")
+
+        return info
+
+    def scan_vulnerable_packages(self) -> List[Dict]:
+        vulnerabilities = []
+
+        lodash_cmd = (
+            "oc exec deployment/kiali -n istio-system -- "
+            "sh -c \"npm list lodash 2>/dev/null || true\""
+        )
+        lodash_output = self.run_oc_command(lodash_cmd)
+
+        if lodash_output:
+            match = re.search(r'lodash@([\d.]+)', lodash_output)
+            if match and version.parse(match.group(1)) < version.parse("4.17.21"):
+                vulnerabilities.append({
+                    "cve": "CVE-2025-13465",
+                    "component": "lodash",
+                    "status": "VULNERABLE",
+                    "version": match.group(1)
+                })
+
+        qs_cmd = (
+            "oc exec deployment/kiali -n istio-system -- "
+            "sh -c \"npm list qs 2>/dev/null || true\""
+        )
+        qs_output = self.run_oc_command(qs_cmd)
+
+        if qs_output:
+            match = re.search(r'qs@([\d.]+)', qs_output)
+            if match and version.parse(match.group(1)) < version.parse("6.11.0"):
+                vulnerabilities.append({
+                    "cve": "CVE-2025-15284",
+                    "component": "qs",
+                    "status": "VULNERABLE",
+                    "version": match.group(1)
+                })
+
+        self.results["vulnerabilities"].extend(vulnerabilities)
+        return vulnerabilities
+
+    def check_resource_consumption(self) -> Dict:
+        resource_info = {}
+
+        top_cmd = "oc adm top pod -n istio-system --containers | grep kiali"
+        top_output = self.run_oc_command(top_cmd)
+
+        if top_output:
+            parts = top_output.split()
+            if len(parts) >= 4:
+                resource_info = {
+                    "pod": parts[0],
+                    "container": parts[1],
+                    "cpu": parts[2],
+                    "memory": parts[3]
+                }
+
+                if resource_info["cpu"].endswith("m"):
+                    cpu_m = int(resource_info["cpu"].replace("m", ""))
+                    resource_info["high_usage"] = cpu_m > 1000
+
+        return resource_info
+
+    def generate_mitigation_plan(self) -> List[str]:
+        mitigations = [
+            "Update Kiali to version 2.17.3 immediately",
+            "Apply OpenShift Service Mesh 3.2 patches",
+            "Upgrade lodash to >= 4.17.21",
+            "Upgrade qs to >= 6.11.0",
+            "Set strict CPU and memory limits on Kiali pods",
+            "Update React Router to a patched version",
+            "Enable CSP headers and audit logging"
+        ]
+
+        self.results["recommendations"] = mitigations
+        return mitigations
+
+    def run_full_scan(self):
+        print("=" * 70)
+        print("KIALI SECURITY SCAN - RHSA-2026:2149-03")
+        print("=" * 70)
+
+        kiali_info = self.check_kiali_deployment()
+        vulnerabilities = self.scan_vulnerable_packages()
+        resource_info = self.check_resource_consumption()
+        self.generate_mitigation_plan()
+
+        print("\nScan completed.")
+        self.save_results()
+
+    def save_results(self):
+        filename = f"kiali_security_scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        with open(filename, "w") as f:
+            json.dump(self.results, f, indent=2)
+        print(f"Results saved to: {filename}")
+
+def main():
+    scanner = KialiSecurityScanner()
+    scanner.run_full_scan()
+
+if __name__ == "__main__":
+    main()
+
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================

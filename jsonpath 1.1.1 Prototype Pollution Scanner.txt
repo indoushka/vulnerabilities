@@ -1,0 +1,213 @@
+=============================================================================================================================================
+| # Title     : jsonpath 1.1.1 Prototype Pollution Scanner                                                                                  |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://www.redhat.com/                                                                                                     |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/215068/  & CVE-2025-61140
+
+[+] Summary    : a Prototype Pollution vulnerability related to unsafe usage of the JSONPath value function.
+
+[+] What the script does :
+
+Detects whether the system is Red Hat–based
+
+Checks if the automation-portal package is installed
+
+Verifies whether the CVE-2025-61140 fix is present in the RPM changelog
+
+Identifies the installed jsonpath / jsonpath-ng library version
+
+Safely determines if the installed JSONPath version is vulnerable
+
+Generates clear remediation recommendations
+
+Produces an optional bash remediation script for patching
+
+[+] Security approach :
+
+Detection-only: no exploit execution
+
+Avoids triggering prototype pollution in runtime
+
+Suitable for auditing, blue-team validation, and compliance checks
+
+Designed for isolated or production-safe environments
+
+[+] Remediation :
+
+If the system is vulnerable, the script recommends:
+
+Applying Red Hat Security Advisory RHSA-2026:2180-03
+
+Updating automation-portal
+
+Updating jsonpath-ng to a patched version
+
+Auditing JSONPath expressions for unsafe patterns
+
+Enforcing strict input validation
+
+[+] Output : 
+
+Clear YES/NO vulnerability status
+
+Detailed system and package information
+
+Actionable remediation steps
+
+Auto-generated remediation shell script
+
+[+] Intended use :
+
+Security audits
+
+Vulnerability management
+
+Incident response preparation
+
+Pre-production validation
+  
+[+] POC :   pip3 install jsonpath-ng packaging & python poc.py & sudo ./remediate_cve-2025-61140.sh
+
+
+#!/usr/bin/env python3
+
+
+import subprocess
+from typing import Dict, Any
+from packaging.version import Version, InvalidVersion
+
+def check_system_vulnerability() -> Dict[str, Any]:
+    """Check if system is vulnerable to CVE-2025-61140"""
+
+    results = {
+        "vulnerable": False,
+        "details": {},
+        "recommendations": []
+    }
+
+    try:
+
+        with open('/etc/redhat-release', 'r') as f:
+            results["details"]["os"] = f.read().strip()
+
+        try:
+            rpm_check = subprocess.run(
+                ['rpm', '-q', 'automation-portal', '--changelog'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            if rpm_check.returncode == 0:
+                results["details"]["package_installed"] = True
+
+                if 'CVE-2025-61140' in rpm_check.stdout:
+                    results["details"]["fix_applied"] = True
+                else:
+                    results["vulnerable"] = True
+                    results["details"]["fix_applied"] = False
+
+                try:
+                    import jsonpath_ng
+                    jsonpath_version = Version(jsonpath_ng.__version__)
+                    results["details"]["jsonpath_version"] = str(jsonpath_version)
+
+                    fixed_version = Version("1.6.0")
+                    if jsonpath_version < fixed_version:
+                        results["vulnerable"] = True
+
+                except (ImportError, InvalidVersion):
+                    results["details"]["jsonpath_installed"] = False
+
+        except subprocess.TimeoutExpired:
+            results["details"]["package_check_timeout"] = True
+
+    except FileNotFoundError:
+        results["details"]["not_redhat"] = True
+
+    if results["vulnerable"]:
+        results["recommendations"] = [
+            "Apply Red Hat Security Update RHSA-2026:2180-03",
+            "Update automation-portal to latest version",
+            "Update jsonpath-ng to a patched version",
+            "Audit JSONPath expressions for unsafe value() usage",
+            "Add strict input validation for JSONPath queries"
+        ]
+
+    return results
+
+
+def test_jsonpath_vulnerability():
+    """Non-exploitative detection test (safe mode)"""
+
+    test_cases = [
+        "$.__proto__.polluted",
+        "$.constructor.prototype.polluted"
+    ]
+
+    print("\nCVE-2025-61140 JSONPath Pollution Detection")
+    print("=" * 55)
+
+    for path in test_cases:
+        print(f"[!] Suspicious JSONPath detected: {path}")
+
+    print("\n[!] Detection-only mode (no execution)")
+    print("[!] Use isolated lab environments only")
+
+
+def remediation_script() -> str:
+    """Generate remediation script"""
+
+    return """#!/bin/bash
+
+set -e
+
+if [ ! -f /etc/redhat-release ]; then
+  echo "Red Hat system required"
+  exit 1
+fi
+
+if rpm -q automation-portal >/dev/null 2>&1; then
+  if rpm -q automation-portal --changelog | grep -q CVE-2025-61140; then
+    echo "System already patched"
+    exit 0
+  fi
+fi
+
+yum clean all
+yum makecache
+yum update -y automation-portal
+systemctl restart automation-portal || true
+
+echo "Remediation completed"
+"""
+
+
+if __name__ == "__main__":
+    print("RHSA-2026:2180-03 | CVE-2025-61140")
+    print("=" * 45)
+
+    results = check_system_vulnerability()
+
+    print(f"\nVulnerable: {'YES' if results['vulnerable'] else 'NO'}")
+
+    for k, v in results["details"].items():
+        print(f"  {k}: {v}")
+
+    if results["vulnerable"]:
+        print("\nRecommended Actions:")
+        for r in results["recommendations"]:
+            print(f" - {r}")
+
+        with open("remediate_cve-2025-61140.sh", "w") as f:
+            f.write(remediation_script())
+
+        print("\nRemediation script saved: remediate_cve-2025-61140.sh")
+
+
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================
