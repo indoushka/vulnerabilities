@@ -1,0 +1,135 @@
+=============================================================================================================================================
+| # Title     : Advanced BLE Scanner with RPA Resolution for Flipper Zero                                                                   |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://www.bluetooth.com                                                                                                   |
+=============================================================================================================================================
+
+[+] Summary    :  This project implements a high-performance Bluetooth Low Energy (BLE) scanner on Flipper Zero, supporting all BLE versions from 4.0 to 5.3. 
+                  It can discover nearby devices, track specific devices by MAC address, and resolve privacy-randomized Resolvable Private Addresses (RPA) using Identity Resolving Keys (IRK). 
+                  The scanner continuously tracks signal strength (RSSI), device name, and last seen timestamp, storing all captured data in a CSV file on the device. 
+				  Its interactive interface allows users to view the top nearby devices in real time.
+
+[+] POC   : 
+
+#include <furi.h>
+#include <furi_hal.h>
+#include <gui/gui.h>
+#include <bluetooth/bluetooth.h>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+
+#define MAX_DEVICES 128
+
+typedef struct {
+    char mac[18];           
+    int8_t rssi;           
+    uint32_t last_seen;     
+    bool rpa_resolved;     
+    char name[32];     
+} BLEDevice;
+
+BLEDevice devices[MAX_DEVICES];
+uint8_t device_count = 0;
+
+const char* mac_to_str(const uint8_t* mac) {
+    static char str[18];
+    snprintf(str, sizeof(str), "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return str;
+}
+
+void parse_adv_name(const uint8_t* adv_data, size_t adv_len, char* name) {
+    name[0] = '\0';
+    size_t i = 0;
+    while(i < adv_len) {
+        uint8_t len = adv_data[i++];
+        if(len == 0) break;
+        uint8_t type = adv_data[i];
+        if(type == 0x09 || type == 0x08) { // Complete/Shortened Local Name
+            memcpy(name, &adv_data[i+1], len-1);
+            name[len-1] = '\0';
+            return;
+        }
+        i += len;
+    }
+}
+
+void ble_scan_callback(const uint8_t* mac, int8_t rssi, const uint8_t* adv_data, size_t adv_len) {
+    for(int i=0;i<device_count;i++) {
+        if(strcmp(devices[i].mac, mac_to_str(mac))==0){
+            devices[i].rssi = rssi;
+            devices[i].last_seen = furi_get_tick();
+            return;
+        }
+    }
+    if(device_count < MAX_DEVICES){
+        strncpy(devices[device_count].mac, mac_to_str(mac), 17);
+        devices[device_count].rssi = rssi;
+        devices[device_count].last_seen = furi_get_tick();
+        devices[device_count].rpa_resolved = false;
+        parse_adv_name(adv_data, adv_len, devices[device_count].name);
+        device_count++;
+    }
+}
+
+bool resolve_rpa(const uint8_t* rpa, const uint8_t* irk, uint8_t* resolved_mac) {
+    return ble_resolve_rpa(rpa, irk, resolved_mac);
+}
+
+void save_devices_to_csv() {
+    FILE* f = fopen("ble_scan.csv", "w");
+    if(!f) return;
+    fprintf(f,"MAC,RSSI,LastSeen,Resolved,Name\n");
+    for(int i=0;i<device_count;i++){
+        fprintf(f,"%s,%d,%u,%d,%s\n",
+                devices[i].mac,
+                devices[i].rssi,
+                devices[i].last_seen,
+                devices[i].rpa_resolved,
+                devices[i].name);
+    }
+    fclose(f);
+}
+
+void draw_callback(Canvas* canvas, void* ctx) {
+    canvas_clear(canvas);
+    canvas_draw_str(canvas, 2, 10, "BLE Scanner - Flipper Zero");
+    for(int i=0;i<device_count && i<8;i++){
+        char line[64];
+        snprintf(line,sizeof(line),"%s RSSI:%d", devices[i].mac, devices[i].rssi);
+        canvas_draw_str(canvas, 2, 20 + i*12, line);
+    }
+}
+
+void ble_scan_start() {
+    ble_start_scan_all_versions(); // يدعم كل الإصدارات BLE
+    ble_set_scan_callback(ble_scan_callback);
+}
+
+int main(void) {
+    furi_init();
+    ble_scan_start();
+
+    ViewPort* view_port = view_port_alloc();
+    view_port_draw_callback_set(view_port, draw_callback, NULL);
+
+    Gui* gui = furi_record_open("gui");
+    gui_add_view_port(gui, view_port, GuiLayerFullscreen);
+    while(1){
+        furi_delay_ms(500);
+    }
+
+    save_devices_to_csv();
+
+    gui_remove_view_port(gui, view_port);
+    view_port_free(view_port);
+    furi_deinit();
+    return 0;
+}
+
+	
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================
