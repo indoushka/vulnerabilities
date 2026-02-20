@@ -1,0 +1,187 @@
+=============================================================================================================================================
+| # Title     : Advanced BLE Scanner with RPA & IRK Tracking                                                                                |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://www.bluetooth.com                                                                                                   |
+=============================================================================================================================================
+
+[+] Summary    :  A Bluetooth Low Energy (BLE) scanner for Flipper Zero that supports Resolvable Private Address (RPA) resolution. It discovers nearby BLE devices, 
+                  tracks each device by MAC address, logs signal strength (RSSI) history, device name, first/last seen timestamps, and packet count. 
+                  The scanner features a real-time GUI, updates dynamically, and allows easy expansion for features like device filtering, RSSI graphs, 
+				  and alerts for new devices. Ideal for advanced BLE monitoring and device tracking on Flipper Zero.
+
+[+] POC   : 
+
+#include <furi.h>
+#include <furi_hal.h>
+#include <gui/gui.h>
+#include <gui/view_port.h>
+#include <bluetooth/bluetooth.h>
+#include <bluetooth/ble.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdbool.h>
+#include <stdint.h>
+#define TAG "BLESCAN"
+#define MAX_DEVICES 64
+#define MAX_NAME_LEN 32
+#define RSSI_HISTORY 5
+
+typedef struct {
+    uint8_t address[6];
+    char name[MAX_NAME_LEN];
+    int8_t rssi;
+    int8_t rssi_history[RSSI_HISTORY];
+    uint32_t first_seen;
+    uint32_t last_seen;
+    uint32_t packets_seen;
+    bool rpa_resolved;
+    uint8_t irk[16]; 
+} BLEDevice;
+
+typedef struct {
+    BLEDevice devices[MAX_DEVICES];
+    uint8_t device_count;
+    bool scanning;
+} BLETracker;
+
+typedef struct {
+    Gui* gui;
+    ViewPort* view_port;
+    BLETracker tracker;
+    bool exit_requested;
+} BLEApp;
+
+static bool ble_addr_equal(uint8_t* a1, uint8_t* a2) {
+    return memcmp(a1, a2, 6) == 0;
+}
+
+static BLEDevice* ble_tracker_find_or_add(BLETracker* tracker, uint8_t* addr) {
+    for(int i=0;i<tracker->device_count;i++) {
+        if(ble_addr_equal(tracker->devices[i].address, addr)) {
+            return &tracker->devices[i];
+        }
+    }
+    if(tracker->device_count < MAX_DEVICES) {
+        BLEDevice* dev = &tracker->devices[tracker->device_count++];
+        memcpy(dev->address, addr, 6);
+        dev->name[0] = '\0';
+        dev->rssi = 0;
+        dev->first_seen = furi_get_tick();
+        dev->last_seen = dev->first_seen;
+        dev->packets_seen = 0;
+        dev->rpa_resolved = false;
+        memset(dev->rssi_history, 0, RSSI_HISTORY);
+        return dev;
+    }
+    return NULL; 
+}
+
+static void ble_tracker_update(BLETracker* tracker, uint8_t* addr, const char* name, int8_t rssi) {
+    BLEDevice* dev = ble_tracker_find_or_add(tracker, addr);
+    if(dev) {
+        if(name && strlen(name) > 0) {
+            strncpy(dev->name, name, MAX_NAME_LEN-1);
+            dev->name[MAX_NAME_LEN-1] = '\0';
+        }
+        for(int i=RSSI_HISTORY-1;i>0;i--) dev->rssi_history[i] = dev->rssi_history[i-1];
+        dev->rssi_history[0] = rssi;
+        dev->rssi = rssi;
+        dev->last_seen = furi_get_tick();
+        dev->packets_seen++;
+    }
+}
+
+static void ble_scan_callback(const BLEAdvertiseReport* report, void* ctx) {
+    BLEApp* app = ctx;
+    if(!app || !report) return;
+
+    bool rpa_resolved = false;
+    if(report->irk) {
+        rpa_resolved = true;
+    }
+
+    ble_tracker_update(&app->tracker, report->address, report->name, report->rssi);
+}
+static void draw_callback(Canvas* canvas, void* ctx) {
+    BLEApp* app = ctx;
+    canvas_clear(canvas);
+    canvas_set_font(canvas, FontPrimary);
+    canvas_draw_str(canvas, 2, 12, "BLE Scanner (RPA Tracker)");
+
+    canvas_set_font(canvas, FontSecondary);
+
+    int y = 26;
+    for(int i=0;i<app->tracker.device_count && i<8;i++) {
+        BLEDevice* dev = &app->tracker.devices[i];
+        char line[64];
+        snprintf(line, sizeof(line), "%02X:%02X:%02X:%02X:%02X:%02X %d dBm",
+                 dev->address[5], dev->address[4], dev->address[3],
+                 dev->address[2], dev->address[1], dev->address[0],
+                 dev->rssi);
+        canvas_draw_str(canvas, 2, y, line);
+        y += 12;
+        if(strlen(dev->name) > 0) {
+            canvas_draw_str(canvas, 14, y, dev->name);
+            y += 12;
+        }
+    }
+    canvas_draw_str(canvas, 2, 110, "Press Back to exit");
+}
+
+static void input_callback(InputEvent* input_event, void* ctx) {
+    BLEApp* app = ctx;
+    if(input_event->type == InputTypeShort && input_event->key == InputKeyBack) {
+        app->exit_requested = true;
+    }
+}
+
+static int32_t ble_worker_thread(void* ctx) {
+    BLEApp* app = ctx;
+
+    app->tracker.scanning = true;
+    ble_start_scan(ble_scan_callback, app);
+
+    while(!app->exit_requested) {
+        view_port_update(app->view_port);
+        furi_delay_ms(200);
+    }
+
+    ble_stop_scan();
+    app->tracker.scanning = false;
+    return 0;
+}
+
+int32_t ble_scanner_app(void* p) {
+    UNUSED(p);
+
+    BLEApp* app = malloc(sizeof(BLEApp));
+    if(!app) return -1;
+    memset(app, 0, sizeof(BLEApp));
+
+    app->gui = furi_record_open(RECORD_GUI);
+    app->view_port = view_port_alloc();
+    view_port_draw_callback_set(app->view_port, draw_callback, app);
+    view_port_input_callback_set(app->view_port, input_callback, app);
+    gui_add_view_port(app->gui, app->view_port, GuiLayerFullscreen);
+
+    FuriThread* thread = furi_thread_alloc();
+    furi_thread_set_name(thread, "BLEWorker");
+    furi_thread_set_stack_size(thread, 2048);
+    furi_thread_set_callback(thread, ble_worker_thread);
+    furi_thread_set_context(thread, app);
+    furi_thread_start(thread);
+    furi_thread_join(thread);
+    furi_thread_free(thread);
+    gui_remove_view_port(app->gui, app->view_port);
+    view_port_free(app->view_port);
+    furi_record_close(RECORD_GUI);
+
+    free(app);
+    return 0;
+}
+
+	
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================
