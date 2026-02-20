@@ -1,0 +1,785 @@
+=============================================================================================================================================
+| # Title     : Low-Level Memory & Protection Analysis                                                                                      |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : No standalone download available                                                                                            |
+=============================================================================================================================================
+
+[+] Summary    :  This C-based educational framework demonstrates and analyzes low-level memory behavior and modern protection mechanisms on Linux systems (x86/ARM). 
+                  It provides a structured and well-documented environment for studying:
+
+Stack, heap, and code memory layout
+
+Structure padding and alignment (normal vs packed structs)
+
+Function pointer behavior and alignment risks
+
+Stack canary simulation and overflow detection
+
+NX (No-Execute) protection testing via mprotect
+
+ASLR address randomization observation
+
+Conceptual ROP chain construction (non-executable, educational model)
+
+Compiler optimization effects on stack layout
+
+The program includes:
+
+Architecture detection (32-bit vs 64-bit)
+
+Compile-time size verification using _Static_assert
+
+Safe input handling with strtol validation
+
+Careful error handling (errno, sysconf)
+
+Warnings about undefined and implementation-defined behavior
+
+[+] Important: The ROP demonstration and overflow examples are intentionally non-functional and strictly educational. 
+               The framework does not perform real exploitation but illustrates how protection mechanisms interact at a systems level.
+
+[+] POC : Compilation:  gcc -o exploit.c -Wall -Wextra -O2 -std=c11
+
+
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <inttypes.h>
+#include <sys/mman.h>
+#include <setjmp.h>
+#include <errno.h>
+#include <time.h>
+#include <ctype.h>
+#ifdef __OPTIMIZE__
+#define OPTIMIZATION_STATUS "Enabled"
+#else
+#define OPTIMIZATION_STATUS "Disabled"
+#endif
+
+#if INTPTR_MAX == INT64_MAX
+#define PTR_SIZE_64 1
+#define PTR_SIZE_32 0
+#elif INTPTR_MAX == INT32_MAX
+#define PTR_SIZE_64 0
+#define PTR_SIZE_32 1
+#else
+#error "Unsupported pointer size - this code only supports 32-bit and 64-bit"
+#endif
+#if !defined(__x86_64__) && !defined(__i386__) && !defined(__aarch64__) && !defined(__arm__)
+#error "This code is designed for x86/ARM architectures only - for educational use"
+#endif
+
+static size_t get_page_size(void) {
+    long size;
+
+    errno = 0;
+    size = sysconf(_SC_PAGESIZE);
+    
+    if (size <= 0) {
+
+        if (errno != 0) {
+            fprintf(stderr, "Warning: sysconf failed with errno=%d\n", errno);
+        }
+
+        return 4096;
+    }
+    return (size_t)size;
+}
+
+static int is_power_of_two(size_t x) {
+    return x != 0 && (x & (x - 1)) == 0;
+}
+
+int main(int argc, char **argv);
+void analyze_memory_layout(void);
+void analyze_stack_protector(void);
+void test_protection_mechanisms(void);
+void demonstrate_adjacent_corruption_accurate(void);
+void demonstrate_real_rop(void);
+int get_safe_choice(int default_choice);
+long get_safe_long(const char *str);
+
+#define RED     "\x1b[31m"
+#define GREEN   "\x1b[32m"
+#define YELLOW  "\x1b[33m"
+#define BLUE    "\x1b[34m"
+#define MAGENTA "\x1b[35m"
+#define CYAN    "\x1b[36m"
+#define BOLD    "\x1b[1m"
+#define RESET   "\x1b[0m"
+
+#define BUFFER_SIZE 64
+
+static size_t page_size = 0;
+
+typedef struct {
+    char buffer[BUFFER_SIZE];     
+    uint32_t sensitive_flag;       
+#if PTR_SIZE_64
+
+    void (*function_ptr)(void*);    
+#else
+
+    void (*function_ptr)(void*);    
+#endif
+} NormalStruct;
+
+typedef struct __attribute__((packed)) {
+    char buffer[BUFFER_SIZE];       
+    uint32_t sensitive_flag;       
+    uint32_t padding_field;          
+    void (*function_ptr)(void*);     
+    uint32_t canary_check;           
+    uint32_t reserved;             
+} PackedStruct;
+
+
+#if PTR_SIZE_64
+
+    _Static_assert(sizeof(PackedStruct) == 88, 
+                   "PackedStruct size should be 88 bytes on 64-bit");
+#else
+
+    _Static_assert(sizeof(PackedStruct) == 84, 
+                   "PackedStruct size should be 84 bytes on 32-bit");
+#endif
+
+#if PTR_SIZE_64
+    _Static_assert(sizeof(NormalStruct) == 80, 
+                   "NormalStruct size should be 80 bytes on 64-bit");
+#else
+    _Static_assert(sizeof(NormalStruct) == 72, 
+                   "NormalStruct size should be 72 bytes on 32-bit");
+#endif
+
+typedef struct {
+    uintptr_t pop_rdi;        // 8 bytes on 64-bit, 4 bytes on 32-bit
+    uintptr_t arg1;
+    uintptr_t pop_rsi;
+    uintptr_t arg2;
+    uintptr_t pop_rdx;
+    uintptr_t arg3;
+    uintptr_t pop_rax;
+    uintptr_t syscall_num;
+    uintptr_t syscall_insn;
+} ROPChain;
+
+_Static_assert(sizeof(ROPChain) == 9 * sizeof(uintptr_t), 
+               "ROPChain size should be 9 * sizeof(uintptr_t)");
+
+void normal_callback(void *data) {
+    (void)data;
+    printf(GREEN "[*] Executing normal function\n" RESET);
+}
+
+void malicious_callback(void *data) {
+    (void)data;
+    printf(RED BOLD "\n[!] Malicious function called!\n" RESET);
+}
+
+typedef struct {
+    uint64_t canary_value;
+    jmp_buf env;
+    int canary_triggered;
+    int canary_set;
+} CanarySimulator;
+
+int init_canary_simulator(CanarySimulator *sim) {
+    FILE *urandom = fopen("/dev/urandom", "r");
+    size_t bytes_read;
+    
+    if (urandom) {
+        bytes_read = fread(&sim->canary_value, sizeof(sim->canary_value), 1, urandom);
+        fclose(urandom);
+        
+        if (bytes_read != 1) {
+            // Safe fallback
+            sim->canary_value = (uint64_t)(uintptr_t)sim ^ (uint64_t)(uintptr_t)&sim;
+            sim->canary_value ^= (uint64_t)time(NULL);
+        }
+    } else {
+        // Safe fallback if /dev/urandom doesn't exist
+        sim->canary_value = (uint64_t)(uintptr_t)sim ^ (uint64_t)(uintptr_t)&sim;
+        sim->canary_value ^= (uint64_t)time(NULL);
+    }
+    
+    sim->canary_triggered = 0;
+    sim->canary_set = 1;
+    return 0;
+}
+
+void check_canary(CanarySimulator *sim, uint64_t actual_value) {
+    if (!sim->canary_set) return;
+    
+    if (actual_value != sim->canary_value) {
+        printf(RED "\n[!] Canary modification detected! __stack_chk_fail\n" RESET);
+        sim->canary_triggered = 1;
+        longjmp(sim->env, 1);
+    }
+}
+
+__attribute__((noinline))
+void safe_function_with_canary(char *user_input, size_t input_size, 
+                               CanarySimulator *sim) {
+
+    volatile uint64_t local_canary = sim->canary_value;
+    char local_buffer[BUFFER_SIZE];
+    
+    printf(YELLOW "\n[*] Executing function with simulated canary:\n" RESET);
+    printf("    canary value: 0x%016" PRIx64 "\n", local_canary);
+    printf("    local_buffer at: %p\n", (void*)local_buffer);
+    printf("    local_canary at: %p\n", (void*)&local_canary);
+    
+    printf(YELLOW "\n  Warning: Variable order on stack is not guaranteed\n" RESET);
+    printf("    - Compiler may reorder local_buffer and local_canary\n");
+    printf("    - May put canary in register instead of stack with -O2\n");
+    printf("    - This test is educational only and does not represent consistent behavior\n\n");
+    
+    if (setjmp(sim->env) == 0) {
+        if (input_size <= BUFFER_SIZE) {
+            memcpy(local_buffer, user_input, input_size);
+            printf(GREEN "     Safe copy (%zu <= %d)\n" RESET, input_size, BUFFER_SIZE);
+        } else {
+            printf(RED "      Unsafe copy attempt: memcpy with size %zu\n" RESET, input_size);
+            memcpy(local_buffer, user_input, input_size);
+        }
+        
+        check_canary(sim, local_canary);
+        printf(GREEN "    Canary intact, safe return\n" RESET);
+    } else {
+        printf(RED "    Overflow intercepted by canary\n" RESET);
+    }
+}
+
+#ifdef __x86_64__
+__attribute__((noinline))
+uintptr_t get_return_address_safe(int depth) {
+    uintptr_t ret_addr = 0;
+
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wframe-address"
+    
+    if (depth == 0) {
+        ret_addr = (uintptr_t)__builtin_return_address(0);
+        if (ret_addr == 0) {
+            printf(YELLOW "    Warning: __builtin_return_address(0) returned NULL\n" RESET);
+        }
+    } 
+#ifdef __OPTIMIZE__
+    else {
+        printf(YELLOW "    Warning: __builtin_return_address(%d) unsafe with optimizations\n" RESET, depth);
+        printf("    - With -fomit-frame-pointer, value may be inaccurate\n");
+    }
+#else
+    else if (depth == 1) {
+
+        ret_addr = (uintptr_t)__builtin_return_address(1);
+    }
+#endif
+    
+    #pragma GCC diagnostic pop
+    
+    return ret_addr;
+}
+#else
+uintptr_t get_return_address_safe(int depth) {
+    (void)depth;
+    return 0;
+}
+#endif
+
+long get_safe_long(const char *str) {
+    char *endptr;
+    long val;
+    
+    if (str == NULL || *str == '\0') {
+        return 0;
+    }
+    
+    errno = 0;
+    val = strtol(str, &endptr, 10);
+
+    if (errno != 0 || endptr == str) {
+        return 0;
+    }
+
+    while (isspace((unsigned char)*endptr)) {
+        endptr++;
+    }
+
+    if (*endptr != '\0') {
+        return 0;
+    }
+    
+    return val;
+}
+
+void analyze_memory_layout(void) {
+    printf(CYAN "\n══════════════════════════════════════════════\n" RESET);
+    printf(CYAN BOLD "Precise Memory Layout Analysis\n" RESET);
+    printf(CYAN "══════════════════════════════════════════════\n" RESET);
+    
+    int local_var = 0x41424344;
+    void *heap_ptr = malloc(32);
+    
+    if (!heap_ptr) {
+        printf(RED "Memory allocation failed\n" RESET);
+        return;
+    }
+    
+    printf(YELLOW "\n[*] Actual memory addresses:\n" RESET);
+    printf("    - Code (text): %p\n", (void*)analyze_memory_layout);
+    printf("    - Stack: %p\n", (void*)&local_var);
+    printf("    - Heap: %p\n", heap_ptr);
+    printf("    - Libraries (libc): %p\n", (void*)printf);
+    
+    printf(YELLOW "\n[*] Stack Frame Analysis (x86-64):\n" RESET);
+    printf("    High addresses\n");
+    printf("    ┌─────────────────────┐\n");
+    printf("    │ Arguments           │ ← [RBP+16], [RBP+24], ...\n");
+    printf("    ├─────────────────────┤\n");
+    printf("    │ Return Address      │ ← [RBP+8]\n");
+    printf("    ├─────────────────────┤\n");
+    printf("    │ Saved RBP           │ ← [RBP]\n");
+    printf("    ├─────────────────────┤\n");
+    printf("    │ Local Variables     │ ← [RBP-8], [RBP-16], ...\n");
+    printf("    └─────────────────────┘\n");
+    printf("    Low addresses\n");
+    printf(YELLOW "\n[*] NormalStruct size calculation:\n" RESET);
+#if PTR_SIZE_64
+    printf("    64-bit system:\n");
+    printf("    char buffer[64];        // 64 bytes\n");
+    printf("    uint32_t flag;          // 4  bytes\n");
+    printf("    // automatic padding:    // 4  bytes (for pointer alignment)\n");
+    printf("    void (*fptr)(void*);    // 8  bytes\n");
+    printf("    " BOLD "Total: 80 bytes\n" RESET);
+#else
+    printf("    32-bit system:\n");
+    printf("    char buffer[64];        // 64 bytes\n");
+    printf("    uint32_t flag;          // 4  bytes\n");
+    printf("    // automatic padding:    // 0  bytes (4-byte alignment)\n");
+    printf("    void (*fptr)(void*);    // 4  bytes\n");
+    printf("    " BOLD "Total: 72 bytes\n" RESET);
+#endif
+
+    printf(YELLOW "\n[*] PackedStruct size calculation:\n" RESET);
+#if PTR_SIZE_64
+    printf("    64-bit system:\n");
+    printf("    char buffer[64];        // 64 bytes\n");
+    printf("    uint32_t flag;          // 4  bytes\n");
+    printf("    uint32_t padding;       // 4  bytes\n");
+    printf("    void (*fptr)(void*);    // 8  bytes\n");
+    printf("    uint32_t canary;        // 4  bytes\n");
+    printf("    uint32_t reserved;      // 4  bytes\n");
+    printf("    " BOLD "Total: 88 bytes\n" RESET);
+#else
+    printf("    32-bit system:\n");
+    printf("    char buffer[64];        // 64 bytes\n");
+    printf("    uint32_t flag;          // 4  bytes\n");
+    printf("    uint32_t padding;       // 4  bytes\n");
+    printf("    void (*fptr)(void*);    // 4  bytes\n");
+    printf("    uint32_t canary;        // 4  bytes\n");
+    printf("    uint32_t reserved;      // 4  bytes\n");
+    printf("    " BOLD "Total: 84 bytes\n" RESET);
+#endif
+
+    #if defined(__arm__) || defined(__aarch64__)
+    printf(RED BOLD "\n  ARM Architecture Specific Warning:\n" RESET);
+    printf("    - packed struct violates ARM alignment requirements\n");
+    printf("    - Function pointer in packed struct:\n");
+    printf("      * On ARM32: requires 4-byte alignment\n");
+    printf("      * On ARM64: requires 8-byte alignment\n");
+    printf("      * Access via memcpy is safe\n");
+    printf("      * Direct function pointer call may cause:\n");
+    printf("        > Alignment fault on older systems\n");
+    printf("        > Slower performance on modern systems\n");
+    printf("        > SIGBUS in some cases\n");
+    printf("    - Even reading the pointer from packed struct may be unaligned\n");
+    printf("    - Safe solution: use memcpy to copy pointer to aligned variable\n\n");
+    #endif
+    
+    free(heap_ptr);
+}
+
+void analyze_stack_protector(void) {
+    printf(CYAN "\n══════════════════════════════════════════════\n" RESET);
+    printf(CYAN BOLD "Real Stack Protector Analysis\n" RESET);
+    printf(CYAN "══════════════════════════════════════════════\n" RESET);
+    
+    printf(YELLOW "\n[*] How Stack Protector works in GCC:\n" RESET);
+    printf("    1. At function start, canary is placed from TLS:\n");
+    printf("       mov    rax, QWORD PTR fs:0x28\n");
+    printf("       mov    QWORD PTR [rbp-0x8], rax\n\n");
+    
+    printf("    2. Before return, verification is done:\n");
+    printf("       mov    rdx, QWORD PTR [rbp-0x8]\n");
+    printf("       sub    rdx, QWORD PTR fs:0x28\n");
+    printf("       je     1f\n");
+    printf("       call   __stack_chk_fail\n");
+    printf("     1: leave\n");
+    printf("       ret\n\n");
+}
+
+uintptr_t estimate_libc_base(void) {
+    static uintptr_t cached_base = 0;
+    
+    if (cached_base != 0) return cached_base;
+    
+    uintptr_t printf_addr = (uintptr_t)&printf;
+    
+    printf(RED BOLD "\n  Important Warning:\n" RESET);
+    printf(YELLOW "   This is a very rough estimate and may be completely wrong!\n" RESET);
+    printf("   Reasons:\n");
+    printf("   - ASLR changes addresses on every run\n");
+    printf("   - Different libc versions have different offsets\n");
+    printf("   - The 0x5e000 constant is an inaccurate default\n");
+    printf("   - This address cannot be used for actual execution\n\n");
+    printf("   In real exploitation you need to:\n");
+    printf("   1. Leak a real libc address (e.g., via format string)\n");
+    printf("   2. Use known libc offset to calculate base\n");
+    printf("   3. Build ROP chain based on leaked address\n\n");
+
+    cached_base = printf_addr - 0x5e000;
+    
+    printf("   Estimated libc base: %p\n", (void*)cached_base);
+    printf("   printf address: %p\n", (void*)printf_addr);
+    printf("   (These addresses are for explanation only - do not use in real exploitation)\n");
+    
+    return cached_base;
+}
+
+void demonstrate_real_rop(void) {
+    printf(CYAN "\n══════════════════════════════════════════════\n" RESET);
+    printf(CYAN BOLD "Practical ROP Chain Execution\n" RESET);
+    printf(CYAN "══════════════════════════════════════════════\n" RESET);
+
+    uintptr_t libc_base = estimate_libc_base();
+    
+    printf(YELLOW "\n[*] Building ROP chain to call execve:\n" RESET);
+
+    ROPChain chain;
+    memset(&chain, 0, sizeof(chain));
+
+    chain.pop_rdi = libc_base + 0x23b6a;
+    chain.arg1 = (uintptr_t)"/bin/sh";
+    chain.pop_rsi = libc_base + 0x2601f;
+    chain.arg2 = 0;
+    chain.pop_rdx = libc_base + 0x142c96;
+    chain.arg3 = 0;
+    chain.pop_rax = libc_base + 0x36174;
+    chain.syscall_num = 59;  // execve syscall number
+    chain.syscall_insn = libc_base + 0x128ac0;
+    
+    printf("\n    ROP chain in memory (theoretical representation only):\n");
+    printf("    [0x00] pop rdi; ret      ← %p\n", (void*)chain.pop_rdi);
+    printf("    [0x%02x] \"/bin/sh\"        ← %p (string)\n", 
+           (unsigned int)sizeof(uintptr_t), (void*)chain.arg1);
+    printf("    [0x%02x] pop rsi; ret      ← %p\n", 
+           2 * (unsigned int)sizeof(uintptr_t), (void*)chain.pop_rsi);
+    printf("    [0x%02x] 0x0                ← NULL\n", 
+           3 * (unsigned int)sizeof(uintptr_t));
+    printf("    [0x%02x] pop rdx; ret      ← %p\n", 
+           4 * (unsigned int)sizeof(uintptr_t), (void*)chain.pop_rdx);
+    printf("    [0x%02x] 0x0                ← NULL\n", 
+           5 * (unsigned int)sizeof(uintptr_t));
+    printf("    [0x%02x] pop rax; ret      ← %p\n", 
+           6 * (unsigned int)sizeof(uintptr_t), (void*)chain.pop_rax);
+    printf("    [0x%02x] 0x3b               ← execve syscall\n", 
+           7 * (unsigned int)sizeof(uintptr_t));
+    printf("    [0x%02x] syscall; ret      ← %p\n", 
+           8 * (unsigned int)sizeof(uintptr_t), (void*)chain.syscall_insn);
+    
+    printf(RED BOLD "\n This chain is not actually executable for the following reasons:\n" RESET);
+    printf("   1. It is not placed on the stack\n");
+    printf("   2. Return address is not modified\n");
+    printf("   3. No stack pivot is performed\n");
+    printf("   4. Addresses are estimates and inaccurate\n\n");
+    
+    printf(GREEN "   This is just an educational model to illustrate ROP chain structure\n" RESET);
+}
+
+void safe_overwrite_packed_struct(PackedStruct *target, uint32_t new_flag, 
+                                   void *new_func, uint32_t new_canary) {
+
+    memcpy(&target->sensitive_flag, &new_flag, sizeof(new_flag));   
+    void (*tmp_func_ptr)(void*) = new_func;
+    memcpy(&target->function_ptr, &tmp_func_ptr, sizeof(target->function_ptr));
+    memcpy(&target->canary_check, &new_canary, sizeof(new_canary));
+}
+
+void safe_call_packed_function(PackedStruct *ps) {
+
+    void (*aligned_func)(void*);
+    memcpy(&aligned_func, &ps->function_ptr, sizeof(ps->function_ptr));
+    
+    #if defined(__arm__) || defined(__aarch64__)
+    printf(YELLOW "    Note: Pointer copied using memcpy for safe ARM execution\n" RESET);
+    printf("    (Reading pointer from packed struct may be unaligned)\n");
+    #endif
+    
+    aligned_func(ps);
+}
+
+void demonstrate_adjacent_corruption_accurate(void) {
+    printf(BLUE "\n══════════════════════════════════════════════\n" RESET);
+    printf(BLUE BOLD "Accurate Model: Adjacent Field Corruption\n" RESET);
+    printf(BLUE "══════════════════════════════════════════════\n" RESET);
+    
+    // Use NormalStruct first
+    NormalStruct ns;
+    memset(&ns, 0, sizeof(ns));
+    ns.sensitive_flag = 0x12345678;
+    ns.function_ptr = normal_callback;
+    
+    printf(YELLOW "\n[*] NormalStruct (with padding):\n" RESET);
+    printf("    Structure size: %zu bytes\n", sizeof(NormalStruct));
+    printf("    sensitive_flag: 0x%x (offset %zu)\n", 
+           ns.sensitive_flag, offsetof(NormalStruct, sensitive_flag));
+    printf("    function_ptr: %p (offset %zu)\n", 
+           (void*)ns.function_ptr, offsetof(NormalStruct, function_ptr));
+
+    PackedStruct ps;
+    memset(&ps, 0, sizeof(ps));
+    ps.sensitive_flag = 0x12345678;
+    ps.function_ptr = normal_callback;
+    ps.canary_check = 0xDEADBEEF;
+    
+    printf(YELLOW "\n[*] PackedStruct (with packed):\n" RESET);
+    printf("    Structure size: %zu bytes\n", sizeof(PackedStruct));
+    printf("    Precise offsets:\n");
+    printf("    - buffer:       offset 0x%02zx\n", offsetof(PackedStruct, buffer));
+    printf("    - sensitive_flag: offset 0x%02zx\n", offsetof(PackedStruct, sensitive_flag));
+    printf("    - padding_field: offset 0x%02zx\n", offsetof(PackedStruct, padding_field));
+    printf("    - function_ptr: offset 0x%02zx\n", offsetof(PackedStruct, function_ptr));
+    printf("    - canary_check: offset 0x%02zx\n", offsetof(PackedStruct, canary_check));
+    printf("    - reserved:     offset 0x%02zx\n", offsetof(PackedStruct, reserved));
+
+    printf(YELLOW "\n[*] Modifying fields using safe_overwrite_packed_struct:\n" RESET);
+    printf("    (With standards-compliant void* to function pointer conversion)\n");
+    safe_overwrite_packed_struct(&ps, 0xBADF00D, malicious_callback, 0xC0FFEE);
+    
+    printf(GREEN "\n[*] After modification:\n" RESET);
+    printf("    sensitive_flag: 0x%x ", ps.sensitive_flag);
+    if (ps.sensitive_flag == 0xBADF00D) printf(RED "(Modified)\n" RESET);
+    
+    printf("    function_ptr: %p ", (void*)ps.function_ptr);
+    if (ps.function_ptr == malicious_callback) printf(RED "(Modified)\n" RESET);
+    
+    printf("    canary_check: 0x%x ", ps.canary_check);
+    if (ps.canary_check == 0xC0FFEE) printf(RED "(Modified)\n" RESET);
+
+    printf(YELLOW "\n[*] Calling function (safe method with memcpy):\n" RESET);
+    safe_call_packed_function(&ps);
+}
+
+void test_nx_protection(void) {
+    printf(YELLOW "\n[*] Testing NX (No-Execute):\n" RESET);
+    
+    int local_var = 0;
+
+    if (!is_power_of_two(page_size)) {
+        printf(RED " Error: Page size (%zu) is not a power of 2\n" RESET, page_size);
+        printf("    This is unexpected on modern systems\n");
+        return;
+    }
+    
+    uintptr_t page_start = (uintptr_t)&local_var & ~(page_size - 1);
+    
+    printf("    Stack page starts at: %p\n", (void*)page_start);
+    printf("    Page size: %zu bytes\n", page_size);
+    printf("    (Note: Page size is power of 2 ✓)\n");
+
+    errno = 0;
+    int ret = mprotect((void*)page_start, page_size, 
+                       PROT_READ | PROT_WRITE | PROT_EXEC);
+    
+    if (ret == 0) {
+        printf(RED "     Successfully made stack executable! (NX disabled)\n" RESET);
+    } else {
+        if (errno == EPERM) {
+            printf(GREEN "     Permission change failed (NX enabled) - EPERM\n" RESET);
+        } else if (errno == EACCES) {
+            printf(GREEN "     Permission change failed (EACCES)\n" RESET);
+        } else if (errno == EINVAL) {
+            printf(YELLOW "      Failed: Invalid parameters (EINVAL)\n" RESET);
+            printf("        - Page may not be page-aligned\n");
+            printf("        - Or size may be inappropriate\n");
+        } else if (errno == ENOMEM) {
+            printf(YELLOW "      Failed: Out of memory (ENOMEM)\n" RESET);
+            printf("        - Some systems prevent mprotect on stack\n");
+            printf("        - Or page is not changeable\n");
+        } else {
+            printf(YELLOW "  Failed with errno = %d (%s)\n" RESET, errno, strerror(errno));
+        }
+    }
+}
+
+void test_protection_mechanisms(void) {
+    printf(MAGENTA "\n══════════════════════════════════════════════\n" RESET);
+    printf(MAGENTA BOLD "Testing Protection Mechanisms\n" RESET);
+    printf(MAGENTA "══════════════════════════════════════════════\n" RESET);
+    
+    CanarySimulator sim;
+    if (init_canary_simulator(&sim) != 0) {
+        printf(RED "Failed to initialize canary simulator\n" RESET);
+        return;
+    }
+    
+    printf(YELLOW "\n[*] Test 1: Safe copy within bounds\n" RESET);
+    char safe_input[BUFFER_SIZE];
+    memset(safe_input, 'B', BUFFER_SIZE - 1);
+    safe_input[BUFFER_SIZE - 1] = '\0';
+    safe_function_with_canary(safe_input, BUFFER_SIZE, &sim);
+    
+    printf(YELLOW "\n[*] Test 2: Simple overflow (modify canary)\n" RESET);
+    char overflow_input[BUFFER_SIZE + 16];
+    memset(overflow_input, 'C', sizeof(overflow_input));
+    safe_function_with_canary(overflow_input, sizeof(overflow_input), &sim);
+    
+    printf(YELLOW "\n[*] Test 3: ASLR\n" RESET);
+    printf("    printf address: %p\n", (void*)printf);
+    printf("    malloc address: %p\n", (void*)malloc);
+    printf("    main address:   %p\n", (void*)main);
+    printf("    (These addresses change on every run with ASLR)\n");
+
+    test_nx_protection();
+}
+
+int get_safe_choice(int default_choice) {
+    char input[16];
+    long choice;
+    
+    printf("Choose a model (1-9) [default %d]: ", default_choice);
+    
+    if (fgets(input, sizeof(input), stdin) == NULL) {
+        return default_choice;
+    }
+    
+    input[strcspn(input, "\n")] = 0;
+    
+    if (input[0] == '\0') {
+        return default_choice;
+    }
+    
+    choice = get_safe_long(input);
+
+    if (choice < 1 || choice > 9) {
+        printf(YELLOW "Value out of range (1-9), using default %d\n" RESET, default_choice);
+        return default_choice;
+    }
+    
+    return (int)choice;
+}
+
+int main(int argc, char **argv) {
+
+    page_size = get_page_size();
+    
+    printf(RED BOLD "\n╔══════════════════════════════════════════════════════════╗\n" RESET);
+    printf(RED BOLD "║                      indoushka                           ║\n" RESET);
+    printf(RED BOLD "╚══════════════════════════════════════════════════════════╝\n" RESET);
+    
+    printf(YELLOW BOLD "\n Hacked:\n" RESET);
+    printf("Available models:\n");
+    printf("  [1] Precise Memory Layout Analysis (correct calculations)\n");
+    printf("  [2] Stack Protector Analysis\n");
+    printf("  [3] Simulated Canary Model\n");
+    printf("  [4] Adjacent Field Corruption (accurate)\n");
+    printf("  [5] Practical ROP Chain\n");
+    printf("  [6] Protection Mechanisms Test\n");
+    printf("  [7] System Information\n");
+    printf("  [8] Run All Models\n");
+    printf("  [9] Exit\n");
+    
+    int choice;
+    if (argc > 1) {
+        choice = (int)get_safe_long(argv[1]);
+        if (choice < 1 || choice > 9) {
+            choice = 8;
+        }
+    } else {
+        choice = get_safe_choice(8);
+    }
+    
+    switch(choice) {
+        case 1:
+            analyze_memory_layout();
+            break;
+        case 2:
+            analyze_stack_protector();
+            break;
+        case 3: {
+            CanarySimulator sim;
+            if (init_canary_simulator(&sim) == 0) {
+                char test[BUFFER_SIZE + 16];
+                memset(test, 'D', sizeof(test));
+                safe_function_with_canary(test, sizeof(test), &sim);
+            }
+            break;
+        }
+        case 4:
+            demonstrate_adjacent_corruption_accurate();
+            break;
+        case 5:
+            demonstrate_real_rop();
+            break;
+        case 6:
+            test_protection_mechanisms();
+            break;
+        case 7:
+            printf(YELLOW "\n[*] System Information:\n" RESET);
+            printf("    - Architecture: %s\n", 
+                   #if defined(__x86_64__)
+                   "x86_64"
+                   #elif defined(__i386__)
+                   "i386"
+                   #elif defined(__aarch64__)
+                   "ARM64"
+                   #elif defined(__arm__)
+                   "ARM"
+                   #else
+                   "unknown"
+                   #endif
+                   );
+            printf("    - Pointer size: %zu bytes\n", sizeof(void*));
+            printf("    - Page size: %zu bytes\n", page_size);
+            printf("    - Page size is power of 2: %s\n", 
+                   is_power_of_two(page_size) ? "Yes" : "No");
+            printf("    - Optimizations: %s\n", OPTIMIZATION_STATUS);
+            printf("    - Endianness: %s (for Unix-like environments)\n", 
+                   #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+                   "Little Endian"
+                   #elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+                   "Big Endian"
+                   #else
+                   "Unknown"
+                   #endif
+                   );
+            printf("    - NormalStruct size: %zu bytes\n", sizeof(NormalStruct));
+            printf("    - PackedStruct size: %zu bytes\n", sizeof(PackedStruct));
+            break;
+        case 8:
+            analyze_memory_layout();
+            analyze_stack_protector();
+            test_protection_mechanisms();
+            demonstrate_adjacent_corruption_accurate();
+            demonstrate_real_rop();
+            break;
+        case 9:
+            printf("Exiting...\n");
+            return 0;
+    }
+    
+    printf(GREEN BOLD "\n Completed successfully\n" RESET);
+    return 0;
+}
+	
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================

